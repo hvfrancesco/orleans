@@ -31,11 +31,13 @@ was decompiled or copied.
 | Raster engraving, dithering, fill/hatch | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
+| GUI job streaming: progress, stop, automatic idle wait | ✅ |
+| GUI pause/resume | ❌ |
 | Selection, transforms, node editing | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-58 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+60 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -102,13 +104,18 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   enabled when the controller is idle or in alarm, with the laser off;
 * long status silences (for example while a controller homes) do not drop the
   link, and if the WiFi bridge closes the socket the GUI retries and reports
-  **Reconnecting…** instead of going offline.
+  **Reconnecting…** instead of going offline;
+* **Send to laser** streams the current job with a progress bar and a per-job
+  Stop button (feed hold + soft reset). It is only enabled when the controller
+  is connected, idle and the laser is off; `Ctrl+Enter` opens the confirmation,
+  and `Enter` confirms it.
 
 The canvas shows the design geometry; kerf compensation is applied to the
 toolpath, so it affects the exported G-code and the statistics rather than the
-outline drawing, as in LightBurn. The GUI connects to the controller and can
-home, unlock and stop it, but it does not stream jobs yet: use `orleans run`
-from the CLI for cutting.
+outline drawing, as in LightBurn. Sending a job uses the current layer settings
+and starts from the machine's current work origin, so set that origin before
+pressing **Send to laser**. There is no pause/resume yet; **Stop** aborts the
+job, resets the controller and switches the laser off.
 
 ## Architecture
 
@@ -198,22 +205,22 @@ concept of a line and some bridges emit negotiation on connect.
 * Text in SVG needs a font database wired into `usvg::Options`; without it,
   text elements are dropped.
 * The simulator is protocol-level, not a motion model.
-* The GUI is a viewer with layer settings and machine control: no selection,
-  transforms or node editing, and it cannot stream a job yet.
+* The GUI has no selection, transforms or node editing, and no pause/resume
+  yet: stopping a job aborts it rather than pausing.
 * Large designs are redrawn as polylines every frame; a spatial index and
   level-of-detail rendering will be needed for very complex files.
 
 ## Roadmap
 
 1. **Finish the editor** — selection, transforms, node editing, undo, then
-   send jobs from the GUI with a confirmation step, progress and pause.
+   job history and pause/resume for the streaming panel.
 2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
 5. **Second driver** — Marlin, then Ruida over UDP.
-6. **Job control UI** — progress, overrides, pause/resume, framing/laser-off
-   preview, origin and rotary setup.
+6. **Job control extras** — feed/power overrides, pause/resume, framing and
+   laser-off preview, origin and rotary setup.
 
 ## License
 

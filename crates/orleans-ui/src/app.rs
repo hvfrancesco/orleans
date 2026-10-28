@@ -51,6 +51,7 @@ enum Action {
     Export,
     Reload,
     Fit,
+    Send,
 }
 
 pub struct OrleansApp {
@@ -76,6 +77,10 @@ pub struct OrleansApp {
     home_pending_until: Option<Instant>,
     confirm_home: bool,
     reconnect_attempt: u32,
+    job_running: bool,
+    job_done: usize,
+    job_total: usize,
+    confirm_send: bool,
 }
 
 impl OrleansApp {
@@ -105,6 +110,10 @@ impl OrleansApp {
             home_pending_until: None,
             confirm_home: false,
             reconnect_attempt: 0,
+            job_running: false,
+            job_done: 0,
+            job_total: 0,
+            confirm_send: false,
         };
         if let Some(path) = initial {
             app.load(path);
@@ -186,6 +195,8 @@ impl OrleansApp {
                     self.reconnect_attempt = 0;
                     self.machine_status = None;
                     self.home_pending_until = None;
+                    self.job_running = false;
+                    self.confirm_send = false;
                     match reason {
                         Some(reason) => self.set_status(reason, true),
                         None => self.set_status("disconnected", false),
@@ -198,11 +209,40 @@ impl OrleansApp {
                         }
                     }
                 }
+                MachineEvent::JobStarted(total) => {
+                    self.job_running = true;
+                    self.job_done = 0;
+                    self.job_total = total;
+                    self.confirm_send = false;
+                    self.set_status(format!("sending job ({total} lines)…"), false);
+                }
+                MachineEvent::JobProgress { done, total } => {
+                    self.job_done = done;
+                    self.job_total = total;
+                }
+                MachineEvent::JobDone(acks) => {
+                    self.job_running = false;
+                    self.job_done = acks;
+                    self.job_total = acks.max(self.job_total);
+                    self.set_status(format!("job complete: {acks} lines acknowledged"), false);
+                }
+                MachineEvent::JobStopped => {
+                    self.job_running = false;
+                    self.set_status(
+                        "job stopped; controller reset — re-zero before retrying",
+                        true,
+                    );
+                }
+                MachineEvent::JobFailed(reason) => {
+                    self.job_running = false;
+                    self.set_status(format!("job failed: {reason}"), true);
+                }
                 MachineEvent::Message { text, error } => self.set_status(text, error),
             }
         }
         if self.link != LinkState::Disconnected {
-            ctx.request_repaint_after(Duration::from_millis(250));
+            let interval = if self.job_running { 100 } else { 250 };
+            ctx.request_repaint_after(Duration::from_millis(interval));
         }
     }
 
@@ -219,6 +259,48 @@ impl OrleansApp {
             self.machine_status = None;
             self.confirm_home = false;
             self.set_status(format!("connecting to {endpoint}…"), false);
+        } else {
+            self.set_status("machine thread stopped", true);
+        }
+    }
+
+    fn can_send(&self) -> bool {
+        self.link == LinkState::Connected
+            && !self.job_running
+            && !self.doc.is_empty()
+            && !self
+                .home_pending_until
+                .map(|until| until > Instant::now())
+                .unwrap_or(false)
+            && self
+                .machine_status
+                .as_ref()
+                .map(|status| status.state == "Idle" && status.spindle.unwrap_or(0) == 0)
+                .unwrap_or(false)
+    }
+
+    fn send_job(&mut self) {
+        if !self.can_send() {
+            self.set_status(
+                "cannot send: connect to an idle controller with the laser off",
+                true,
+            );
+            return;
+        }
+        if self.dirty {
+            self.replan();
+            self.dirty = false;
+        }
+        if self.job.cuts().count() == 0 {
+            self.set_status("nothing to send: the job has no cuts", true);
+            return;
+        }
+        let program = gcode::write(&self.job, &self.gcode_opts);
+        if self.machine.run(&program) {
+            self.job_running = true;
+            self.job_done = 0;
+            self.job_total = 0;
+            self.set_status("sending job…", false);
         } else {
             self.set_status("machine thread stopped", true);
         }
@@ -285,7 +367,10 @@ impl OrleansApp {
                         }
                     }
                     LinkState::Connected => {
-                        if ui.button("Disconnect").clicked() {
+                        if ui
+                            .add_enabled(!self.job_running, egui::Button::new("Disconnect"))
+                            .clicked()
+                        {
                             self.disconnect_machine();
                         }
                     }
@@ -297,11 +382,25 @@ impl OrleansApp {
                     Some(status) => {
                         ui.horizontal(|ui| {
                             ui.label("State");
-                            ui.colored_label(
-                                state_color(&status.state),
-                                RichText::new(&status.state).strong(),
-                            );
+                            if self.job_running {
+                                ui.colored_label(
+                                    Color32::from_rgb(230, 190, 90),
+                                    RichText::new("Streaming").strong(),
+                                );
+                            } else {
+                                ui.colored_label(
+                                    state_color(&status.state),
+                                    RichText::new(&status.state).strong(),
+                                );
+                            }
                         });
+                        if self.job_running {
+                            ui.label(
+                                RichText::new("live status paused while sending")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
                         if let Some([x, y, z]) = status.mpos {
                             ui.monospace(format!("X {x:.2}   Y {y:.2}   Z {z:.2}"));
                         }
@@ -325,14 +424,53 @@ impl OrleansApp {
                     }
                 }
 
-                ui.separator();
-                ui.heading("Control");
                 let connected = self.link == LinkState::Connected;
                 let pending = self
                     .home_pending_until
                     .map(|until| until > Instant::now())
                     .unwrap_or(false);
+
+                ui.separator();
+                ui.heading("Job");
+                if self.job_running {
+                    let fraction = self.job_done as f32 / self.job_total.max(1) as f32;
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .show_percentage()
+                            .text(format!("{} / {}", self.job_done, self.job_total)),
+                    );
+                    ui.add_space(2.0);
+                }
+                let can_send = self.can_send();
+                let send_label = if self.job_running {
+                    "Sending…"
+                } else {
+                    "Send to laser"
+                };
+                if ui
+                    .add_enabled(can_send, egui::Button::new(send_label))
+                    .on_hover_text(
+                        "Stream the current job. The controller must be idle with the laser off.",
+                    )
+                    .clicked()
+                {
+                    self.confirm_send = true;
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "{} cuts · {:.1} mm · ~{}",
+                        self.job.cuts().count(),
+                        self.job.stats.cut_mm,
+                        format_duration(self.job.stats.seconds)
+                    ))
+                    .small()
+                    .weak(),
+                );
+
+                ui.separator();
+                ui.heading("Control");
                 let can_home = connected
+                    && !self.job_running
                     && !pending
                     && self
                         .machine_status
@@ -351,7 +489,10 @@ impl OrleansApp {
                     self.confirm_home = true;
                 }
                 if ui
-                    .add_enabled(connected, egui::Button::new("Unlock ($X)"))
+                    .add_enabled(
+                        connected && !self.job_running,
+                        egui::Button::new("Unlock ($X)"),
+                    )
                     .on_hover_text("Clear a GRBL alarm.")
                     .clicked()
                     && !self.machine.unlock()
@@ -366,7 +507,10 @@ impl OrleansApp {
                     .on_hover_text("Feed hold and soft reset; switches the laser off.")
                     .clicked()
                 {
-                    if !self.machine.stop() {
+                    if self.job_running {
+                        self.machine.stop_job();
+                        self.set_status("stopping job…", false);
+                    } else if !self.machine.stop() {
                         self.set_status("machine thread stopped", true);
                     }
                     self.home_pending_until = None;
@@ -405,6 +549,57 @@ impl OrleansApp {
                     }
                     if ui.button("Cancel").clicked() {
                         self.confirm_home = false;
+                    }
+                });
+            });
+    }
+
+    fn send_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_send {
+            return;
+        }
+        egui::Window::new("Send job to the laser?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                // Ignore Ctrl+Enter here: that is the shortcut that opened
+                // this dialog, and it must not also confirm it.
+                let enter = ui.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::Enter));
+                let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                let cuts = self.job.cuts().count();
+                let max_power = self
+                    .doc
+                    .layers
+                    .iter()
+                    .map(|layer| layer.cut.power)
+                    .fold(0.0, f64::max);
+                ui.label(format!(
+                    "{cuts} cuts · {:.1} mm of cutting · ~{}",
+                    self.job.stats.cut_mm,
+                    format_duration(self.job.stats.seconds)
+                ));
+                ui.label(format!(
+                    "{} layers · highest power {max_power:.0}% · max S {}",
+                    self.doc.layers.len(),
+                    self.gcode_opts.max_s
+                ));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "The machine will move and the laser will fire. Check the material, \
+                         focus and work origin first.",
+                    )
+                    .color(Color32::from_rgb(235, 190, 90)),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if enter || ui.button("Send").clicked() {
+                        self.send_job();
+                        self.confirm_send = false;
+                    }
+                    if escape || ui.button("Cancel").clicked() {
+                        self.confirm_send = false;
                     }
                 });
             });
@@ -893,6 +1088,9 @@ impl eframe::App for OrleansApp {
             if !i.modifiers.command && i.key_pressed(egui::Key::F) {
                 action = Some(Action::Fit);
             }
+            if i.modifiers.command && i.key_pressed(egui::Key::Enter) {
+                action = Some(Action::Send);
+            }
         });
 
         self.toolbar(ui, &mut action);
@@ -920,6 +1118,16 @@ impl eframe::App for OrleansApp {
                 }
             }
             Some(Action::Fit) => self.fit_pending = true,
+            Some(Action::Send) => {
+                if self.can_send() {
+                    self.confirm_send = true;
+                } else {
+                    self.set_status(
+                        "cannot send: connect to an idle controller with the laser off",
+                        true,
+                    );
+                }
+            }
             None => {}
         }
 
@@ -935,6 +1143,17 @@ impl eframe::App for OrleansApp {
         }
 
         self.home_dialog(&ctx);
+        self.send_dialog(&ctx);
+    }
+}
+
+impl Drop for OrleansApp {
+    fn drop(&mut self) {
+        // Closing the window during a cut must not leave the laser on.
+        if self.job_running {
+            self.machine.stop_job();
+            std::thread::sleep(Duration::from_millis(400));
+        }
     }
 }
 

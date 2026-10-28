@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::transport::Transport;
@@ -43,6 +44,8 @@ pub enum DriverError {
     Controller(String),
     #[error("controller did not respond within {0:?}")]
     Timeout(Duration),
+    #[error("job stopped")]
+    Stopped,
 }
 
 /// What a status probe found.
@@ -215,7 +218,8 @@ impl<T: Transport> GrblClient<T> {
         self.pending.push_back(line.len() + 1);
         self.in_flight += line.len() + 1;
         let mut last_response = Instant::now();
-        self.wait_ack(&mut last_response)
+        let never = AtomicBool::new(false);
+        self.wait_ack(&mut last_response, &never)
     }
 
     /// Stream a whole G-code program, respecting the receive window.
@@ -228,15 +232,26 @@ impl<T: Transport> GrblClient<T> {
 
     /// Like [`Self::run`], but calls `progress(acked, total)` after every
     /// acknowledgement, so a caller can show a progress indicator.
-    pub fn run_with_progress<F>(
+    pub fn run_with_progress<F>(&mut self, gcode: &str, progress: F) -> Result<usize, DriverError>
+    where
+        F: FnMut(usize, usize),
+    {
+        let never = AtomicBool::new(false);
+        self.run_controlled(gcode, progress, &never)
+    }
+
+    /// Like [`Self::run_with_progress`], but aborts if `stop` becomes true.
+    /// The machine is stopped and reset before the error is returned.
+    pub fn run_controlled<F>(
         &mut self,
         gcode: &str,
         mut progress: F,
+        stop: &AtomicBool,
     ) -> Result<usize, DriverError>
     where
         F: FnMut(usize, usize),
     {
-        match self.run_inner(gcode, &mut progress) {
+        match self.run_inner(gcode, &mut progress, stop) {
             Ok(acks) => Ok(acks),
             Err(err) => {
                 // Never leave the laser enabled after an aborted stream. A
@@ -249,7 +264,12 @@ impl<T: Transport> GrblClient<T> {
         }
     }
 
-    fn run_inner<F>(&mut self, gcode: &str, progress: &mut F) -> Result<usize, DriverError>
+    fn run_inner<F>(
+        &mut self,
+        gcode: &str,
+        progress: &mut F,
+        stop: &AtomicBool,
+    ) -> Result<usize, DriverError>
     where
         F: FnMut(usize, usize),
     {
@@ -261,8 +281,12 @@ impl<T: Transport> GrblClient<T> {
             .collect();
         let total = lines.len();
         let mut last_response = Instant::now();
+        progress(0, total);
 
         for line in lines {
+            if stop.load(Ordering::Relaxed) {
+                return Err(DriverError::Stopped);
+            }
             let bytes = line.len() + 1;
             if bytes > self.config.window {
                 return Err(DriverError::Controller(format!(
@@ -271,7 +295,7 @@ impl<T: Transport> GrblClient<T> {
                 )));
             }
             while self.in_flight + bytes > self.config.window {
-                self.wait_ack(&mut last_response)?;
+                self.wait_ack(&mut last_response, stop)?;
                 progress(self.acked, total);
             }
             self.transport.write_line(line)?;
@@ -280,7 +304,7 @@ impl<T: Transport> GrblClient<T> {
         }
 
         while self.in_flight > 0 {
-            self.wait_ack(&mut last_response)?;
+            self.wait_ack(&mut last_response, stop)?;
             progress(self.acked, total);
         }
         Ok(self.acked)
@@ -288,8 +312,15 @@ impl<T: Transport> GrblClient<T> {
 
     /// Wait for one `ok`. The timeout resets on every line received, so it
     /// measures controller silence rather than the length of the job.
-    fn wait_ack(&mut self, last_response: &mut Instant) -> Result<(), DriverError> {
+    fn wait_ack(
+        &mut self,
+        last_response: &mut Instant,
+        stop: &AtomicBool,
+    ) -> Result<(), DriverError> {
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return Err(DriverError::Stopped);
+            }
             if last_response.elapsed() > self.config.timeout {
                 return Err(DriverError::Timeout(self.config.timeout));
             }
@@ -464,6 +495,7 @@ mod tests {
     struct SlowAcks {
         pending: usize,
         last: Instant,
+        raw: Vec<u8>,
     }
 
     impl SlowAcks {
@@ -471,6 +503,7 @@ mod tests {
             Self {
                 pending: 0,
                 last: Instant::now(),
+                raw: Vec::new(),
             }
         }
     }
@@ -481,7 +514,8 @@ mod tests {
             Ok(())
         }
 
-        fn write_raw(&mut self, _bytes: &[u8]) -> io::Result<()> {
+        fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.raw.extend_from_slice(bytes);
             Ok(())
         }
 
@@ -514,6 +548,32 @@ mod tests {
             .run(&program)
             .expect("responsive job over the timeout");
         assert_eq!(acks, 20);
+    }
+
+    #[test]
+    fn stop_flag_aborts_streaming_and_resets() {
+        let mut client = GrblClient::with_config(
+            SlowAcks::new(),
+            GrblConfig {
+                window: 120,
+                timeout: Duration::from_secs(5),
+            },
+        );
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let program: String = (0..100).map(|i| format!("G0 X{i} Y0\n")).collect();
+        let err = client
+            .run_controlled(&program, |_, _| {}, &stop)
+            .expect_err("stop should abort the job");
+        stopper.join().expect("stopper");
+        assert!(matches!(err, DriverError::Stopped));
+        let raw = &client.transport().raw;
+        assert!(raw.contains(&b'!'), "missing feed hold: {raw:?}");
+        assert!(raw.contains(&0x18), "missing soft reset: {raw:?}");
     }
 
     #[test]

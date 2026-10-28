@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use orleans_driver::net::{parse_endpoint, TcpTransport};
-use orleans_driver::{GrblClient, GrblConfig, Transport};
+use orleans_driver::{DriverError, GrblClient, GrblConfig, Transport};
 
 /// Requests from the UI to the worker.
 pub enum Command {
@@ -20,6 +20,7 @@ pub enum Command {
     Home,
     Unlock,
     Stop,
+    Run(String),
 }
 
 /// Notifications from the worker to the UI.
@@ -31,6 +32,14 @@ pub enum Event {
     Disconnected(Option<String>),
     /// A raw `<...>` status report.
     Status(String),
+    JobStarted(usize),
+    JobProgress {
+        done: usize,
+        total: usize,
+    },
+    JobDone(usize),
+    JobStopped,
+    JobFailed(String),
     Message {
         text: String,
         error: bool,
@@ -44,6 +53,8 @@ pub struct Machine {
     rx: Receiver<Event>,
     /// Lets Disconnect interrupt a blocking connect/reconnect attempt.
     cancel: Arc<AtomicBool>,
+    /// Set to abort an in-progress job without waiting for the worker loop.
+    stream_stop: Arc<AtomicBool>,
 }
 
 impl Machine {
@@ -51,11 +62,18 @@ impl Machine {
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let stream_stop = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
+        let worker_stop = Arc::clone(&stream_stop);
         let _ = thread::Builder::new()
             .name("orleans-machine".to_owned())
-            .spawn(move || worker(commands, events, worker_cancel));
-        Self { tx, rx, cancel }
+            .spawn(move || worker(commands, events, worker_cancel, worker_stop));
+        Self {
+            tx,
+            rx,
+            cancel,
+            stream_stop,
+        }
     }
 
     pub fn connect(&self, endpoint: &str) -> bool {
@@ -80,12 +98,27 @@ impl Machine {
         self.tx.send(Command::Stop).is_ok()
     }
 
+    pub fn run(&self, program: &str) -> bool {
+        self.stream_stop.store(false, Ordering::Relaxed);
+        self.tx.send(Command::Run(program.to_owned())).is_ok()
+    }
+
+    /// Abort a running job. The driver sends feed hold and reset itself.
+    pub fn stop_job(&self) {
+        self.stream_stop.store(true, Ordering::Relaxed);
+    }
+
     pub fn try_recv(&self) -> Option<Event> {
         self.rx.try_recv().ok()
     }
 }
 
-fn worker(commands: Receiver<Command>, events: Sender<Event>, cancel: Arc<AtomicBool>) {
+fn worker(
+    commands: Receiver<Command>,
+    events: Sender<Event>,
+    cancel: Arc<AtomicBool>,
+    stream_stop: Arc<AtomicBool>,
+) {
     const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
     let mut client: Option<GrblClient<Box<dyn Transport>>> = None;
@@ -201,6 +234,43 @@ fn worker(commands: Receiver<Command>, events: Sender<Event>, cancel: Arc<Atomic
                 },
                 None => message(&events, "not connected", true),
             },
+            Ok(Command::Run(program)) => match client.as_mut() {
+                Some(connected) => {
+                    let total = program
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty() && !line.starts_with(';'))
+                        .count();
+                    let _ = events.send(Event::JobStarted(total));
+                    let result = connected.run_controlled(
+                        &program,
+                        |done, total| {
+                            let _ = events.send(Event::JobProgress { done, total });
+                        },
+                        &stream_stop,
+                    );
+                    match result {
+                        Ok(acks) => {
+                            let idle = wait_until_idle(connected, &events, &stream_stop);
+                            if idle {
+                                let _ = events.send(Event::JobDone(acks));
+                            } else {
+                                let _ = connected.stop();
+                                let _ = events.send(Event::JobStopped);
+                            }
+                        }
+                        Err(DriverError::Stopped) => {
+                            let _ = events.send(Event::JobStopped);
+                        }
+                        Err(err) => {
+                            let _ = events.send(Event::JobFailed(err.to_string()));
+                        }
+                    }
+                }
+                None => {
+                    let _ = events.send(Event::JobFailed("not connected".to_owned()));
+                }
+            },
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -293,6 +363,34 @@ fn connect(
             ))
         }
     }
+}
+
+/// GRBL acknowledges lines when they enter the planner, which can be ahead of
+/// the actual motion. Wait for an `Idle` status before declaring a job done.
+/// Returns false if the user asked to stop while the last moves finish.
+fn wait_until_idle(
+    connected: &mut GrblClient<Box<dyn Transport>>,
+    events: &Sender<Event>,
+    stop: &AtomicBool,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        let _ = connected.request_status();
+        if let Ok(lines) = connected.collect_for(Duration::from_millis(200)) {
+            for line in lines.iter().filter(|line| line.starts_with('<')) {
+                let _ = events.send(Event::Status(line.clone()));
+                if let Some(status) = Status::parse(line) {
+                    if status.state == "Idle" {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 fn message(events: &Sender<Event>, text: impl Into<String>, error: bool) {
@@ -523,6 +621,58 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(resumed, "status did not resume after homing");
+
+        drop(machine);
+        let _ = server.join();
+    }
+
+    #[test]
+    fn worker_streams_a_job_and_reports_progress() {
+        let (port, commands, server) = spawn_controller(None);
+        let machine = Machine::spawn();
+        assert!(machine.connect(&format!("tcp://127.0.0.1:{port}")));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut connected = false;
+        while Instant::now() < deadline && !connected {
+            while let Some(event) = machine.try_recv() {
+                match event {
+                    Event::Connected(_) => connected = true,
+                    Event::Disconnected(reason) => panic!("disconnected: {reason:?}"),
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(connected);
+
+        assert!(machine.run("G0 X1\nG0 X2\n"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut done = None;
+        let mut saw_progress = false;
+        while Instant::now() < deadline && done.is_none() {
+            while let Some(event) = machine.try_recv() {
+                match event {
+                    Event::JobProgress { .. } => saw_progress = true,
+                    Event::JobDone(lines) => done = Some(lines),
+                    Event::JobFailed(reason) => panic!("job failed: {reason}"),
+                    Event::Disconnected(reason) => panic!("disconnected: {reason:?}"),
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(done, Some(2));
+        assert!(saw_progress);
+
+        let mut received = Vec::new();
+        while received.len() < 2 {
+            let command = commands
+                .recv_timeout(Duration::from_secs(2))
+                .expect("streamed command");
+            received.push(command);
+        }
+        assert_eq!(received, ["G0 X1", "G0 X2"]);
 
         drop(machine);
         let _ = server.join();
