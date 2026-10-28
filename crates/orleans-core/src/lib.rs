@@ -98,6 +98,8 @@ pub struct RasterImage {
     pub y: f64,
     pub width_mm: f64,
     pub height_mm: f64,
+    /// Rotation around the image centre, in degrees.
+    pub angle: f64,
     pub mode: RasterMode,
     /// Darkness threshold, 0..=255.
     pub threshold: u8,
@@ -109,13 +111,37 @@ pub struct RasterImage {
 }
 
 impl RasterImage {
+    pub fn center(&self) -> Point {
+        Point::new(self.x + self.width_mm * 0.5, self.y + self.height_mm * 0.5)
+    }
+
+    /// Corners in top-left, top-right, bottom-right, bottom-left order.
+    pub fn corners(&self) -> [Point; 4] {
+        let center = self.center();
+        let (sin, cos) = self.angle.to_radians().sin_cos();
+        let rotate = |x: f64, y: f64| {
+            let dx = x - center.x;
+            let dy = y - center.y;
+            Point::new(
+                center.x + dx * cos - dy * sin,
+                center.y + dx * sin + dy * cos,
+            )
+        };
+        [
+            rotate(self.x, self.y + self.height_mm),
+            rotate(self.x + self.width_mm, self.y + self.height_mm),
+            rotate(self.x + self.width_mm, self.y),
+            rotate(self.x, self.y),
+        ]
+    }
+
     pub fn bounds(&self) -> Rect {
-        Rect::new(
-            self.x,
-            self.y,
-            self.x + self.width_mm,
-            self.y + self.height_mm,
-        )
+        let corners = self.corners();
+        let mut rect = Rect::new(corners[0].x, corners[0].y, corners[0].x, corners[0].y);
+        for corner in &corners[1..] {
+            rect = rect.union(Rect::new(corner.x, corner.y, corner.x, corner.y));
+        }
+        rect
     }
 
     pub fn pixel(&self, x: u32, y: u32) -> u8 {

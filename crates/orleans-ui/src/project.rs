@@ -117,6 +117,8 @@ pub struct RasterSettings {
     pub y: f64,
     pub width_mm: f64,
     pub height_mm: f64,
+    #[serde(default)]
+    pub angle: f64,
     pub mode: String,
     pub threshold: u8,
     pub invert: bool,
@@ -134,6 +136,7 @@ impl RasterSettings {
             y: image.y,
             width_mm: image.width_mm,
             height_mm: image.height_mm,
+            angle: image.angle,
             mode: match image.mode {
                 RasterMode::Threshold => "Threshold",
                 RasterMode::Dither => "Dither",
@@ -163,6 +166,7 @@ impl RasterSettings {
             y: self.y,
             width_mm: self.width_mm,
             height_mm: self.height_mm,
+            angle: self.angle,
             mode: if self.mode.eq_ignore_ascii_case("dither") {
                 RasterMode::Dither
             } else if self.mode.eq_ignore_ascii_case("grayscale") {
@@ -495,6 +499,7 @@ mod tests {
             y: 2.0,
             width_mm: 10.0,
             height_mm: 5.0,
+            angle: 30.0,
             mode: orleans_core::RasterMode::Dither,
             threshold: 100,
             invert: true,
@@ -527,6 +532,7 @@ mod tests {
         assert_eq!(raster.mode, orleans_core::RasterMode::Dither);
         assert!(raster.invert);
         assert!((raster.width_mm - 10.0).abs() < 1e-9);
+        assert!((raster.angle - 30.0).abs() < 1e-9);
         assert!((loaded.width - 20.0).abs() < 1e-9);
     }
 

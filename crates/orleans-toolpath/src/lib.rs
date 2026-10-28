@@ -269,8 +269,8 @@ fn plan_raster(
             runs.reverse();
         }
         for (first, end, params) in runs {
-            let mut start = Point::new(raster.x + f64::from(first) * pixel_width, y);
-            let mut finish = Point::new(raster.x + f64::from(end) * pixel_width, y);
+            let mut start = raster_point(raster, raster.x + f64::from(first) * pixel_width, y);
+            let mut finish = raster_point(raster, raster.x + f64::from(end) * pixel_width, y);
             if raster.bidirectional && row_index % 2 == 1 {
                 std::mem::swap(&mut start, &mut finish);
             }
@@ -295,6 +295,17 @@ fn plan_raster(
             }
         }
     }
+}
+
+fn raster_point(raster: &RasterImage, x: f64, y: f64) -> Point {
+    let center = raster.center();
+    let (sin, cos) = raster.angle.to_radians().sin_cos();
+    let dx = x - center.x;
+    let dy = y - center.y;
+    Point::new(
+        center.x + dx * cos - dy * sin,
+        center.y + dx * sin + dy * cos,
+    )
 }
 
 fn darkness(raster: &RasterImage, x: u32, y: u32) -> f32 {
@@ -513,6 +524,7 @@ mod tests {
             y: 0.0,
             width_mm: 4.0,
             height_mm: 2.0,
+            angle: 0.0,
             mode,
             threshold: 128,
             invert: false,
@@ -544,6 +556,17 @@ mod tests {
         let cuts: Vec<_> = job.cuts().collect();
         assert!(!cuts.is_empty());
         assert!(cuts.iter().any(|(_, params, _)| params.power < 50.0));
+    }
+
+    #[test]
+    fn raster_angle_rotates_scan_lines() {
+        let mut doc = raster_doc(RasterMode::Threshold, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+        doc.layers[0].raster.as_mut().expect("raster").angle = 90.0;
+        let job = plan(&doc, &PlanOptions::default());
+        for (polyline, _, _) in job.cuts() {
+            assert!((polyline[0].x - polyline[1].x).abs() < 1e-9);
+            assert!((polyline[0].y - polyline[1].y).abs() > 0.5);
+        }
     }
 
     #[test]

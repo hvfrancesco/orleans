@@ -180,6 +180,8 @@ pub struct OrleansApp {
     node_drag: Option<NodeDrag>,
     node_snap: bool,
     edited_paths: BTreeSet<(usize, String)>,
+    raster_textures: BTreeMap<usize, egui::TextureHandle>,
+    raster_texture_keys: BTreeMap<usize, (u32, u32, bool, [u8; 3])>,
     job: Job,
     path: Option<PathBuf>,
     view: Viewport,
@@ -251,6 +253,8 @@ impl OrleansApp {
             node_drag: None,
             node_snap: false,
             edited_paths: BTreeSet::new(),
+            raster_textures: BTreeMap::new(),
+            raster_texture_keys: BTreeMap::new(),
             job: Job::default(),
             path: None,
             view: Viewport::default(),
@@ -325,6 +329,8 @@ impl OrleansApp {
                 self.selected_node = None;
                 self.node_drag = None;
                 self.edited_paths.clear();
+                self.raster_textures.clear();
+                self.raster_texture_keys.clear();
                 self.replan();
                 self.status = Status::ok(format!(
                     "{}: {} layers, {} shapes, {} contours",
@@ -376,6 +382,8 @@ impl OrleansApp {
                 self.selected_node = None;
                 self.node_drag = None;
                 self.edited_paths.clear();
+                self.raster_textures.clear();
+                self.raster_texture_keys.clear();
                 self.replan();
                 let (width, height) = self
                     .doc
@@ -480,6 +488,8 @@ impl OrleansApp {
             .iter()
             .map(|edited| (edited.layer, edited.shape.clone()))
             .collect();
+        self.raster_textures.clear();
+        self.raster_texture_keys.clear();
         self.plan_opts.kerf = project.kerf;
         self.plan_opts.optimize = project.optimize;
         self.gcode_opts.laser_mode = project.laser_mode();
@@ -1080,6 +1090,45 @@ impl OrleansApp {
         self.transform_dy = 0.0;
         let count = self.selected_shapes.len();
         self.set_status(format!("moved {count} shape(s)"), false);
+    }
+
+    fn ensure_raster_textures(&mut self, ctx: &egui::Context) {
+        let mut keep = BTreeSet::new();
+        for layer in &self.doc.layers {
+            let Some(raster) = &layer.raster else {
+                continue;
+            };
+            keep.insert(layer.index);
+            let key = (raster.width, raster.height, raster.invert, layer.color);
+            if self.raster_texture_keys.get(&layer.index) == Some(&key) {
+                continue;
+            }
+            if raster.grayscale.len() != (raster.width * raster.height) as usize {
+                continue;
+            }
+            let color = display_color(layer.color);
+            let pixels = raster
+                .grayscale
+                .iter()
+                .map(|&value| {
+                    let darkness = if raster.invert { value } else { 255 - value };
+                    let alpha = (f32::from(darkness) * 0.38).round().clamp(0.0, 255.0) as u8;
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+                })
+                .collect();
+            let image =
+                egui::ColorImage::new([raster.width as usize, raster.height as usize], pixels);
+            let texture = ctx.load_texture(
+                format!("raster-{}", layer.index),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            self.raster_textures.insert(layer.index, texture);
+            self.raster_texture_keys.insert(layer.index, key);
+        }
+        self.raster_textures.retain(|index, _| keep.contains(index));
+        self.raster_texture_keys
+            .retain(|index, _| keep.contains(index));
     }
 
     fn sync_move_target(&mut self) {
@@ -2467,14 +2516,34 @@ impl OrleansApp {
                                 .changed();
                         });
                         if let Some(raster) = layer.raster.as_mut() {
-                            ui.label(
-                                RichText::new(format!(
-                                    "Raster image · {}×{} px",
-                                    raster.width, raster.height
-                                ))
-                                .small()
-                                .weak(),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Raster image · {}×{} px",
+                                        raster.width, raster.height
+                                    ))
+                                    .small()
+                                    .weak(),
+                                );
+                                let mut dpi = f64::from(raster.width) / raster.width_mm * 25.4;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut dpi)
+                                            .speed(1.0)
+                                            .range(36.0..=1200.0)
+                                            .suffix(" dpi"),
+                                    )
+                                    .on_hover_text(
+                                        "Pixel resolution; changing it scales both dimensions",
+                                    )
+                                    .changed()
+                                {
+                                    let dpi = dpi.clamp(1.0, 10_000.0);
+                                    raster.width_mm = f64::from(raster.width) / dpi * 25.4;
+                                    raster.height_mm = f64::from(raster.height) / dpi * 25.4;
+                                    changed = true;
+                                }
+                            });
                             ui.horizontal(|ui| {
                                 ui.label("Raster");
                                 egui::ComboBox::from_id_salt("raster-mode")
@@ -2528,6 +2597,16 @@ impl OrleansApp {
                                             .suffix(" mm"),
                                     )
                                     .on_hover_text("Distance between raster scan lines")
+                                    .changed();
+                                ui.label("Angle");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut raster.angle)
+                                            .speed(1.0)
+                                            .range(-180.0..=180.0)
+                                            .suffix("°"),
+                                    )
+                                    .on_hover_text("Rotate the image around its centre")
                                     .changed();
                                 changed |= ui
                                     .checkbox(&mut raster.invert, "Invert")
@@ -3313,20 +3392,44 @@ impl OrleansApp {
                 }
             }
             if let Some(raster) = &layer.raster {
-                let rect = Rect::from_two_pos(
-                    self.view
-                        .world_to_screen(area, Point::new(raster.x, raster.y)),
-                    self.view.world_to_screen(
-                        area,
-                        Point::new(raster.x + raster.width_mm, raster.y + raster.height_mm),
-                    ),
-                );
-                painter.rect_stroke(
-                    rect,
-                    0.0,
+                if let Some(texture) = self.raster_textures.get(&layer.index) {
+                    let corners = raster.corners();
+                    let points = corners.map(|point| self.view.world_to_screen(area, point));
+                    let mut mesh = egui::Mesh::with_texture(texture.id());
+                    mesh.vertices = vec![
+                        egui::epaint::Vertex {
+                            pos: points[0],
+                            uv: egui::Pos2::new(0.0, 0.0),
+                            color: Color32::WHITE,
+                        },
+                        egui::epaint::Vertex {
+                            pos: points[1],
+                            uv: egui::Pos2::new(1.0, 0.0),
+                            color: Color32::WHITE,
+                        },
+                        egui::epaint::Vertex {
+                            pos: points[2],
+                            uv: egui::Pos2::new(1.0, 1.0),
+                            color: Color32::WHITE,
+                        },
+                        egui::epaint::Vertex {
+                            pos: points[3],
+                            uv: egui::Pos2::new(0.0, 1.0),
+                            color: Color32::WHITE,
+                        },
+                    ];
+                    mesh.indices = vec![0, 1, 2, 0, 2, 3];
+                    painter.add(egui::Shape::mesh(mesh));
+                }
+                let border_points: Vec<Pos2> = raster
+                    .corners()
+                    .iter()
+                    .map(|point| self.view.world_to_screen(area, *point))
+                    .collect();
+                painter.add(egui::Shape::closed_line(
+                    border_points.clone(),
                     Stroke::new(1.0, color.gamma_multiply(0.8)),
-                    StrokeKind::Inside,
-                );
+                ));
                 if layer.output {
                     for op in &self.job.ops {
                         let Op::Cut {
@@ -3354,7 +3457,7 @@ impl OrleansApp {
                     }
                 } else {
                     painter.text(
-                        rect.left_top() + egui::vec2(4.0, 2.0),
+                        border_points[0] + egui::vec2(4.0, 2.0),
                         egui::Align2::LEFT_TOP,
                         "image · not cut",
                         egui::FontId::proportional(10.0),
@@ -3727,6 +3830,7 @@ impl eframe::App for OrleansApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.pump_machine(&ctx);
+        self.ensure_raster_textures(&ctx);
 
         if self.dirty {
             self.replan();

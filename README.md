@@ -47,7 +47,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-117 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+118 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -119,9 +119,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   optional **Holes** setting for inner contours;
 * **Open…** also accepts PNG/JPEG/BMP images. An image opens as a raster layer
   with threshold, Floyd–Steinberg dithering or grayscale power levels, plus
-  line interval, invert, alternate rows, position and physical size. Opening an
-  image replaces the current design. Raster scan lines are horizontal; use a
-  separate vector layer for outlines;
+  line interval, angle, invert, alternate rows, position, physical size and
+  DPI. The 96 DPI import size is only a starting point; size and DPI can be
+  changed after import. Opening an image replaces the current design. The
+  raster is shown as a translucent image with engraving scanlines over it; use
+  a separate vector layer for outlines;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
   (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
@@ -293,9 +295,10 @@ concept of a line and some bridges emit negotiation on connect.
   a separate Line layer/colour if you need both. It supports scanline hatching
   of closed contours with even-odd holes; cross-hatch and offset fill are not
   implemented yet.
-* Raster import assumes 96 DPI and scans horizontally; image rotation/angle and
-  more dithering algorithms are not implemented. Raster layers with Cut disabled
-  show only a boundary placeholder; enable Cut to see the engraved scan lines.
+* Raster import starts at 96 DPI but size and DPI can be changed after import;
+  scan lines rotate with the image angle. More dithering algorithms and direct
+  canvas manipulation of raster layers are not implemented yet. Raster layers
+  with Cut disabled show the image preview but not the engraving scan lines.
   Select raster layers from the layer list; canvas hit-testing remains vector-only.
 * Tabs are distributed evenly by arc length and start at the contour seam; there
   is no manual tab placement yet.
@@ -314,8 +317,8 @@ concept of a line and some bridges emit negotiation on connect.
    node-editing refinements such as join/break and snapping to geometry.
 2. **Fill refinements and manual tabs** — cross-hatch, offset fill and
    manual tab placement.
-3. **Raster refinements** — image rotation/angle, richer previews and more
-   dithering algorithms.
+3. **Raster refinements** — more dithering algorithms and direct canvas
+   manipulation of raster layers.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
 5. **Second driver** — Marlin, then Ruida over UDP.
 6. **Job control extras** — feed/power overrides, rotary setup.

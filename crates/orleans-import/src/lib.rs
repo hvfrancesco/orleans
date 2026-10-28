@@ -98,6 +98,7 @@ pub fn import_image(data: &[u8], dpi: f64) -> Result<Document, ImportError> {
         y: 0.0,
         width_mm,
         height_mm,
+        angle: 0.0,
         mode: RasterMode::Threshold,
         threshold: 128,
         invert: false,
