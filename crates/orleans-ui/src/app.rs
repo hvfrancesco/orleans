@@ -86,6 +86,7 @@ pub struct OrleansApp {
     jog_pending_until: Option<Instant>,
     homing: bool,
     saw_home: bool,
+    frame_job: bool,
 }
 
 impl OrleansApp {
@@ -124,6 +125,7 @@ impl OrleansApp {
             jog_pending_until: None,
             homing: false,
             saw_home: false,
+            frame_job: false,
         };
         if let Some(path) = initial {
             app.load(path);
@@ -216,6 +218,7 @@ impl OrleansApp {
                     self.homing = false;
                     self.saw_home = false;
                     self.job_running = false;
+                    self.frame_job = false;
                     self.confirm_send = false;
                     match reason {
                         Some(reason) => self.set_status(reason, true),
@@ -243,7 +246,11 @@ impl OrleansApp {
                     self.job_done = 0;
                     self.job_total = total;
                     self.confirm_send = false;
-                    self.set_status(format!("sending job ({total} lines)…"), false);
+                    if self.frame_job {
+                        self.set_status("framing job bounds (laser off)…", false);
+                    } else {
+                        self.set_status(format!("sending job ({total} lines)…"), false);
+                    }
                 }
                 MachineEvent::JobProgress { done, total } => {
                     self.job_done = done;
@@ -253,18 +260,33 @@ impl OrleansApp {
                     self.job_running = false;
                     self.job_done = acks;
                     self.job_total = acks.max(self.job_total);
-                    self.set_status(format!("job complete: {acks} lines acknowledged"), false);
+                    if self.frame_job {
+                        self.set_status("framing complete", false);
+                    } else {
+                        self.set_status(format!("job complete: {acks} lines acknowledged"), false);
+                    }
+                    self.frame_job = false;
                 }
                 MachineEvent::JobStopped => {
                     self.job_running = false;
-                    self.set_status(
-                        "job stopped; controller reset — re-zero before retrying",
-                        true,
-                    );
+                    if self.frame_job {
+                        self.set_status("framing stopped", true);
+                    } else {
+                        self.set_status(
+                            "job stopped; controller reset — re-zero before retrying",
+                            true,
+                        );
+                    }
+                    self.frame_job = false;
                 }
                 MachineEvent::JobFailed(reason) => {
                     self.job_running = false;
-                    self.set_status(format!("job failed: {reason}"), true);
+                    if self.frame_job {
+                        self.set_status(format!("framing failed: {reason}"), true);
+                    } else {
+                        self.set_status(format!("job failed: {reason}"), true);
+                    }
+                    self.frame_job = false;
                 }
                 MachineEvent::Message { text, error } => self.set_status(text, error),
             }
@@ -328,9 +350,34 @@ impl OrleansApp {
         let program = gcode::write(&self.job, &self.gcode_opts);
         if self.machine.run(&program) {
             self.job_running = true;
+            self.frame_job = false;
             self.job_done = 0;
             self.job_total = 0;
             self.set_status("sending job…", false);
+        } else {
+            self.set_status("machine thread stopped", true);
+        }
+    }
+
+    fn start_frame(&mut self) {
+        if !self.can_send() {
+            self.set_status(
+                "cannot frame: connect to an idle controller with the laser off",
+                true,
+            );
+            return;
+        }
+        let Some(bounds) = self.doc.bounds() else {
+            self.set_status("nothing to frame", true);
+            return;
+        };
+        let program = frame_program(bounds, FRAME_FEED);
+        if self.machine.run(&program) {
+            self.job_running = true;
+            self.frame_job = true;
+            self.job_done = 0;
+            self.job_total = 0;
+            self.set_status("framing job bounds (laser off)…", false);
         } else {
             self.set_status("machine thread stopped", true);
         }
@@ -413,9 +460,14 @@ impl OrleansApp {
                         ui.horizontal(|ui| {
                             ui.label("State");
                             if self.job_running {
+                                let label = if self.frame_job {
+                                    "Framing"
+                                } else {
+                                    "Streaming"
+                                };
                                 ui.colored_label(
                                     Color32::from_rgb(230, 190, 90),
-                                    RichText::new("Streaming").strong(),
+                                    RichText::new(label).strong(),
                                 );
                             } else {
                                 ui.colored_label(
@@ -425,11 +477,12 @@ impl OrleansApp {
                             }
                         });
                         if self.job_running {
-                            ui.label(
-                                RichText::new("live status paused while sending")
-                                    .small()
-                                    .weak(),
-                            );
+                            let note = if self.frame_job {
+                                "live status paused while framing"
+                            } else {
+                                "live status paused while sending"
+                            };
+                            ui.label(RichText::new(note).small().weak());
                         }
                         if let Some([x, y, z]) = status.work_position().or(status.mpos) {
                             let label = if status.work_position().is_some() {
@@ -586,19 +639,33 @@ impl OrleansApp {
                 }
                 let can_send = self.can_send();
                 let send_label = if self.job_running {
-                    "Sending…"
+                    if self.frame_job {
+                        "Framing…"
+                    } else {
+                        "Sending…"
+                    }
                 } else {
                     "Send to laser"
                 };
-                if ui
-                    .add_enabled(can_send, egui::Button::new(send_label))
-                    .on_hover_text(
-                        "Stream the current job. The controller must be idle with the laser off.",
-                    )
-                    .clicked()
-                {
-                    self.confirm_send = true;
-                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_send, egui::Button::new(send_label))
+                        .on_hover_text(
+                            "Stream the current job. The controller must be idle \
+                             with the laser off.",
+                        )
+                        .clicked()
+                    {
+                        self.confirm_send = true;
+                    }
+                    if ui
+                        .add_enabled(can_send, egui::Button::new("Frame"))
+                        .on_hover_text("Trace the job bounds at 3000 mm/min with the laser off.")
+                        .clicked()
+                    {
+                        self.start_frame();
+                    }
+                });
                 ui.label(
                     RichText::new(format!(
                         "{} cuts · {:.1} mm · ~{}",
@@ -1156,6 +1223,21 @@ impl OrleansApp {
 /// Layer colours come from the SVG, and black is common. On a dark canvas the
 /// original colour would be invisible, so lift dark colours toward white while
 /// keeping their hue. Bright or saturated colours are left untouched.
+const FRAME_FEED: f64 = 3000.0;
+
+/// A short absolute program that traces the job bounds with the laser off.
+fn frame_program(bounds: kurbo::Rect, feed: f64) -> String {
+    let (x0, y0, x1, y1) = (bounds.x0, bounds.y0, bounds.x1, bounds.y1);
+    format!(
+        "; frame (laser off)\nG21\nG90\nM5\n\
+         G0 X{x0:.3} Y{y0:.3}\n\
+         G1 X{x1:.3} Y{y0:.3} F{feed:.0}\n\
+         G1 X{x1:.3} Y{y1:.3}\n\
+         G1 X{x0:.3} Y{y1:.3}\n\
+         G1 X{x0:.3} Y{y0:.3}\nM5\n"
+    )
+}
+
 fn state_color(state: &str) -> Color32 {
     if state.starts_with("Alarm") || state.starts_with("Door") {
         Color32::from_rgb(235, 100, 90)
@@ -1323,6 +1405,18 @@ mod tests {
         // Bright or saturated colours are untouched.
         assert_eq!(display_color([255, 0, 0]), Color32::from_rgb(255, 0, 0));
         assert_eq!(display_color([0, 0, 255]), Color32::from_rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn frame_program_traces_bounds_without_firing() {
+        let program = frame_program(kurbo::Rect::new(1.0, 2.0, 30.0, 40.0), 3000.0);
+        assert!(program.starts_with("; frame (laser off)\nG21\nG90\nM5\n"));
+        assert!(program.contains("G0 X1.000 Y2.000"));
+        assert!(program.contains("G1 X30.000 Y2.000 F3000"));
+        assert!(program.contains("G1 X30.000 Y40.000"));
+        assert!(program.contains("G1 X1.000 Y40.000"));
+        assert!(program.trim_end().ends_with("G1 X1.000 Y2.000\nM5"));
+        assert_eq!(program.matches("M5").count(), 2);
     }
 
     #[test]

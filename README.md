@@ -32,13 +32,14 @@ was decompiled or copied.
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
+| GUI laser-off framing pass | ✅ |
 | GUI jog (X/Y) and set work zero (`G92`) | ✅ |
 | GUI pause/resume | ❌ |
 | Selection, transforms, node editing | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-62 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+63 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -114,14 +115,19 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 * **Send to laser** streams the current job with a progress bar and a per-job
   Stop button (feed hold + soft reset). It is only enabled when the controller
   is connected, idle and the laser is off; `Ctrl+Enter` opens the confirmation,
-  and `Enter` confirms it.
+  and `Enter` confirms it;
+* **Frame** traces the job bounds at 3000 mm/min with the laser off, so you can
+  check placement before committing to a cut.
 
 The canvas shows the design geometry; kerf compensation is applied to the
 toolpath, so it affects the exported G-code and the statistics rather than the
 outline drawing, as in LightBurn. Sending a job uses the current layer settings
 and starts from the machine's current work origin, so set that origin before
 pressing **Send to laser**. There is no pause/resume yet; **Stop** aborts the
-job, resets the controller and switches the laser off.
+job, resets the controller and switches the laser off. Pause is deliberately
+deferred: a plain GRBL feed hold can leave an `M3` laser enabled while the head
+is stationary, so a safe pause needs M4/`$32` verification or a pause at layer
+boundaries.
 
 ## Architecture
 
@@ -212,7 +218,9 @@ concept of a line and some bridges emit negotiation on connect.
   text elements are dropped.
 * The simulator is protocol-level, not a motion model.
 * The GUI has no selection, transforms or node editing, and no pause/resume
-  yet: stopping a job aborts it rather than pausing.
+  yet: a plain feed hold can leave an `M3` laser burning in place, so stopping
+  a job aborts it rather than pausing. Framing uses a fixed 3000 mm/min and the
+  design bounds, with no margin setting.
 * Work zero uses a temporary `G92` offset, not a stored G54 offset: a soft
   reset, Stop or controller reconnect after a reset clears it.
 * Large designs are redrawn as polylines every frame; a spatial index and
@@ -227,8 +235,8 @@ concept of a line and some bridges emit negotiation on connect.
    PWM mapping, run-length output.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
 5. **Second driver** — Marlin, then Ruida over UDP.
-6. **Job control extras** — feed/power overrides, pause/resume, framing and
-   laser-off preview, origin and rotary setup.
+6. **Job control extras** — feed/power overrides, a laser-safe pause/resume,
+   stored work offsets, rotary setup.
 
 ## License
 
