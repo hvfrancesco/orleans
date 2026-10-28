@@ -357,18 +357,26 @@ fn plan_raster(
     if !interval.is_finite() || interval <= 1e-6 {
         return;
     }
-    let rows = ((raster.height_mm / interval).ceil() as usize).min(1_000_000);
-    let dither = if raster.mode == RasterMode::Dither {
-        Some(dither_map(raster))
-    } else {
-        None
-    };
+    let (crop_x, crop_y, crop_w, crop_h) = raster.crop_bounds();
+    if crop_w == 0 || crop_h == 0 {
+        return;
+    }
     let pixel_width = raster.width_mm / f64::from(raster.width);
+    let pixel_height = raster.height_mm / f64::from(raster.height);
+    let crop_top = raster.y + f64::from(raster.height - crop_y) * pixel_height;
+    let crop_bottom = raster.y + f64::from(raster.height - (crop_y + crop_h)) * pixel_height;
+    let rows = (((crop_top - crop_bottom) / interval).ceil() as usize).min(1_000_000);
+    let dither = match raster.mode {
+        RasterMode::Dither => Some(dither_map(raster)),
+        RasterMode::Atkinson => Some(atkinson_map(raster)),
+        RasterMode::Bayer => Some(bayer_map(raster)),
+        _ => None,
+    };
     let threshold = f32::from(raster.threshold);
 
     for row_index in 0..rows {
-        let y = raster.y + (row_index as f64 + 0.5) * interval;
-        if y >= raster.y + raster.height_mm {
+        let y = crop_bottom + (row_index as f64 + 0.5) * interval;
+        if y >= crop_top {
             continue;
         }
         let from_bottom = ((y - raster.y) / raster.height_mm * f64::from(raster.height))
@@ -377,9 +385,12 @@ fn plan_raster(
         let source_row = raster.height - 1 - from_bottom;
         let mut runs: Vec<(u32, u32, Option<CutParams>)> = Vec::new();
         match raster.mode {
-            RasterMode::Threshold | RasterMode::Dither => {
+            RasterMode::Threshold
+            | RasterMode::Dither
+            | RasterMode::Atkinson
+            | RasterMode::Bayer => {
                 let mut start = None;
-                for x in 0..raster.width {
+                for x in crop_x..crop_x + crop_w {
                     let active = if let Some(map) = &dither {
                         map[(source_row * raster.width + x) as usize] != 0
                     } else {
@@ -395,13 +406,13 @@ fn plan_raster(
                     }
                 }
                 if let Some(first) = start {
-                    runs.push((first, raster.width, None));
+                    runs.push((first, crop_x + crop_w, None));
                 }
             }
             RasterMode::Grayscale => {
                 let mut start = None;
                 let mut level = 0u8;
-                for x in 0..raster.width {
+                for x in crop_x..crop_x + crop_w {
                     let current = grayscale_level(darkness(raster, x, source_row));
                     let active = current > 0;
                     if active {
@@ -425,7 +436,7 @@ fn plan_raster(
                 }
                 if let Some(first) = start {
                     if level > 0 {
-                        runs.push((first, raster.width, Some(power_for_level(layer, level))));
+                        runs.push((first, crop_x + crop_w, Some(power_for_level(layer, level))));
                     }
                 }
             }
@@ -528,6 +539,59 @@ fn dither_map(raster: &RasterImage) -> Vec<u8> {
                 if let Some(target) = at(x as isize + dx, y as isize + dy, width, height) {
                     work[target] += error * weight / 16.0;
                 }
+            }
+        }
+    }
+    out
+}
+
+fn atkinson_map(raster: &RasterImage) -> Vec<u8> {
+    let width = raster.width as usize;
+    let height = raster.height as usize;
+    let mut work: Vec<f32> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .map(|(x, y)| darkness(raster, x as u32, y as u32))
+        .collect();
+    let mut out = vec![0u8; work.len()];
+    let threshold = f32::from(raster.threshold);
+    let index_of = |x: isize, y: isize| -> Option<usize> {
+        if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
+            Some(y as usize * width + x as usize)
+        } else {
+            None
+        }
+    };
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let old = work[index];
+            let new = if old >= threshold { 255.0 } else { 0.0 };
+            let error = old - new;
+            if new > 0.0 {
+                out[index] = 255;
+            }
+            work[index] = new;
+            for (dx, dy) in [(1isize, 0isize), (2, 0), (-1, 1), (0, 1), (1, 1), (0, 2)] {
+                if let Some(target) = index_of(x as isize + dx, y as isize + dy) {
+                    work[target] += error / 8.0;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn bayer_map(raster: &RasterImage) -> Vec<u8> {
+    const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    let width = raster.width as usize;
+    let height = raster.height as usize;
+    let bias = 128.0 - f32::from(raster.threshold);
+    let mut out = vec![0u8; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let threshold = (f32::from(BAYER[y % 4][x % 4]) + 0.5) / 16.0 * 255.0;
+            if darkness(raster, x as u32, y as u32) + bias >= threshold {
+                out[y * width + x] = 255;
             }
         }
     }
@@ -641,7 +705,7 @@ fn rotate(points: &[Point], start: usize, closed: bool) -> Vec<Point> {
 mod tests {
     use super::*;
     use kurbo::BezPath;
-    use orleans_core::{CutParams, Layer, Shape};
+    use orleans_core::{CutParams, Layer, RasterCrop, Shape};
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> BezPath {
         let mut p = BezPath::new();
@@ -696,6 +760,7 @@ mod tests {
             invert: false,
             line_interval: 1.0,
             bidirectional: false,
+            crop: None,
         });
         doc
     }
@@ -710,6 +775,32 @@ mod tests {
         assert!((cuts[0].0[0].y - 0.5).abs() < 1e-9);
         assert!((cuts[0].0[0].x - 1.0).abs() < 1e-9);
         assert!((cuts[0].0[1].x - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn raster_crop_limits_the_engraved_region() {
+        let mut doc = raster_doc(RasterMode::Threshold, vec![0; 8]);
+        doc.layers[0].raster.as_mut().expect("raster").crop = Some(RasterCrop {
+            x: 2,
+            y: 0,
+            width: 2,
+            height: 1,
+        });
+        let job = plan(&doc, &PlanOptions::default());
+        let cuts: Vec<_> = job.cuts().collect();
+        assert_eq!(cuts.len(), 1);
+        assert!((cuts[0].0[0].x - 2.0).abs() < 1e-9);
+        assert!((cuts[0].0[1].x - 4.0).abs() < 1e-9);
+        assert!((cuts[0].0[0].y - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extra_dither_modes_emit_marks() {
+        for mode in [RasterMode::Atkinson, RasterMode::Bayer] {
+            let doc = raster_doc(mode, vec![128; 8]);
+            let job = plan(&doc, &PlanOptions::default());
+            assert!(!job.is_empty(), "{mode:?} should emit marks");
+        }
     }
 
     #[test]

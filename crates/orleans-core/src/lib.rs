@@ -92,8 +92,22 @@ impl Default for FillParams {
 pub enum RasterMode {
     #[default]
     Threshold,
+    /// Floyd–Steinberg error diffusion.
     Dither,
+    /// Atkinson error diffusion.
+    Atkinson,
+    /// 4x4 ordered (Bayer) dithering.
+    Bayer,
     Grayscale,
+}
+
+/// A cropped pixel rectangle, in top-left image coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RasterCrop {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A grayscale image placed in document millimetres.
@@ -117,9 +131,26 @@ pub struct RasterImage {
     pub line_interval: f64,
     /// Reverse alternate scan lines to reduce travel.
     pub bidirectional: bool,
+    /// Optional cropped pixel rectangle. `None` uses the whole image.
+    pub crop: Option<RasterCrop>,
 }
 
 impl RasterImage {
+    /// Clamped crop rectangle as `(x, y, width, height)` in pixels.
+    pub fn crop_bounds(&self) -> (u32, u32, u32, u32) {
+        let Some(crop) = self.crop else {
+            return (0, 0, self.width, self.height);
+        };
+        if self.width == 0 || self.height == 0 {
+            return (0, 0, 0, 0);
+        }
+        let x = crop.x.min(self.width - 1);
+        let y = crop.y.min(self.height - 1);
+        let width = crop.width.clamp(1, self.width - x);
+        let height = crop.height.clamp(1, self.height - y);
+        (x, y, width, height)
+    }
+
     pub fn center(&self) -> Point {
         Point::new(self.x + self.width_mm * 0.5, self.y + self.height_mm * 0.5)
     }
@@ -457,6 +488,7 @@ mod tests {
             invert: false,
             line_interval: 0.2,
             bidirectional: true,
+            crop: None,
         };
         for point in [
             Point::new(5.0, 10.0),
@@ -469,6 +501,38 @@ mod tests {
         let bounds = raster.bounds();
         assert!(bounds.width() > 10.0);
         assert!(bounds.height() > 5.0);
+    }
+
+    #[test]
+    fn raster_crop_bounds_clamp_to_the_image() {
+        let raster = RasterImage {
+            width: 10,
+            height: 8,
+            grayscale: vec![0; 80],
+            x: 0.0,
+            y: 0.0,
+            width_mm: 10.0,
+            height_mm: 8.0,
+            angle: 0.0,
+            mode: RasterMode::Threshold,
+            threshold: 128,
+            invert: false,
+            line_interval: 0.2,
+            bidirectional: false,
+            crop: Some(RasterCrop {
+                x: 9,
+                y: 7,
+                width: 99,
+                height: 99,
+            }),
+        };
+        assert_eq!(raster.crop_bounds(), (9, 7, 1, 1));
+
+        let raster = RasterImage {
+            crop: None,
+            ..raster
+        };
+        assert_eq!(raster.crop_bounds(), (0, 0, 10, 8));
     }
 
     #[test]

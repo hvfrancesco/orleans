@@ -30,7 +30,7 @@ was decompiled or copied.
 | USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
 | Hardware-free GRBL simulator | ✅ |
 | DXF / PDF / AI import | ❌ |
-| Raster engraving (threshold, dither, grayscale) | ✅ |
+| Raster engraving (threshold, Floyd–Steinberg/Atkinson/Bayer dither, grayscale, crop) | ✅ |
 | Tabs/bridges on contour cuts, automatic or manual, with canvas markers | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
@@ -51,7 +51,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-146 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+149 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -144,10 +144,12 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   selected layer draws each tab span in cyan on the canvas, for both automatic
   and manual tabs;
 * **Open…** also accepts PNG/JPEG/BMP images. An image opens as a raster layer
-  with threshold, Floyd–Steinberg dithering or grayscale power levels, plus
-  line interval, angle, invert, alternate rows, position, physical size and
-  DPI. The 96 DPI import size is only a starting point; size and DPI can be
-  changed after import. Opening an image replaces the current design. The
+  with threshold, Floyd–Steinberg, Atkinson or 4×4 Bayer dithering, or
+  grayscale power levels, plus line interval, angle, invert, alternate rows,
+  position, physical size and DPI. The 96 DPI import size is only a starting
+  point; size and DPI can be changed after import. **Crop** X/Y/W/H selects a
+  pixel region to engrave; **Full** restores the whole image, while position,
+  size and rotation stay fixed. Opening an image replaces the current design. The
   raster is shown as a translucent image with engraving scanlines over it. Click
   an image on the canvas or select its layer to show handles: drag inside to
   move, drag a corner to resize and drag the top handle to rotate. Use a
@@ -349,10 +351,11 @@ concept of a line and some bridges emit negotiation on connect.
   optional outline cut. Offset fill loops stop when the remaining region is
   narrower than the spacing, and fill outlines do not use holding tabs.
 * Raster import starts at 96 DPI but size and DPI can be changed after import;
-  scan lines rotate with the image angle. More dithering algorithms are not
-  implemented yet. Raster layers with Cut disabled show the image preview but
-  not the engraving scan lines; raster selection handles are available on the
-  canvas.
+  scan lines rotate with the image angle. Cropping is numeric and
+  non-destructive: the full image stays visible with a cyan crop outline, while
+  only the cropped region is engraved. Raster layers with Cut disabled show the
+  image preview but not the engraving scan lines; raster selection handles are
+  available on the canvas.
 * Automatic tabs are distributed evenly by arc length from the contour seam.
   Manual tabs are stored as fractions of the flattened contour perimeter, so a
   heavy node edit that reorders or removes contours can detach a tab. Fill
@@ -369,10 +372,9 @@ concept of a line and some bridges emit negotiation on connect.
 ## Roadmap
 
 1. **Finish the editor** — job history for the streaming panel.
-2. **Raster refinements** — more dithering algorithms and image cropping.
-3. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
-4. **Second driver** — Marlin, then Ruida over UDP.
-5. **Job control extras** — feed/power overrides, rotary setup.
+2. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
+3. **Second driver** — Marlin, then Ruida over UDP.
+4. **Job control extras** — feed/power overrides, rotary setup.
 
 ## License
 

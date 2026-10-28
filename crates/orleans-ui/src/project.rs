@@ -5,7 +5,9 @@
 //! parameters, the job-level options, shape transforms and node-edited paths.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use orleans_core::{CutParams, Document, Layer, LayerMode, RasterImage, RasterMode, Shape};
+use orleans_core::{
+    CutParams, Document, Layer, LayerMode, RasterCrop, RasterImage, RasterMode, Shape,
+};
 use orleans_driver::gcode::LaserMode;
 use serde::{Deserialize, Serialize};
 
@@ -201,6 +203,16 @@ pub struct RasterSettings {
     pub invert: bool,
     pub line_interval: f64,
     pub bidirectional: bool,
+    #[serde(default)]
+    pub crop: Option<RasterCropSettings>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RasterCropSettings {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl RasterSettings {
@@ -217,6 +229,8 @@ impl RasterSettings {
             mode: match image.mode {
                 RasterMode::Threshold => "Threshold",
                 RasterMode::Dither => "Dither",
+                RasterMode::Atkinson => "Atkinson",
+                RasterMode::Bayer => "Bayer",
                 RasterMode::Grayscale => "Grayscale",
             }
             .to_owned(),
@@ -224,6 +238,12 @@ impl RasterSettings {
             invert: image.invert,
             line_interval: image.line_interval,
             bidirectional: image.bidirectional,
+            crop: image.crop.map(|crop| RasterCropSettings {
+                x: crop.x,
+                y: crop.y,
+                width: crop.width,
+                height: crop.height,
+            }),
         }
     }
 
@@ -246,6 +266,10 @@ impl RasterSettings {
             angle: self.angle,
             mode: if self.mode.eq_ignore_ascii_case("dither") {
                 RasterMode::Dither
+            } else if self.mode.eq_ignore_ascii_case("atkinson") {
+                RasterMode::Atkinson
+            } else if self.mode.eq_ignore_ascii_case("bayer") {
+                RasterMode::Bayer
             } else if self.mode.eq_ignore_ascii_case("grayscale") {
                 RasterMode::Grayscale
             } else {
@@ -255,6 +279,12 @@ impl RasterSettings {
             invert: self.invert,
             line_interval: self.line_interval,
             bidirectional: self.bidirectional,
+            crop: self.crop.map(|crop| RasterCrop {
+                x: crop.x,
+                y: crop.y,
+                width: crop.width,
+                height: crop.height,
+            }),
         })
     }
 }
@@ -872,6 +902,12 @@ mod tests {
             invert: true,
             line_interval: 0.2,
             bidirectional: false,
+            crop: Some(orleans_core::RasterCrop {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 1,
+            }),
         });
         doc.layers.push(layer);
         let project = ProjectFile::new(
@@ -891,6 +927,7 @@ mod tests {
         let saved = back.layers[0].raster.as_ref().expect("raster settings");
         assert_eq!(saved.width, 2);
         assert_eq!(saved.height, 1);
+        assert_eq!(saved.crop.expect("crop").x, 1);
 
         let mut loaded = Document::new(1.0, 1.0);
         back.apply(&mut loaded);
@@ -900,6 +937,15 @@ mod tests {
         assert!(raster.invert);
         assert!((raster.width_mm - 10.0).abs() < 1e-9);
         assert!((raster.angle - 30.0).abs() < 1e-9);
+        assert_eq!(
+            raster.crop,
+            Some(orleans_core::RasterCrop {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 1,
+            })
+        );
         assert!((loaded.width - 20.0).abs() < 1e-9);
     }
 

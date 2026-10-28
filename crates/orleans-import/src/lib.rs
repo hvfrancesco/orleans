@@ -104,6 +104,7 @@ pub fn import_image(data: &[u8], dpi: f64) -> Result<Document, ImportError> {
         invert: false,
         line_interval,
         bidirectional: true,
+        crop: None,
     });
     doc.layers.push(layer);
     Ok(doc)

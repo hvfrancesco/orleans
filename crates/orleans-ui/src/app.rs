@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use kurbo::{Affine, Point};
-use orleans_core::{Document, Job, Layer, LayerMode, ManualTabs, Op, RasterMode, Shape};
+use orleans_core::{
+    Document, Job, Layer, LayerMode, ManualTabs, Op, RasterCrop, RasterMode, Shape,
+};
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_geom::{
     flatten_path, hatch_contours, nearest_along_closed, offset_region, point_at_fraction,
@@ -3083,6 +3085,31 @@ impl OrleansApp {
             corners.clone(),
             Stroke::new(2.0, palette.selection),
         ));
+        if raster.crop.is_some() {
+            let (x, y, width, height) = raster.crop_bounds();
+            if width > 0 && height > 0 {
+                let pixel_width = raster.width_mm / f64::from(raster.width.max(1));
+                let pixel_height = raster.height_mm / f64::from(raster.height.max(1));
+                let left = raster.x + f64::from(x) * pixel_width;
+                let right = left + f64::from(width) * pixel_width;
+                let bottom = raster.y + f64::from(raster.height - (y + height)) * pixel_height;
+                let top = bottom + f64::from(height) * pixel_height;
+                let crop_points = [
+                    Point::new(left, top),
+                    Point::new(right, top),
+                    Point::new(right, bottom),
+                    Point::new(left, bottom),
+                ]
+                .map(|point| {
+                    self.view
+                        .world_to_screen(area, raster.local_to_world(point))
+                });
+                painter.add(egui::Shape::closed_line(
+                    crop_points.to_vec(),
+                    Stroke::new(1.5, palette.tab),
+                ));
+            }
+        }
         let top_center = raster.local_to_world(Point::new(
             raster.x + raster.width_mm * 0.5,
             raster.y + raster.height_mm,
@@ -4704,6 +4731,8 @@ impl OrleansApp {
                                     .selected_text(match raster.mode {
                                         RasterMode::Threshold => "Threshold",
                                         RasterMode::Dither => "Dither",
+                                        RasterMode::Atkinson => "Atkinson",
+                                        RasterMode::Bayer => "Bayer",
                                         RasterMode::Grayscale => "Grayscale",
                                     })
                                     .show_ui(ui, |ui| {
@@ -4719,6 +4748,20 @@ impl OrleansApp {
                                                 &mut raster.mode,
                                                 RasterMode::Dither,
                                                 "Dither",
+                                            )
+                                            .changed();
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut raster.mode,
+                                                RasterMode::Atkinson,
+                                                "Atkinson",
+                                            )
+                                            .changed();
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut raster.mode,
+                                                RasterMode::Bayer,
+                                                "Bayer",
                                             )
                                             .changed();
                                         changed |= ui
@@ -4809,6 +4852,69 @@ impl OrleansApp {
                                     )
                                     .changed();
                             });
+                            let (crop_x, crop_y, crop_w, crop_h) = raster.crop_bounds();
+                            let mut crop = (crop_x, crop_y, crop_w, crop_h);
+                            ui.horizontal(|ui| {
+                                ui.label("Crop").on_hover_text(
+                                    "Pixel region to engrave; position and physical size stay fixed",
+                                );
+                                ui.label("X");
+                                ui.add(
+                                    egui::DragValue::new(&mut crop.0)
+                                        .speed(1.0)
+                                        .range(0..=raster.width.saturating_sub(1)),
+                                );
+                                ui.label("Y");
+                                ui.add(
+                                    egui::DragValue::new(&mut crop.1)
+                                        .speed(1.0)
+                                        .range(0..=raster.height.saturating_sub(1)),
+                                );
+                                if ui
+                                    .small_button("Full")
+                                    .on_hover_text("Use the whole image")
+                                    .clicked()
+                                {
+                                    crop = (0, 0, raster.width, raster.height);
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(38.0);
+                                ui.label("W");
+                                ui.add(
+                                    egui::DragValue::new(&mut crop.2)
+                                        .speed(1.0)
+                                        .range(1..=raster.width.max(1)),
+                                );
+                                ui.label("H");
+                                ui.add(
+                                    egui::DragValue::new(&mut crop.3)
+                                        .speed(1.0)
+                                        .range(1..=raster.height.max(1)),
+                                );
+                                ui.label(RichText::new("px").small().weak());
+                            });
+                            let x = crop.0.min(raster.width.saturating_sub(1));
+                            let y = crop.1.min(raster.height.saturating_sub(1));
+                            let w = crop.2.clamp(1, raster.width.saturating_sub(x).max(1));
+                            let h = crop.3.clamp(1, raster.height.saturating_sub(y).max(1));
+                            if (x, y, w, h) != (crop_x, crop_y, crop_w, crop_h) {
+                                raster.crop = if x == 0
+                                    && y == 0
+                                    && w == raster.width
+                                    && h == raster.height
+                                {
+                                    None
+                                } else {
+                                    Some(RasterCrop {
+                                        x,
+                                        y,
+                                        width: w,
+                                        height: h,
+                                    })
+                                };
+                                changed = true;
+                            }
                         } else {
                             ui.horizontal(|ui| {
                                 ui.label("Mode");
@@ -7127,6 +7233,7 @@ mod tests {
             invert: true,
             line_interval: 0.3,
             bidirectional: false,
+            crop: None,
         });
         doc.layers.push(image);
         doc.layers.push(outer);
