@@ -31,7 +31,7 @@ was decompiled or copied.
 | Raster engraving, dithering, fill/hatch | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
-| Canvas: selection, drag-move, interactive scale/rotate handles, undo | ✅ |
+| Canvas: selection, drag-move, handles, absolute position, undo | ✅ |
 | Project save/load (`.orleans`, embedded SVG + settings/path edits) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -44,7 +44,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-99 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+100 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -140,8 +140,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   any selected shape to move the whole selection. Drag a corner handle to
   scale uniformly around the opposite corner, or drag the circular handle above
   the box to rotate around the selection centre. The **Selection** panel still
-  offers numeric Move, uniform Scale and Rotate. With one shape selected,
-  **Edit nodes** shows its anchors and Bézier controls. Drag them to reshape
+  offers numeric Move, uniform Scale and Rotate. The **Position** row places a
+  chosen reference point (corner, edge or centre) at exact X/Y coordinates
+  relative to the job origin `(0, 0)`; **Move to** applies it. With one shape
+  selected, **Edit nodes** shows its anchors and Bézier controls. Drag them to
+  reshape
   the path; double-click a segment to insert an anchor; select an anchor and
   press `Delete` or **Delete node** to remove it; enable **Snap** to snap node
   drags to the canvas grid. Use **Done** or `Esc` to leave node mode.

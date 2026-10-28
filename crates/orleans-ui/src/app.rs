@@ -76,6 +76,61 @@ enum Handle {
     Rotate,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionAnchor {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl SelectionAnchor {
+    const ALL: [Self; 9] = [
+        Self::TopLeft,
+        Self::Top,
+        Self::TopRight,
+        Self::Left,
+        Self::Center,
+        Self::Right,
+        Self::BottomLeft,
+        Self::Bottom,
+        Self::BottomRight,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top left",
+            Self::Top => "Top",
+            Self::TopRight => "Top right",
+            Self::Left => "Left",
+            Self::Center => "Centre",
+            Self::Right => "Right",
+            Self::BottomLeft => "Bottom left",
+            Self::Bottom => "Bottom",
+            Self::BottomRight => "Bottom right",
+        }
+    }
+
+    fn point(self, bounds: kurbo::Rect) -> Point {
+        let x = match self {
+            Self::TopLeft | Self::Left | Self::BottomLeft => bounds.x0,
+            Self::Top | Self::Center | Self::Bottom => bounds.center().x,
+            Self::TopRight | Self::Right | Self::BottomRight => bounds.x1,
+        };
+        let y = match self {
+            Self::TopLeft | Self::Top | Self::TopRight => bounds.y1,
+            Self::Left | Self::Center | Self::Right => bounds.center().y,
+            Self::BottomLeft | Self::Bottom | Self::BottomRight => bounds.y0,
+        };
+        Point::new(x, y)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ActiveHandle {
     Scale { anchor: Point, last_distance: f64 },
@@ -115,6 +170,10 @@ pub struct OrleansApp {
     transform_dy: f64,
     transform_scale: f64,
     transform_angle: f64,
+    move_anchor: SelectionAnchor,
+    move_to_x: f64,
+    move_to_y: f64,
+    move_sync: Option<(BTreeSet<ShapeRef>, SelectionAnchor, Option<[u64; 2]>)>,
     active_handle: Option<ActiveHandle>,
     node_edit: Option<ShapeRef>,
     selected_node: Option<NodeRef>,
@@ -182,6 +241,10 @@ impl OrleansApp {
             transform_dy: 0.0,
             transform_scale: 1.0,
             transform_angle: 0.0,
+            move_anchor: SelectionAnchor::BottomLeft,
+            move_to_x: 0.0,
+            move_to_y: 0.0,
+            move_sync: None,
             active_handle: None,
             node_edit: None,
             selected_node: None,
@@ -954,6 +1017,57 @@ impl OrleansApp {
         self.transform_dy = 0.0;
         let count = self.selected_shapes.len();
         self.set_status(format!("moved {count} shape(s)"), false);
+    }
+
+    fn sync_move_target(&mut self) {
+        let current = self.selection_anchor_point();
+        let current_key = current.map(|point| [point.x.to_bits(), point.y.to_bits()]);
+        let key = (self.selected_shapes.clone(), self.move_anchor, current_key);
+        if self.move_sync.as_ref() == Some(&key) {
+            return;
+        }
+        self.move_sync = Some(key);
+        if let Some(point) = current {
+            self.move_to_x = point.x;
+            self.move_to_y = point.y;
+        } else {
+            self.move_to_x = 0.0;
+            self.move_to_y = 0.0;
+        }
+    }
+
+    fn selection_anchor_point(&self) -> Option<Point> {
+        let bounds = self.selection_bounds()?;
+        Some(self.move_anchor.point(bounds))
+    }
+
+    fn move_selection_to(&mut self) {
+        let Some(bounds) = self.selection_bounds() else {
+            return;
+        };
+        let current = self.move_anchor.point(bounds);
+        let dx = self.move_to_x - current.x;
+        let dy = self.move_to_y - current.y;
+        if !dx.is_finite() || !dy.is_finite() {
+            self.set_status("target position is not a finite number", true);
+            return;
+        }
+        if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+            self.set_status("selection is already at that position", false);
+            return;
+        }
+        self.push_selection_undo();
+        self.translate_selection(dx, dy);
+        let count = self.selected_shapes.len();
+        self.set_status(
+            format!(
+                "moved {count} shape(s): {} at X {:.3}, Y {:.3}",
+                self.move_anchor.label(),
+                self.move_to_x,
+                self.move_to_y
+            ),
+            false,
+        );
     }
 
     fn scale_selection(&mut self) {
@@ -2063,6 +2177,7 @@ impl OrleansApp {
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
+        self.sync_move_target();
         egui::Panel::left("layers")
             .resizable(true)
             .default_size(340.0)
@@ -2338,6 +2453,56 @@ impl OrleansApp {
                         );
                         if ui.button("Move").clicked() {
                             self.move_selection();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Position").on_hover_text(
+                            "Move the reference point to absolute coordinates relative to the job origin (0, 0)",
+                        );
+                        ui.label("X");
+                        ui.add(
+                            egui::DragValue::new(&mut self.move_to_x)
+                                .speed(0.1)
+                                .max_decimals(3)
+                                .suffix(" mm"),
+                        );
+                        ui.label("Y");
+                        ui.add(
+                            egui::DragValue::new(&mut self.move_to_y)
+                                .speed(0.1)
+                                .max_decimals(3)
+                                .suffix(" mm"),
+                        );
+                        if ui
+                            .button("Move to")
+                            .on_hover_text("Move the selected reference point to these coordinates")
+                            .clicked()
+                        {
+                            self.move_selection_to();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Ref");
+                        egui::ComboBox::from_id_salt("selection-anchor")
+                            .selected_text(self.move_anchor.label())
+                            .show_ui(ui, |ui| {
+                                for anchor in SelectionAnchor::ALL {
+                                    ui.selectable_value(
+                                        &mut self.move_anchor,
+                                        anchor,
+                                        anchor.label(),
+                                    );
+                                }
+                            });
+                        if let Some(point) = self.selection_anchor_point() {
+                            ui.label(
+                                RichText::new(format!("now {:.3}, {:.3}", point.x, point.y))
+                                    .small()
+                                    .weak(),
+                            )
+                            .on_hover_text(
+                                "Current reference point relative to the job origin (0, 0)",
+                            );
                         }
                     });
                     ui.horizontal(|ui| {
@@ -3327,6 +3492,28 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn selection_anchor_points_follow_the_bounds() {
+        let bounds = kurbo::Rect::new(10.0, 20.0, 30.0, 50.0);
+        assert_eq!(
+            SelectionAnchor::BottomLeft.point(bounds),
+            Point::new(10.0, 20.0)
+        );
+        assert_eq!(
+            SelectionAnchor::TopRight.point(bounds),
+            Point::new(30.0, 50.0)
+        );
+        assert_eq!(
+            SelectionAnchor::Center.point(bounds),
+            Point::new(20.0, 35.0)
+        );
+        assert_eq!(
+            SelectionAnchor::Bottom.point(bounds),
+            Point::new(20.0, 20.0)
+        );
+        assert_eq!(SelectionAnchor::Right.point(bounds), Point::new(30.0, 35.0));
     }
 
     #[test]
