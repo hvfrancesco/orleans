@@ -9,10 +9,11 @@
 //! orleans run   design.svg --url tcp://192.168.1.50   # WiFi / Telnet
 //! orleans run   design.svg --port /dev/ttyUSB0        # USB serial
 //! orleans run   design.svg --mock                     # simulator
+//! orleans stop  --url tcp://192.168.1.50              # stop + laser off
 //! ```
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -75,6 +76,22 @@ enum Command {
         /// Stream even if the controller does not answer a status request.
         #[arg(long)]
         force: bool,
+        /// Abort if the controller is silent for this many seconds.
+        ///
+        /// This is a no-response timeout, not a limit on the job duration.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+    },
+    /// Stop the machine now and turn the laser off (feed hold + reset).
+    Stop {
+        /// Serial port, e.g. /dev/ttyUSB0 or COM3.
+        #[arg(long)]
+        port: Option<String>,
+        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet, port 23).
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long, default_value_t = 115200)]
+        baud: u32,
     },
     /// Ask a connected controller for its status.
     Status {
@@ -186,7 +203,9 @@ fn main() -> Result<()> {
             baud,
             mock,
             force,
-        } => run(&common, port, url, baud, mock, force),
+            timeout,
+        } => run(&common, port, url, baud, mock, force, timeout),
+        Command::Stop { port, url, baud } => stop_machine(port, url, baud),
         Command::Status { port, url, baud } => status(port, url, baud),
     }
 }
@@ -261,6 +280,7 @@ fn run(
     baud: u32,
     mock: bool,
     force: bool,
+    timeout: u64,
 ) -> Result<()> {
     let doc = cmd.import()?;
     let job = cmd.plan(&doc);
@@ -301,7 +321,11 @@ fn run(
     }
 
     let (transport, kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
-    let mut client = GrblClient::new(transport);
+    let config = GrblConfig {
+        window: 120,
+        timeout: Duration::from_secs(timeout.max(1)),
+    };
+    let mut client = GrblClient::with_config(transport, config);
     if kind == LinkKind::Serial {
         // Only USB serial needs the newline wake-up.
         client.wake()?;
@@ -318,8 +342,32 @@ fn run(
         }
     }
 
-    let acks = client.run(&program).context("streaming G-code")?;
+    let mut last_report = Instant::now();
+    let acks = client
+        .run_with_progress(&program, |done, total| {
+            if done == total || last_report.elapsed() >= Duration::from_secs(2) {
+                eprintln!("  {done}/{total} lines acknowledged");
+                last_report = Instant::now();
+            }
+        })
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "streaming G-code failed: {err}\n\
+                 orleans attempted feed hold and a soft reset (laser off). If the \n\
+                 link was already gone, stop the machine at the panel. Check the \n\
+                 position and re-home or re-zero before retrying. A slow controller \n\
+                 can be given a longer --timeout."
+            )
+        })?;
     eprintln!("done: {acks} lines acknowledged");
+    Ok(())
+}
+
+fn stop_machine(port: Option<String>, url: Option<String>, baud: u32) -> Result<()> {
+    let (transport, _kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
+    let mut client = GrblClient::new(transport);
+    client.stop().context("stopping the controller")?;
+    println!("controller stopped and reset; laser off");
     Ok(())
 }
 

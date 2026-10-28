@@ -19,7 +19,9 @@ use crate::transport::Transport;
 pub struct GrblConfig {
     /// Maximum number of unacknowledged bytes in flight.
     pub window: usize,
-    /// Give up if the controller does not answer for this long.
+    /// Give up if the controller is silent for this long. This is a
+    /// no-response timeout, not a limit on the total job duration: a long cut
+    /// may stream for minutes as long as `ok` keeps arriving.
     pub timeout: Duration,
 }
 
@@ -28,7 +30,7 @@ impl Default for GrblConfig {
         Self {
             // GRBL's RX buffer is 128 bytes; leave a little headroom.
             window: 120,
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(30),
         }
     }
 }
@@ -185,27 +187,72 @@ impl<T: Transport> GrblClient<T> {
         Ok(())
     }
 
+    /// Stop the machine and switch the laser off.
+    ///
+    /// Feed hold gives a controlled deceleration; the soft reset that follows
+    /// clears the planner and runs GRBL's spindle/laser stop. A reset also
+    /// returns the controller to its startup state, so re-home or re-zero
+    /// before starting another job.
+    pub fn stop(&mut self) -> Result<(), DriverError> {
+        let _ = self.transport.write_raw(b"!");
+        std::thread::sleep(Duration::from_millis(100));
+        self.soft_reset()
+    }
+
     /// Send a single command and wait for its `ok`.
     pub fn send(&mut self, line: &str) -> Result<(), DriverError> {
-        let started = Instant::now();
         self.transport.write_line(line)?;
         self.pending.push_back(line.len() + 1);
         self.in_flight += line.len() + 1;
-        self.wait_ack(started)
+        let mut last_response = Instant::now();
+        self.wait_ack(&mut last_response)
     }
 
     /// Stream a whole G-code program, respecting the receive window.
     ///
-    /// Returns the number of acknowledged lines.
+    /// Returns the number of acknowledged lines. If streaming fails, the
+    /// machine is stopped and reset so the laser cannot be left enabled.
     pub fn run(&mut self, gcode: &str) -> Result<usize, DriverError> {
-        let started = Instant::now();
-        self.acked = 0;
+        self.run_with_progress(gcode, |_, _| {})
+    }
 
-        for line in gcode.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with(';') {
-                continue;
+    /// Like [`Self::run`], but calls `progress(acked, total)` after every
+    /// acknowledgement, so a caller can show a progress indicator.
+    pub fn run_with_progress<F>(
+        &mut self,
+        gcode: &str,
+        mut progress: F,
+    ) -> Result<usize, DriverError>
+    where
+        F: FnMut(usize, usize),
+    {
+        match self.run_inner(gcode, &mut progress) {
+            Ok(acks) => Ok(acks),
+            Err(err) => {
+                // Never leave the laser enabled after an aborted stream. A
+                // validation error before any line is sent needs no stop.
+                if self.acked > 0 || self.in_flight > 0 {
+                    let _ = self.stop();
+                }
+                Err(err)
             }
+        }
+    }
+
+    fn run_inner<F>(&mut self, gcode: &str, progress: &mut F) -> Result<usize, DriverError>
+    where
+        F: FnMut(usize, usize),
+    {
+        self.acked = 0;
+        let lines: Vec<&str> = gcode
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with(';'))
+            .collect();
+        let total = lines.len();
+        let mut last_response = Instant::now();
+
+        for line in lines {
             let bytes = line.len() + 1;
             if bytes > self.config.window {
                 return Err(DriverError::Controller(format!(
@@ -214,7 +261,8 @@ impl<T: Transport> GrblClient<T> {
                 )));
             }
             while self.in_flight + bytes > self.config.window {
-                self.wait_ack(started)?;
+                self.wait_ack(&mut last_response)?;
+                progress(self.acked, total);
             }
             self.transport.write_line(line)?;
             self.pending.push_back(bytes);
@@ -222,18 +270,22 @@ impl<T: Transport> GrblClient<T> {
         }
 
         while self.in_flight > 0 {
-            self.wait_ack(started)?;
+            self.wait_ack(&mut last_response)?;
+            progress(self.acked, total);
         }
         Ok(self.acked)
     }
 
-    fn wait_ack(&mut self, started: Instant) -> Result<(), DriverError> {
+    /// Wait for one `ok`. The timeout resets on every line received, so it
+    /// measures controller silence rather than the length of the job.
+    fn wait_ack(&mut self, last_response: &mut Instant) -> Result<(), DriverError> {
         loop {
-            if started.elapsed() > self.config.timeout {
+            if last_response.elapsed() > self.config.timeout {
                 return Err(DriverError::Timeout(self.config.timeout));
             }
             match self.transport.read_line()? {
                 Some(line) => {
+                    *last_response = Instant::now();
                     let line = line.trim();
                     if line.is_empty() {
                         continue;
@@ -395,6 +447,122 @@ mod tests {
             .expect("probe");
         assert!(probe.status.is_none());
         assert!(probe.seen.iter().any(|line| line.contains("error:20")));
+    }
+
+    /// A link that acknowledges each line, but slowly enough that the whole
+    /// job takes longer than the configured timeout.
+    struct SlowAcks {
+        pending: usize,
+        last: Instant,
+    }
+
+    impl SlowAcks {
+        fn new() -> Self {
+            Self {
+                pending: 0,
+                last: Instant::now(),
+            }
+        }
+    }
+
+    impl Transport for SlowAcks {
+        fn write_line(&mut self, _line: &str) -> io::Result<()> {
+            self.pending += 1;
+            Ok(())
+        }
+
+        fn write_raw(&mut self, _bytes: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn read_line(&mut self) -> io::Result<Option<String>> {
+            if self.pending == 0 {
+                return Ok(None);
+            }
+            if self.last.elapsed() < Duration::from_millis(4) {
+                return Ok(None);
+            }
+            self.last = Instant::now();
+            self.pending -= 1;
+            Ok(Some("ok".to_owned()))
+        }
+    }
+
+    #[test]
+    fn timeout_is_per_response_not_per_job() {
+        let mut client = GrblClient::with_config(
+            SlowAcks::new(),
+            GrblConfig {
+                window: 120,
+                timeout: Duration::from_millis(60),
+            },
+        );
+        let program: String = (0..20).map(|i| format!("G0 X{i} Y0\n")).collect();
+        // One ack every ~4 ms: the job takes ~80 ms, longer than the 60 ms
+        // timeout, but the controller is never silent for that long.
+        let acks = client
+            .run(&program)
+            .expect("responsive job over the timeout");
+        assert_eq!(acks, 20);
+    }
+
+    #[test]
+    fn a_silent_link_times_out_and_resets() {
+        #[derive(Default)]
+        struct Si {
+            raw: Vec<u8>,
+        }
+        impl Transport for Si {
+            fn write_line(&mut self, _line: &str) -> io::Result<()> {
+                Ok(())
+            }
+            fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+                self.raw.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn read_line(&mut self) -> io::Result<Option<String>> {
+                Ok(None)
+            }
+        }
+
+        let mut client = GrblClient::with_config(
+            Si::default(),
+            GrblConfig {
+                window: 120,
+                timeout: Duration::from_millis(30),
+            },
+        );
+        let err = client.run("G0 X1 Y1\n").unwrap_err();
+        assert!(matches!(err, DriverError::Timeout(_)));
+        let raw = &client.transport().raw;
+        assert!(raw.contains(&b'!'), "missing feed hold: {raw:?}");
+        assert!(raw.contains(&0x18), "missing soft reset: {raw:?}");
+    }
+
+    #[test]
+    fn stop_sends_feed_hold_then_soft_reset() {
+        #[derive(Default)]
+        struct Rec {
+            raw: Vec<u8>,
+        }
+        impl Transport for Rec {
+            fn write_line(&mut self, _line: &str) -> io::Result<()> {
+                Ok(())
+            }
+            fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+                self.raw.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn read_line(&mut self) -> io::Result<Option<String>> {
+                Ok(None)
+            }
+        }
+
+        let mut client = GrblClient::new(Rec::default());
+        client.stop().expect("stop");
+        let raw = &client.transport().raw;
+        assert!(raw.contains(&b'!'));
+        assert!(raw.contains(&0x18));
     }
 
     #[test]

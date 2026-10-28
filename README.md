@@ -24,7 +24,7 @@ was decompiled or copied.
 | Inside-out ordering + nearest-neighbour travel optimisation | ✅ |
 | Multi-pass cutting | ✅ |
 | G-code for GRBL / GrblHAL / FluidNC / Marlin-laser (`M3`, `M4`) | ✅ |
-| GRBL streaming: character-counting flow control, `ok`/`error`, status, feed hold, resume, soft reset | ✅ |
+| GRBL streaming: character-counting flow control, `ok`/`error`, progress, status, feed hold, resume, soft reset, automatic stop on failure | ✅ |
 | USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
 | Hardware-free GRBL simulator | ✅ |
 | DXF / PDF / AI import | ❌ |
@@ -34,7 +34,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-50 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+53 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -69,10 +69,13 @@ cargo run -q -- run examples/coaster.svg --url tcp://192.168.1.50 \
 # Query a controller over either link
 cargo run -q -- status --port /dev/ttyUSB0
 cargo run -q -- status --url tcp://192.168.1.50
+
+# Emergency stop: feed hold + soft reset, laser off
+cargo run -q -- stop --url tcp://192.168.1.50
 ```
 
 Installed as a binary, the commands are `orleans gui`, `orleans info`,
-`orleans gcode`, `orleans run` and `orleans status`. `--url` accepts
+`orleans gcode`, `orleans run`, `orleans status` and `orleans stop`. `--url` accepts
 `tcp://host[:port]`, `telnet://host[:port]` or a bare `host[:port]`.
 
 The GUI is behind the `gui` Cargo feature, which is on by default. Build with
@@ -131,6 +134,18 @@ Common causes:
 
 `orleans run` refuses to stream when no status comes back; `--force` overrides
 that.
+
+If a job aborts while the link is still alive, `orleans` sends feed hold
+followed by a soft reset, which stops the planner and switches the laser off. If
+the link itself died, stop the machine at the panel. Check the machine and
+re-home or re-zero before retrying; a soft reset returns GRBL to its startup
+state.
+
+`--timeout` (default 30 s) is a **no-response** timeout: the job is aborted only
+if no `ok`, status or other line arrives for that long. It is not a limit on the
+total job duration — a 20-minute cut with steady acknowledgements is fine. Raise
+it for a controller that can stay silent for longer while executing one very
+slow move.
 
 ## Design decisions
 
