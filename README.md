@@ -40,12 +40,11 @@ was decompiled or copied.
 | GUI jog (X/Y) and work zero: temporary `G92` or stored `G54` | ✅ |
 | Controller settings editor (`$32`, `$30`, `$22`, raw `$$`) | ✅ |
 | GUI pause/resume (M4 + `$32=1`; framing always) | ✅ |
-| Node editing: drag anchors and Bézier controls | ✅ |
-| Insert/delete nodes, snapping | ❌ |
+| Node editing: drag, insert, delete, grid snap | ✅ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-89 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+99 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -142,9 +141,12 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   scale uniformly around the opposite corner, or drag the circular handle above
   the box to rotate around the selection centre. The **Selection** panel still
   offers numeric Move, uniform Scale and Rotate. With one shape selected,
-  **Edit nodes** shows its anchors and Bézier controls; drag them to reshape
-  the path, then use **Done** or `Esc` to leave node mode. **Undo**/`Ctrl+Z`
-  reverses the last transform or node edit; right-drag pans;
+  **Edit nodes** shows its anchors and Bézier controls. Drag them to reshape
+  the path; double-click a segment to insert an anchor; select an anchor and
+  press `Delete` or **Delete node** to remove it; enable **Snap** to snap node
+  drags to the canvas grid. Use **Done** or `Esc` to leave node mode.
+  **Undo**/`Ctrl+Z` reverses the last transform, node drag, insertion or
+  deletion; right-drag pans;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
   when the controller is connected, idle and the laser is off; `Ctrl+Enter`
@@ -262,9 +264,11 @@ concept of a line and some bridges emit negotiation on connect.
   the settings landed on the right layers.
 * Interactive handles scale uniformly around the opposite corner and rotate
   around the selection centre. There is no non-uniform/skewed scaling.
-* Node editing moves existing anchors and Bézier controls, including the
-  controls attached to a moved anchor. It cannot insert or delete nodes or snap
-  them to a grid yet. Undo covers transforms and node edits.
+* Node editing supports moving anchors and Bézier controls, inserting anchors
+  on segments, deleting anchors, and optional grid snapping while dragging.
+  Deleting an anchor reconnects the remaining segments directly; there is no
+  join/break or smoothing, and nodes do not snap to other geometry yet. Undo
+  covers transforms and node edits.
 * Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
   Framing uses a fixed 3000 mm/min and the design bounds, with no margin
   setting.
@@ -276,8 +280,8 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **Finish the editor** — insert/delete nodes, snapping, and job history for
-   the streaming panel.
+1. **Finish the editor** — job history for the streaming panel, plus
+   node-editing refinements such as join/break and snapping to geometry.
 2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.

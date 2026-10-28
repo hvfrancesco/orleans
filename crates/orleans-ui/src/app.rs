@@ -13,7 +13,7 @@ use orleans_import::{import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
-use crate::nodes::{self, NodeRef};
+use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
 use crate::project::{EditedPath, ProjectFile, ShapeTransform, FORMAT};
 use crate::viewport::Viewport;
@@ -58,7 +58,8 @@ struct UndoSnapshot {
 #[derive(Clone, Copy, Debug)]
 struct NodeDrag {
     node: NodeRef,
-    last_world: Point,
+    start_world: Point,
+    start_node: Point,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +100,7 @@ enum Action {
     SaveProject,
     Undo,
     ExitNodes,
+    DeleteNode,
 }
 
 pub struct OrleansApp {
@@ -117,6 +119,7 @@ pub struct OrleansApp {
     node_edit: Option<ShapeRef>,
     selected_node: Option<NodeRef>,
     node_drag: Option<NodeDrag>,
+    node_snap: bool,
     edited_paths: BTreeSet<(usize, String)>,
     job: Job,
     path: Option<PathBuf>,
@@ -183,6 +186,7 @@ impl OrleansApp {
             node_edit: None,
             selected_node: None,
             node_drag: None,
+            node_snap: false,
             edited_paths: BTreeSet::new(),
             job: Job::default(),
             path: None,
@@ -1110,29 +1114,34 @@ impl OrleansApp {
         if self.node_edit.is_none() {
             return;
         }
+        let Some(start_node) = self
+            .node_shape()
+            .and_then(|shape| nodes::node_position(&shape.path, node))
+        else {
+            return;
+        };
         self.selected_node = Some(node);
         self.push_selection_undo();
         self.node_drag = Some(NodeDrag {
             node,
-            last_world: world,
+            start_world: world,
+            start_node,
         });
         self.dragging_shape = false;
     }
 
     fn update_node_drag(&mut self, world: Point) {
-        let Some(mut drag) = self.node_drag else {
+        let Some(drag) = self.node_drag else {
             return;
         };
-        let delta = world - drag.last_world;
-        if delta.hypot() < 1e-9 {
-            return;
-        }
         let Some(target) = self.node_edit.clone() else {
             self.node_drag = None;
             return;
         };
+        let snap = self.node_snap;
+        let step = self.grid_step();
 
-        let path = {
+        let (path, moved) = {
             let Some(shape) = self
                 .doc
                 .layers
@@ -1147,19 +1156,135 @@ impl OrleansApp {
             else {
                 return;
             };
-            if !nodes::move_node(&mut shape.path, drag.node, delta) {
+            let Some(current) = nodes::node_position(&shape.path, drag.node) else {
                 return;
+            };
+            let mut desired = drag.start_node + (world - drag.start_world);
+            if snap {
+                desired = snap_point(desired, step);
             }
-            shape.path.clone()
+            let delta = desired - current;
+            let moved = delta.hypot() > 1e-9 && nodes::move_node(&mut shape.path, drag.node, delta);
+            (shape.path.clone(), moved)
         };
 
+        if moved {
+            self.preview
+                .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
+            self.edited_paths
+                .insert((target.layer, target.shape.clone()));
+            self.dirty = true;
+        }
+    }
+
+    fn insert_node_at(&mut self, screen: Pos2, area: Rect) -> bool {
+        let Some(target) = self.node_edit.clone() else {
+            return false;
+        };
+        if self.node_at(screen, area).is_some() {
+            return false;
+        }
+        let world = self.view.screen_to_world(area, screen);
+        let (path, hit) = {
+            let Some(shape) = self
+                .doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == target.layer)
+                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == target.shape))
+            else {
+                return false;
+            };
+            let Some(hit) = nodes::nearest_segment(&shape.path, world) else {
+                return false;
+            };
+            if self.view.world_to_screen(area, hit.point).distance(screen) > 8.0 {
+                return false;
+            }
+            (shape.path.clone(), hit)
+        };
+
+        let mut path = path;
+        let Some(node) = nodes::insert_node(&mut path, hit.element, hit.t) else {
+            return false;
+        };
+        self.push_selection_undo();
+        if let Some(shape) = self
+            .doc
+            .layers
+            .iter_mut()
+            .find(|layer| layer.index == target.layer)
+            .and_then(|layer| {
+                layer
+                    .shapes
+                    .iter_mut()
+                    .find(|shape| shape.id == target.shape)
+            })
+        {
+            shape.path = path.clone();
+        }
         self.preview
             .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
         self.edited_paths
             .insert((target.layer, target.shape.clone()));
+        self.selected_node = Some(node);
         self.dirty = true;
-        drag.last_world = world;
-        self.node_drag = Some(drag);
+        self.set_status("added node", false);
+        true
+    }
+
+    fn delete_selected_node(&mut self) {
+        let Some(node) = self.selected_node else {
+            self.set_status("select an anchor to delete", true);
+            return;
+        };
+        if node.kind != NodeKind::Anchor {
+            self.set_status("select an anchor to delete", true);
+            return;
+        }
+        let Some(target) = self.node_edit.clone() else {
+            return;
+        };
+        let path = {
+            let Some(shape) = self
+                .doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == target.layer)
+                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == target.shape))
+            else {
+                return;
+            };
+            shape.path.clone()
+        };
+        let mut path = path;
+        if !nodes::delete_anchor(&mut path, node) {
+            self.set_status("cannot delete this node", true);
+            return;
+        }
+        self.push_selection_undo();
+        if let Some(shape) = self
+            .doc
+            .layers
+            .iter_mut()
+            .find(|layer| layer.index == target.layer)
+            .and_then(|layer| {
+                layer
+                    .shapes
+                    .iter_mut()
+                    .find(|shape| shape.id == target.shape)
+            })
+        {
+            shape.path = path.clone();
+        }
+        self.preview
+            .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
+        self.edited_paths
+            .insert((target.layer, target.shape.clone()));
+        self.selected_node = None;
+        self.node_drag = None;
+        self.dirty = true;
+        self.set_status("deleted node", false);
     }
 
     fn toggle_node_edit(&mut self) {
@@ -2185,7 +2310,7 @@ impl OrleansApp {
 
                 let selected_count = self.selected_shapes.len();
                 let hint = if self.node_edit.is_some() {
-                    "Drag nodes · Done or Esc to finish · Ctrl+Z to undo"
+                    "Drag nodes · dbl-click segment adds · Del removes · Esc finishes"
                 } else if selected_count == 0 {
                     "Click a shape · Ctrl/Shift-click for multiple · drag to move · right-drag to pan"
                 } else {
@@ -2251,6 +2376,23 @@ impl OrleansApp {
                                 ui.label(RichText::new("drag anchors / controls").small().weak());
                             }
                         });
+                        if self.node_edit.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.node_snap, "Snap")
+                                    .on_hover_text("Snap dragged nodes to the canvas grid");
+                                let can_delete = matches!(
+                                    self.selected_node,
+                                    Some(node) if node.kind == NodeKind::Anchor
+                                );
+                                if ui
+                                    .add_enabled(can_delete, egui::Button::new("Delete node"))
+                                    .on_hover_text("Delete the selected anchor (Del)")
+                                    .clicked()
+                                {
+                                    self.delete_selected_node();
+                                }
+                            });
+                        }
                     }
                 }
 
@@ -2512,13 +2654,27 @@ impl OrleansApp {
             }
         }
         if response.double_clicked() {
-            self.fit_pending = true;
+            if node_editing {
+                if let Some(position) = response.interact_pointer_pos() {
+                    if self.node_at(position, area).is_none()
+                        && !self.insert_node_at(position, area)
+                    {
+                        self.fit_pending = true;
+                    }
+                }
+            } else {
+                self.fit_pending = true;
+            }
         }
+    }
+
+    fn grid_step(&self) -> f64 {
+        nice_step(80.0 / f64::from(self.view.zoom))
     }
 
     fn draw_grid(&self, painter: &egui::Painter, area: Rect) {
         let visible = self.view.visible_world(area);
-        let step = nice_step(80.0 / f64::from(self.view.zoom));
+        let step = self.grid_step();
         if !(step.is_finite() && step > 0.0) {
             return;
         }
@@ -2960,6 +3116,16 @@ fn display_color(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(lift(r), lift(g), lift(b))
 }
 
+fn snap_point(point: Point, step: f64) -> Point {
+    if !step.is_finite() || step <= 0.0 {
+        return point;
+    }
+    Point::new(
+        (point.x / step).round() * step,
+        (point.y / step).round() * step,
+    )
+}
+
 fn nice_step(target: f64) -> f64 {
     if !target.is_finite() || target <= 0.0 {
         return 10.0;
@@ -3001,6 +3167,7 @@ impl eframe::App for OrleansApp {
         }
 
         let node_editing = self.node_edit.is_some();
+        let keyboard_input = ctx.egui_wants_keyboard_input();
         let mut action: Option<Action> = None;
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(egui::Key::O) {
@@ -3021,8 +3188,11 @@ impl eframe::App for OrleansApp {
             if i.modifiers.command && i.key_pressed(egui::Key::Enter) {
                 action = Some(Action::Send);
             }
-            if node_editing && i.key_pressed(egui::Key::Escape) {
+            if node_editing && !keyboard_input && i.key_pressed(egui::Key::Escape) {
                 action = Some(Action::ExitNodes);
+            }
+            if node_editing && !keyboard_input && i.key_pressed(egui::Key::Delete) {
+                action = Some(Action::DeleteNode);
             }
         });
 
@@ -3047,6 +3217,7 @@ impl eframe::App for OrleansApp {
             Some(Action::SaveProject) => self.save_project(),
             Some(Action::Undo) => self.undo_shape_move(),
             Some(Action::ExitNodes) => self.exit_node_edit(),
+            Some(Action::DeleteNode) => self.delete_selected_node(),
             Some(Action::Reload) => {
                 if let Some(path) = self.project_path.clone() {
                     self.load_project(path);
@@ -3156,6 +3327,17 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn snapping_rounds_to_the_grid() {
+        assert_eq!(
+            snap_point(Point::new(12.4, -3.0), 5.0),
+            Point::new(10.0, -5.0)
+        );
+        let unchanged = Point::new(12.4, 3.0);
+        assert_eq!(snap_point(unchanged, 0.0), unchanged);
+        assert_eq!(snap_point(unchanged, f64::NAN), unchanged);
     }
 
     #[test]
