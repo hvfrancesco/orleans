@@ -81,6 +81,11 @@ pub struct OrleansApp {
     job_done: usize,
     job_total: usize,
     confirm_send: bool,
+    jog_step: f64,
+    jog_feed: f64,
+    jog_pending_until: Option<Instant>,
+    homing: bool,
+    saw_home: bool,
 }
 
 impl OrleansApp {
@@ -114,6 +119,11 @@ impl OrleansApp {
             job_done: 0,
             job_total: 0,
             confirm_send: false,
+            jog_step: 1.0,
+            jog_feed: 1000.0,
+            jog_pending_until: None,
+            homing: false,
+            saw_home: false,
         };
         if let Some(path) = initial {
             app.load(path);
@@ -169,6 +179,14 @@ impl OrleansApp {
     }
 
     fn pump_machine(&mut self, ctx: &egui::Context) {
+        if self.homing
+            && self
+                .home_pending_until
+                .map(|until| until <= Instant::now())
+                .unwrap_or(true)
+        {
+            self.homing = false;
+        }
         while let Some(event) = self.machine.try_recv() {
             match event {
                 MachineEvent::Connecting(endpoint) => {
@@ -195,6 +213,8 @@ impl OrleansApp {
                     self.reconnect_attempt = 0;
                     self.machine_status = None;
                     self.home_pending_until = None;
+                    self.homing = false;
+                    self.saw_home = false;
                     self.job_running = false;
                     self.confirm_send = false;
                     match reason {
@@ -205,6 +225,15 @@ impl OrleansApp {
                 MachineEvent::Status(line) => {
                     if self.link == LinkState::Connected {
                         if let Some(status) = MachineStatus::parse(&line) {
+                            if self.homing {
+                                if status.state == "Home" {
+                                    self.saw_home = true;
+                                } else if status.is_alarm()
+                                    || (self.saw_home && status.state == "Idle")
+                                {
+                                    self.homing = false;
+                                }
+                            }
                             self.machine_status = Some(status);
                         }
                     }
@@ -267,6 +296,7 @@ impl OrleansApp {
     fn can_send(&self) -> bool {
         self.link == LinkState::Connected
             && !self.job_running
+            && !self.homing
             && !self.doc.is_empty()
             && !self
                 .home_pending_until
@@ -401,8 +431,16 @@ impl OrleansApp {
                                     .weak(),
                             );
                         }
-                        if let Some([x, y, z]) = status.mpos {
-                            ui.monospace(format!("X {x:.2}   Y {y:.2}   Z {z:.2}"));
+                        if let Some([x, y, z]) = status.work_position().or(status.mpos) {
+                            let label = if status.work_position().is_some() {
+                                "WPos"
+                            } else {
+                                "MPos"
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(label);
+                                ui.monospace(format!("X {x:.2}  Y {y:.2}  Z {z:.2}"));
+                            });
                         }
                         if status.feed.is_some() || status.spindle.is_some() {
                             ui.label(format!(
@@ -425,10 +463,115 @@ impl OrleansApp {
                 }
 
                 let connected = self.link == LinkState::Connected;
-                let pending = self
-                    .home_pending_until
+                let pending = self.homing
+                    || self
+                        .home_pending_until
+                        .map(|until| until > Instant::now())
+                        .unwrap_or(false);
+
+                ui.separator();
+                ui.heading("Jog");
+                let idle = self
+                    .machine_status
+                    .as_ref()
+                    .map(|status| status.state == "Idle" && status.spindle.unwrap_or(0) == 0)
+                    .unwrap_or(false);
+                let jog_pending = self
+                    .jog_pending_until
                     .map(|until| until > Instant::now())
                     .unwrap_or(false);
+                let can_jog = connected && !self.job_running && !pending && !jog_pending && idle;
+                let can_cancel_jog = connected && !self.job_running;
+
+                ui.horizontal(|ui| {
+                    ui.label("Step");
+                    ui.add(
+                        egui::DragValue::new(&mut self.jog_step)
+                            .speed(0.1)
+                            .range(0.1..=100.0)
+                            .suffix(" mm"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Feed");
+                    ui.add(
+                        egui::DragValue::new(&mut self.jog_feed)
+                            .speed(10.0)
+                            .range(100.0..=10_000.0)
+                            .suffix(" mm/min"),
+                    );
+                });
+
+                let pad = |label: &str| egui::Button::new(label).min_size(egui::vec2(46.0, 26.0));
+                egui::Grid::new("jog-pad")
+                    .num_columns(3)
+                    .spacing([4.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("");
+                        if ui
+                            .add_enabled(can_jog, pad("Y+"))
+                            .on_hover_text("Jog +Y")
+                            .clicked()
+                        {
+                            self.machine.jog(0.0, self.jog_step, self.jog_feed);
+                            self.jog_pending_until =
+                                Some(Instant::now() + Duration::from_millis(250));
+                        }
+                        ui.label("");
+                        ui.end_row();
+
+                        if ui
+                            .add_enabled(can_jog, pad("X-"))
+                            .on_hover_text("Jog -X")
+                            .clicked()
+                        {
+                            self.machine.jog(-self.jog_step, 0.0, self.jog_feed);
+                            self.jog_pending_until =
+                                Some(Instant::now() + Duration::from_millis(250));
+                        }
+                        if ui
+                            .add_enabled(can_cancel_jog, pad("■"))
+                            .on_hover_text("Cancel jog (realtime 0x85)")
+                            .clicked()
+                        {
+                            self.machine.jog_cancel();
+                        }
+                        if ui
+                            .add_enabled(can_jog, pad("X+"))
+                            .on_hover_text("Jog +X")
+                            .clicked()
+                        {
+                            self.machine.jog(self.jog_step, 0.0, self.jog_feed);
+                            self.jog_pending_until =
+                                Some(Instant::now() + Duration::from_millis(250));
+                        }
+                        ui.end_row();
+
+                        ui.label("");
+                        if ui
+                            .add_enabled(can_jog, pad("Y-"))
+                            .on_hover_text("Jog -Y")
+                            .clicked()
+                        {
+                            self.machine.jog(0.0, -self.jog_step, self.jog_feed);
+                            self.jog_pending_until =
+                                Some(Instant::now() + Duration::from_millis(250));
+                        }
+                        ui.label("");
+                        ui.end_row();
+                    });
+
+                if ui
+                    .add_enabled(can_jog, egui::Button::new("Set work zero"))
+                    .on_hover_text(
+                        "Set the current position as work zero (G92 X0 Y0). \
+                         A controller reset clears it.",
+                    )
+                    .clicked()
+                    && !self.machine.set_origin()
+                {
+                    self.set_status("machine thread stopped", true);
+                }
 
                 ui.separator();
                 ui.heading("Job");
@@ -471,6 +614,7 @@ impl OrleansApp {
                 ui.heading("Control");
                 let can_home = connected
                     && !self.job_running
+                    && !self.homing
                     && !pending
                     && self
                         .machine_status
@@ -514,10 +658,12 @@ impl OrleansApp {
                         self.set_status("machine thread stopped", true);
                     }
                     self.home_pending_until = None;
+                    self.homing = false;
+                    self.saw_home = false;
                 }
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new("Homing moves the head. Clear the bed first.")
+                    RichText::new("Jogging and homing move the head. Clear the bed first.")
                         .small()
                         .weak(),
                 );

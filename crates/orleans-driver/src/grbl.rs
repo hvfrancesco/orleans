@@ -182,6 +182,12 @@ impl<T: Transport> GrblClient<T> {
         Ok(())
     }
 
+    /// Cancel a jog (realtime `0x85`).
+    pub fn jog_cancel(&mut self) -> Result<(), DriverError> {
+        self.transport.write_raw(b"\x85")?;
+        Ok(())
+    }
+
     /// Soft reset (Ctrl-X). Aborts the job and clears the buffer.
     pub fn soft_reset(&mut self) -> Result<(), DriverError> {
         self.transport.write_raw(b"\x18")?;

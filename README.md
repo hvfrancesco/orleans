@@ -32,12 +32,13 @@ was decompiled or copied.
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
+| GUI jog (X/Y) and set work zero (`G92`) | ✅ |
 | GUI pause/resume | ❌ |
 | Selection, transforms, node editing | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-60 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+62 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -105,6 +106,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 * long status silences (for example while a controller homes) do not drop the
   link, and if the WiFi bridge closes the socket the GUI retries and reports
   **Reconnecting…** instead of going offline;
+* jog the head with the X/Y pad, an adjustable step and feed, and a jog-cancel
+  button; **Set work zero** sends `G92 X0 Y0` at the current position. Jogging
+  needs GRBL 1.1 (`$J=`); the G92 origin is temporary and a controller reset
+  clears it. The position readout shows `WPos` when the controller reports it,
+  otherwise `MPos`;
 * **Send to laser** streams the current job with a progress bar and a per-job
   Stop button (feed hold + soft reset). It is only enabled when the controller
   is connected, idle and the laser is off; `Ctrl+Enter` opens the confirmation,
@@ -207,6 +213,8 @@ concept of a line and some bridges emit negotiation on connect.
 * The simulator is protocol-level, not a motion model.
 * The GUI has no selection, transforms or node editing, and no pause/resume
   yet: stopping a job aborts it rather than pausing.
+* Work zero uses a temporary `G92` offset, not a stored G54 offset: a soft
+  reset, Stop or controller reconnect after a reset clears it.
 * Large designs are redrawn as polylines every frame; a spatial index and
   level-of-detail rendering will be needed for very complex files.
 

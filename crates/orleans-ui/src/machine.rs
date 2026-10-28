@@ -21,6 +21,9 @@ pub enum Command {
     Unlock,
     Stop,
     Run(String),
+    Jog { dx: f64, dy: f64, feed: f64 },
+    JogCancel,
+    SetOrigin,
 }
 
 /// Notifications from the worker to the UI.
@@ -106,6 +109,18 @@ impl Machine {
     /// Abort a running job. The driver sends feed hold and reset itself.
     pub fn stop_job(&self) {
         self.stream_stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn jog(&self, dx: f64, dy: f64, feed: f64) -> bool {
+        self.tx.send(Command::Jog { dx, dy, feed }).is_ok()
+    }
+
+    pub fn jog_cancel(&self) -> bool {
+        self.tx.send(Command::JogCancel).is_ok()
+    }
+
+    pub fn set_origin(&self) -> bool {
+        self.tx.send(Command::SetOrigin).is_ok()
     }
 
     pub fn try_recv(&self) -> Option<Event> {
@@ -234,6 +249,30 @@ fn worker(
                 },
                 None => message(&events, "not connected", true),
             },
+            Ok(Command::Jog { dx, dy, feed }) => match client.as_mut() {
+                Some(connected) => {
+                    let line = jog_line(dx, dy, feed);
+                    match connected.write_command(&line) {
+                        Ok(()) => message(&events, format!("jog X{dx:+.2} Y{dy:+.2} mm"), false),
+                        Err(err) => message(&events, format!("jog failed: {err}"), true),
+                    }
+                }
+                None => message(&events, "not connected", true),
+            },
+            Ok(Command::JogCancel) => match client.as_mut() {
+                Some(connected) => match connected.jog_cancel() {
+                    Ok(()) => message(&events, "jog cancelled", false),
+                    Err(err) => message(&events, format!("jog cancel failed: {err}"), true),
+                },
+                None => message(&events, "not connected", true),
+            },
+            Ok(Command::SetOrigin) => match client.as_mut() {
+                Some(connected) => match connected.write_command("G92 X0 Y0") {
+                    Ok(()) => message(&events, "work origin set (G92 X0 Y0)", false),
+                    Err(err) => message(&events, format!("setting origin failed: {err}"), true),
+                },
+                None => message(&events, "not connected", true),
+            },
             Ok(Command::Run(program)) => match client.as_mut() {
                 Some(connected) => {
                     let total = program
@@ -331,6 +370,10 @@ fn worker(
     }
 }
 
+fn jog_line(dx: f64, dy: f64, feed: f64) -> String {
+    format!("$J=G91 G21 X{dx:.3} Y{dy:.3} F{feed:.0}")
+}
+
 fn connect(
     endpoint: &str,
     tcp_timeout: Duration,
@@ -406,6 +449,8 @@ pub struct Status {
     pub raw: String,
     pub state: String,
     pub mpos: Option<[f64; 3]>,
+    pub wpos: Option<[f64; 3]>,
+    pub wco: Option<[f64; 3]>,
     pub feed: Option<u32>,
     pub spindle: Option<u32>,
 }
@@ -421,18 +466,26 @@ impl Status {
             return None;
         }
 
+        let parse_xyz = |values: &str| {
+            let nums: Vec<f64> = values
+                .split(',')
+                .filter_map(|value| value.trim().parse().ok())
+                .collect();
+            (nums.len() >= 2).then(|| [nums[0], nums[1], *nums.get(2).unwrap_or(&0.0)])
+        };
+
         let mut mpos = None;
+        let mut wpos = None;
+        let mut wco = None;
         let mut feed = None;
         let mut spindle = None;
         for field in fields {
             if let Some(values) = field.strip_prefix("MPos:") {
-                let nums: Vec<f64> = values
-                    .split(',')
-                    .filter_map(|value| value.trim().parse().ok())
-                    .collect();
-                if nums.len() >= 2 {
-                    mpos = Some([nums[0], nums[1], *nums.get(2).unwrap_or(&0.0)]);
-                }
+                mpos = parse_xyz(values);
+            } else if let Some(values) = field.strip_prefix("WPos:") {
+                wpos = parse_xyz(values);
+            } else if let Some(values) = field.strip_prefix("WCO:") {
+                wco = parse_xyz(values);
             } else if let Some(values) = field.strip_prefix("FS:") {
                 let mut values = values.split(',');
                 feed = values.next().and_then(|value| value.trim().parse().ok());
@@ -444,9 +497,23 @@ impl Status {
             raw: raw.to_owned(),
             state,
             mpos,
+            wpos,
+            wco,
             feed,
             spindle,
         })
+    }
+
+    /// Work position: reported directly as `WPos`, or derived from `MPos` and
+    /// `WCO` (`WPos = MPos - WCO`).
+    pub fn work_position(&self) -> Option<[f64; 3]> {
+        if let Some(wpos) = self.wpos {
+            return Some(wpos);
+        }
+        match (self.mpos, self.wco) {
+            (Some(mpos), Some(wco)) => Some([mpos[0] - wco[0], mpos[1] - wco[1], mpos[2] - wco[2]]),
+            _ => None,
+        }
     }
 
     pub fn is_alarm(&self) -> bool {
@@ -564,6 +631,18 @@ mod tests {
             .expect("home command");
         assert_eq!(command, "$H");
 
+        assert!(machine.jog(1.0, 0.0, 500.0));
+        let command = commands
+            .recv_timeout(Duration::from_secs(2))
+            .expect("jog command");
+        assert_eq!(command, "$J=G91 G21 X1.000 Y0.000 F500");
+
+        assert!(machine.set_origin());
+        let command = commands
+            .recv_timeout(Duration::from_secs(2))
+            .expect("origin command");
+        assert_eq!(command, "G92 X0 Y0");
+
         drop(machine);
         let _ = server.join();
     }
@@ -679,6 +758,11 @@ mod tests {
     }
 
     #[test]
+    fn jog_lines_are_relative() {
+        assert_eq!(jog_line(1.5, -2.0, 800.0), "$J=G91 G21 X1.500 Y-2.000 F800");
+    }
+
+    #[test]
     fn parses_an_idle_status() {
         let status = Status::parse("<Idle|MPos:1.000,2.500,0.000|FS:1000,0>").expect("status");
         assert_eq!(status.state, "Idle");
@@ -699,6 +783,16 @@ mod tests {
 
         let laser_on = Status::parse("<Idle|MPos:0.000,0.000,0.000|FS:0,500>").expect("idle");
         assert!(!laser_on.can_home());
+    }
+
+    #[test]
+    fn derives_the_work_position() {
+        let status = Status::parse("<Idle|MPos:10.000,20.000,0.000|FS:0,0|WCO:5.000,5.000,0.000>")
+            .expect("status");
+        assert_eq!(status.work_position(), Some([5.0, 15.0, 0.0]));
+
+        let status = Status::parse("<Idle|WPos:1.000,2.000,0.000|FS:0,0>").expect("status");
+        assert_eq!(status.work_position(), Some([1.0, 2.0, 0.0]));
     }
 
     #[test]
