@@ -41,6 +41,7 @@ impl Status {
 enum LinkState {
     Disconnected,
     Connecting,
+    Reconnecting,
     Connected,
 }
 
@@ -74,6 +75,7 @@ pub struct OrleansApp {
     /// Set right after asking for homing, to debounce the button.
     home_pending_until: Option<Instant>,
     confirm_home: bool,
+    reconnect_attempt: u32,
 }
 
 impl OrleansApp {
@@ -102,6 +104,7 @@ impl OrleansApp {
             machine_status: None,
             home_pending_until: None,
             confirm_home: false,
+            reconnect_attempt: 0,
         };
         if let Some(path) = initial {
             app.load(path);
@@ -161,15 +164,26 @@ impl OrleansApp {
             match event {
                 MachineEvent::Connecting(endpoint) => {
                     self.link = LinkState::Connecting;
+                    self.reconnect_attempt = 0;
                     self.machine_status = None;
                     self.set_status(format!("connecting to {endpoint}…"), false);
                 }
                 MachineEvent::Connected(endpoint) => {
                     self.link = LinkState::Connected;
+                    self.reconnect_attempt = 0;
                     self.set_status(format!("connected to {endpoint}"), false);
+                }
+                MachineEvent::Reconnecting(attempt) => {
+                    self.link = LinkState::Reconnecting;
+                    self.reconnect_attempt = attempt;
+                    self.set_status(
+                        format!("connection lost; reconnecting (attempt {attempt})…"),
+                        true,
+                    );
                 }
                 MachineEvent::Disconnected(reason) => {
                     self.link = LinkState::Disconnected;
+                    self.reconnect_attempt = 0;
                     self.machine_status = None;
                     self.home_pending_until = None;
                     match reason {
@@ -201,12 +215,21 @@ impl OrleansApp {
         self.endpoint = endpoint.clone();
         if self.machine.connect(&endpoint) {
             self.link = LinkState::Connecting;
+            self.reconnect_attempt = 0;
             self.machine_status = None;
             self.confirm_home = false;
             self.set_status(format!("connecting to {endpoint}…"), false);
         } else {
             self.set_status("machine thread stopped", true);
         }
+    }
+
+    fn disconnect_machine(&mut self) {
+        let _ = self.machine.disconnect();
+        self.link = LinkState::Disconnected;
+        self.reconnect_attempt = 0;
+        self.machine_status = None;
+        self.set_status("disconnected", false);
     }
 
     fn machine_panel(&mut self, ui: &mut egui::Ui) {
@@ -222,7 +245,7 @@ impl OrleansApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (text, color) = match self.link {
                             LinkState::Connected => ("connected", Color32::from_rgb(120, 200, 130)),
-                            LinkState::Connecting => {
+                            LinkState::Connecting | LinkState::Reconnecting => {
                                 ("connecting", Color32::from_rgb(230, 190, 90))
                             }
                             LinkState::Disconnected => ("offline", Color32::from_gray(140)),
@@ -250,13 +273,20 @@ impl OrleansApp {
                     LinkState::Connecting => {
                         ui.spinner();
                         ui.label("Connecting…");
+                        if ui.button("Cancel").clicked() {
+                            self.disconnect_machine();
+                        }
+                    }
+                    LinkState::Reconnecting => {
+                        ui.spinner();
+                        ui.label(format!("Reconnecting… ({})", self.reconnect_attempt));
+                        if ui.button("Cancel").clicked() {
+                            self.disconnect_machine();
+                        }
                     }
                     LinkState::Connected => {
                         if ui.button("Disconnect").clicked() {
-                            let _ = self.machine.disconnect();
-                            self.link = LinkState::Disconnected;
-                            self.machine_status = None;
-                            self.set_status("disconnected", false);
+                            self.disconnect_machine();
                         }
                     }
                 });
@@ -273,7 +303,7 @@ impl OrleansApp {
                             );
                         });
                         if let Some([x, y, z]) = status.mpos {
-                            ui.monospace(format!("MPos  X {x:8.3}  Y {y:8.3}  Z {z:8.3}"));
+                            ui.monospace(format!("X {x:.2}   Y {y:.2}   Z {z:.2}"));
                         }
                         if status.feed.is_some() || status.spindle.is_some() {
                             ui.label(format!(
@@ -286,10 +316,10 @@ impl OrleansApp {
                         ui.label(RichText::new(&status.raw).small().weak().monospace());
                     }
                     None => {
-                        let text = if self.link == LinkState::Connecting {
-                            "waiting for status…"
-                        } else {
-                            "not connected"
+                        let text = match self.link {
+                            LinkState::Connecting => "waiting for status…",
+                            LinkState::Reconnecting => "waiting for the link…",
+                            _ => "not connected",
                         };
                         ui.label(RichText::new(text).weak());
                     }

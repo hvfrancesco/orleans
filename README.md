@@ -35,7 +35,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-57 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+58 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -99,7 +99,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 * the **Machine** panel connects over Telnet, shows the live GRBL state,
   position, feed and `S` value, and offers **Home ($H)**, **Unlock ($X)** and
   **Stop** (feed hold + soft reset). Homing asks for confirmation and is only
-  enabled when the controller is idle or in alarm, with the laser off.
+  enabled when the controller is idle or in alarm, with the laser off;
+* long status silences (for example while a controller homes) do not drop the
+  link, and if the WiFi bridge closes the socket the GUI retries and reports
+  **Reconnecting…** instead of going offline.
 
 The canvas shows the design geometry; kerf compensation is applied to the
 toolpath, so it affects the exported G-code and the statistics rather than the
