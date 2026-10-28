@@ -20,10 +20,7 @@ use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
-use crate::project::{
-    EditedPath, ExtraShape, GroupMember, GroupSettings, MovedShape, ProjectFile, RemovedShape,
-    ShapeTransform, FORMAT,
-};
+use crate::project::{GroupMember, GroupSettings, ProjectFile, FORMAT};
 use crate::viewport::Viewport;
 
 const DISPLAY_TOLERANCE: f64 = 0.05;
@@ -181,8 +178,6 @@ struct ShapeRef {
     shape: String,
 }
 
-type ShapeTransforms = BTreeMap<(usize, String), Affine>;
-
 /// A set of shapes selected and transformed together by the editor. Groups are
 /// editor metadata: every member still cuts with its own layer settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,8 +215,6 @@ const UNDO_LIMIT: usize = 30;
 #[derive(Default)]
 struct UndoSnapshot {
     shapes: Vec<(usize, String, kurbo::BezPath)>,
-    transforms: Option<ShapeTransforms>,
-    edited_paths: Option<BTreeSet<(usize, String)>>,
     rasters: Vec<RasterSnapshot>,
     settings: Option<SettingsSnapshot>,
     groups: Option<Vec<ShapeGroup>>,
@@ -234,12 +227,6 @@ struct UndoSnapshot {
 struct StructureSnapshot {
     layers: Vec<LayerStructureSnapshot>,
     groups: Vec<ShapeGroup>,
-    moved_shapes: BTreeMap<(usize, String), (usize, String)>,
-    extra_shapes: BTreeSet<(usize, String)>,
-    removed_shapes: BTreeSet<(usize, String)>,
-    deleted_layers: BTreeSet<usize>,
-    transforms: ShapeTransforms,
-    edited_paths: BTreeSet<(usize, String)>,
 }
 
 #[derive(Clone)]
@@ -551,17 +538,8 @@ pub struct OrleansApp {
     selected_layer: Option<usize>,
     selected_shapes: BTreeSet<ShapeRef>,
     groups: Vec<ShapeGroup>,
-    /// Current shape ref -> where it came from in the embedded SVG.
-    moved_shapes: BTreeMap<(usize, String), (usize, String)>,
-    /// Shapes created by copying, which have no SVG source.
-    extra_shapes: BTreeSet<(usize, String)>,
-    /// Original SVG shapes deleted from the document.
-    removed_shapes: BTreeSet<(usize, String)>,
-    /// Layer indices deleted from the editor.
-    deleted_layers: BTreeSet<usize>,
     /// Destination chosen in the move/copy row.
     transfer_layer: Option<usize>,
-    shape_transforms: ShapeTransforms,
     undo_stack: Vec<UndoSnapshot>,
     redo_stack: Vec<UndoSnapshot>,
     /// Settings as they were before the current pointer/keyboard edit gesture.
@@ -590,7 +568,6 @@ pub struct OrleansApp {
     node_snap_geometry: bool,
     /// Layer whose closed contours are being clicked to place manual tabs.
     tab_edit_layer: Option<usize>,
-    edited_paths: BTreeSet<(usize, String)>,
     raster_textures: BTreeMap<usize, egui::TextureHandle>,
     raster_texture_keys: BTreeMap<usize, (u32, u32, bool, [u8; 4])>,
     job: Job,
@@ -627,7 +604,6 @@ pub struct OrleansApp {
     job_paused: bool,
     job_uses_m4: bool,
     settings: Option<Settings>,
-    source_svg: Option<String>,
     project_path: Option<PathBuf>,
     settings_open: bool,
     setting_laser: bool,
@@ -648,12 +624,7 @@ impl OrleansApp {
             selected_layer: None,
             selected_shapes: BTreeSet::new(),
             groups: Vec::new(),
-            moved_shapes: BTreeMap::new(),
-            extra_shapes: BTreeSet::new(),
-            removed_shapes: BTreeSet::new(),
-            deleted_layers: BTreeSet::new(),
             transfer_layer: None,
-            shape_transforms: ShapeTransforms::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             settings_edit: None,
@@ -680,7 +651,6 @@ impl OrleansApp {
             node_snap: false,
             node_snap_geometry: true,
             tab_edit_layer: None,
-            edited_paths: BTreeSet::new(),
             raster_textures: BTreeMap::new(),
             raster_texture_keys: BTreeMap::new(),
             job: Job::default(),
@@ -719,7 +689,6 @@ impl OrleansApp {
             job_paused: false,
             job_uses_m4: false,
             settings: None,
-            source_svg: None,
             project_path: None,
             settings_open: false,
             setting_laser: true,
@@ -772,12 +741,7 @@ impl OrleansApp {
                     .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
                 self.groups.clear();
-                self.moved_shapes.clear();
-                self.extra_shapes.clear();
-                self.removed_shapes.clear();
-                self.deleted_layers.clear();
                 self.transfer_layer = None;
-                self.shape_transforms.clear();
                 self.clear_undo();
                 self.dragging_shape = false;
                 self.active_handle = None;
@@ -785,7 +749,6 @@ impl OrleansApp {
                 self.selected_nodes.clear();
                 self.node_drag = None;
                 self.tab_edit_layer = None;
-                self.edited_paths.clear();
                 self.raster_textures.clear();
                 self.raster_texture_keys.clear();
                 self.replan();
@@ -800,7 +763,6 @@ impl OrleansApp {
                 ));
                 self.path = Some(path);
                 self.project_path = None;
-                self.source_svg = Some(String::from_utf8_lossy(&bytes).into_owned());
                 self.fit_pending = true;
                 self.dirty = false;
             }
@@ -830,12 +792,7 @@ impl OrleansApp {
                 self.selected_raster = None;
                 self.selected_shapes.clear();
                 self.groups.clear();
-                self.moved_shapes.clear();
-                self.extra_shapes.clear();
-                self.removed_shapes.clear();
-                self.deleted_layers.clear();
                 self.transfer_layer = None;
-                self.shape_transforms.clear();
                 self.clear_undo();
                 self.dragging_shape = false;
                 self.active_handle = None;
@@ -843,7 +800,6 @@ impl OrleansApp {
                 self.selected_nodes.clear();
                 self.node_drag = None;
                 self.tab_edit_layer = None;
-                self.edited_paths.clear();
                 self.raster_textures.clear();
                 self.raster_texture_keys.clear();
                 self.replan();
@@ -856,23 +812,8 @@ impl OrleansApp {
                     self.doc.shape_count(),
                     self.preview.contour_count()
                 ));
-                let imported_refs: Vec<(usize, String)> = self
-                    .doc
-                    .layers
-                    .iter()
-                    .flat_map(|layer| {
-                        layer
-                            .shapes
-                            .iter()
-                            .map(move |shape| (layer.index, shape.id.clone()))
-                    })
-                    .collect();
-                for key in imported_refs {
-                    self.extra_shapes.insert(key);
-                }
                 self.path = Some(path);
                 self.project_path = None;
-                self.source_svg = None;
                 self.fit_pending = true;
                 self.dirty = false;
             }
@@ -946,11 +887,7 @@ impl OrleansApp {
             let index = start_index + offset;
             layer.index = index;
             layer.name = unique_layer_name(&mut used_names, &layer.name);
-            self.deleted_layers.remove(&index);
             shape_count += layer.shapes.len();
-            for shape in &layer.shapes {
-                self.extra_shapes.insert((index, shape.id.clone()));
-            }
             first_new.get_or_insert(index);
             self.doc.layers.push(layer);
             layer_count += 1;
@@ -1007,12 +944,7 @@ impl OrleansApp {
                     .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
                 self.groups.clear();
-                self.moved_shapes.clear();
-                self.extra_shapes.clear();
-                self.removed_shapes.clear();
-                self.deleted_layers.clear();
                 self.transfer_layer = None;
-                self.shape_transforms.clear();
                 self.clear_undo();
                 self.dragging_shape = false;
                 self.active_handle = None;
@@ -1020,7 +952,6 @@ impl OrleansApp {
                 self.selected_nodes.clear();
                 self.node_drag = None;
                 self.tab_edit_layer = None;
-                self.edited_paths.clear();
                 self.raster_textures.clear();
                 self.raster_texture_keys.clear();
                 self.replan();
@@ -1039,7 +970,6 @@ impl OrleansApp {
                 ));
                 self.path = Some(path);
                 self.project_path = None;
-                self.source_svg = None;
                 self.fit_pending = true;
                 self.dirty = false;
             }
@@ -1083,26 +1013,17 @@ impl OrleansApp {
             );
             return;
         }
-        let mut doc = if project.svg.trim().is_empty() {
-            Document::new(project.width_mm.max(1.0), project.height_mm.max(1.0))
-        } else {
-            match import_svg(project.svg.as_bytes(), &ImportOptions::default()) {
-                Ok(doc) if !doc.is_empty() => doc,
-                Ok(_) => {
-                    self.set_status(format!("{} contains no paths", path.display()), true);
-                    return;
-                }
-                Err(err) => {
-                    self.set_status(format!("importing project SVG: {err}"), true);
-                    return;
-                }
+        let doc = match project.to_document() {
+            Ok(doc) if !doc.is_empty() => doc,
+            Ok(_) => {
+                self.set_status(format!("{} contains no geometry", path.display()), true);
+                return;
+            }
+            Err(err) => {
+                self.set_status(format!("loading {}: {err}", path.display()), true);
+                return;
             }
         };
-        project.apply(&mut doc);
-        if doc.is_empty() {
-            self.set_status(format!("{} contains no geometry", path.display()), true);
-            return;
-        }
         self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
         self.doc = doc;
         self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
@@ -1112,17 +1033,6 @@ impl OrleansApp {
             .first()
             .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
         self.selected_shapes.clear();
-        self.shape_transforms = project
-            .transforms
-            .iter()
-            .map(|transform| {
-                let affine = transform
-                    .matrix
-                    .map(Affine::new)
-                    .unwrap_or_else(|| Affine::translate((transform.dx, transform.dy)));
-                ((transform.layer, transform.shape.clone()), affine)
-            })
-            .collect();
         self.groups = project
             .groups
             .iter()
@@ -1153,27 +1063,6 @@ impl OrleansApp {
                 })
             })
             .collect();
-        self.moved_shapes = project
-            .moved_shapes
-            .iter()
-            .map(|moved| {
-                (
-                    (moved.target_layer, moved.target_shape.clone()),
-                    (moved.source_layer, moved.source_shape.clone()),
-                )
-            })
-            .collect();
-        self.extra_shapes = project
-            .extra_shapes
-            .iter()
-            .map(|extra| (extra.layer, extra.shape.clone()))
-            .collect();
-        self.removed_shapes = project
-            .removed_shapes
-            .iter()
-            .map(|removed| (removed.layer, removed.shape.clone()))
-            .collect();
-        self.deleted_layers = project.deleted_layers.iter().copied().collect();
         self.transfer_layer = None;
         self.clear_undo();
         self.dragging_shape = false;
@@ -1182,18 +1071,12 @@ impl OrleansApp {
         self.selected_nodes.clear();
         self.node_drag = None;
         self.tab_edit_layer = None;
-        self.edited_paths = project
-            .edited_paths
-            .iter()
-            .map(|edited| (edited.layer, edited.shape.clone()))
-            .collect();
         self.raster_textures.clear();
         self.raster_texture_keys.clear();
         self.plan_opts.kerf = project.kerf;
         self.plan_opts.optimize = project.optimize;
         self.gcode_opts.laser_mode = project.laser_mode();
         self.gcode_opts.max_s = project.max_s;
-        self.source_svg = Some(project.svg.clone());
         self.project_path = Some(path.clone());
         self.path = project
             .source
@@ -1207,7 +1090,6 @@ impl OrleansApp {
     }
 
     fn save_project(&mut self) {
-        let svg = self.source_svg.clone().unwrap_or_default();
         let default_name = self
             .display_path()
             .and_then(|path| path.file_stem())
@@ -1221,57 +1103,20 @@ impl OrleansApp {
             return;
         };
         let source = self.path.as_ref().map(|path| path.display().to_string());
-        // Shapes moved or copied between layers carry their final geometry in
-        // dedicated overrides; a transform or node-edit entry would be relative
-        // to an SVG shape that is no longer there.
-        let overrides: BTreeSet<(usize, String)> = self
-            .moved_shapes
-            .keys()
-            .cloned()
-            .chain(self.extra_shapes.iter().cloned())
-            .collect();
-        let transforms = self
-            .shape_transforms
-            .iter()
-            .filter(|((layer, shape), _)| !overrides.contains(&(*layer, (*shape).clone())))
-            .map(|((layer, shape), affine)| ShapeTransform {
-                layer: *layer,
-                shape: shape.clone(),
-                matrix: Some(affine.as_coeffs()),
-                dx: 0.0,
-                dy: 0.0,
-            })
-            .collect();
-        let edited_paths = self
-            .edited_paths
-            .iter()
-            .filter(|(layer, shape)| !overrides.contains(&(*layer, (*shape).clone())))
-            .filter_map(|(layer, shape)| {
-                self.doc
-                    .layers
-                    .iter()
-                    .find(|entry| entry.index == *layer)?
-                    .shapes
-                    .iter()
-                    .find(|entry| entry.id == *shape)
-                    .map(|entry| EditedPath {
-                        layer: *layer,
-                        shape: shape.clone(),
-                        path: entry.path.to_svg(),
-                    })
-            })
-            .collect();
-        let mut project = ProjectFile::new(
-            svg,
-            source,
+        let mut project = match ProjectFile::from_document(
             &self.doc,
+            source,
             self.plan_opts.kerf,
             self.plan_opts.optimize,
             self.gcode_opts.laser_mode,
             self.gcode_opts.max_s,
-            transforms,
-        );
-        project.edited_paths = edited_paths;
+        ) {
+            Ok(project) => project,
+            Err(err) => {
+                self.set_status(format!("serialising project: {err}"), true);
+                return;
+            }
+        };
         project.groups = self
             .groups
             .iter()
@@ -1288,49 +1133,6 @@ impl OrleansApp {
                     .collect(),
             })
             .collect();
-        project.moved_shapes = self
-            .moved_shapes
-            .iter()
-            .filter_map(|((layer, shape), (source_layer, source_shape))| {
-                let entry = self.shape_by_ref(&ShapeRef {
-                    layer: *layer,
-                    shape: shape.clone(),
-                })?;
-                Some(MovedShape {
-                    source_layer: *source_layer,
-                    source_shape: source_shape.clone(),
-                    target_layer: *layer,
-                    target_shape: shape.clone(),
-                    path: Some(entry.path.to_svg()),
-                    is_fill: entry.is_fill,
-                })
-            })
-            .collect();
-        project.extra_shapes = self
-            .extra_shapes
-            .iter()
-            .filter_map(|(layer, shape)| {
-                let entry = self.shape_by_ref(&ShapeRef {
-                    layer: *layer,
-                    shape: shape.clone(),
-                })?;
-                Some(ExtraShape {
-                    layer: *layer,
-                    shape: shape.clone(),
-                    path: entry.path.to_svg(),
-                    is_fill: entry.is_fill,
-                })
-            })
-            .collect();
-        project.removed_shapes = self
-            .removed_shapes
-            .iter()
-            .map(|(layer, shape)| RemovedShape {
-                layer: *layer,
-                shape: shape.clone(),
-            })
-            .collect();
-        project.deleted_layers = self.deleted_layers.iter().copied().collect();
         let json = match serde_json::to_string_pretty(&project) {
             Ok(json) => json,
             Err(err) => {
@@ -1779,12 +1581,6 @@ impl OrleansApp {
                 .map(LayerStructureSnapshot::capture)
                 .collect(),
             groups: self.groups.clone(),
-            moved_shapes: self.moved_shapes.clone(),
-            extra_shapes: self.extra_shapes.clone(),
-            removed_shapes: self.removed_shapes.clone(),
-            deleted_layers: self.deleted_layers.clone(),
-            transforms: self.shape_transforms.clone(),
-            edited_paths: self.edited_paths.clone(),
         }
     }
 
@@ -1819,7 +1615,6 @@ impl OrleansApp {
         let color = NEW_LAYER_COLORS[self.doc.layers.len() % NEW_LAYER_COLORS.len()];
         let layer = Layer::new(index, name, color, orleans_core::CutParams::default());
         self.doc.layers.push(layer);
-        self.deleted_layers.remove(&index);
         self.selected_layer = Some(index);
         self.tab_edit_layer = None;
         self.transfer_layer = Some(index);
@@ -1845,14 +1640,6 @@ impl OrleansApp {
                 layer.shapes.retain(|shape| shape.id != source.shape);
             }
             self.remove_manual_tabs(source.layer, &source.shape);
-            let key = (source.layer, source.shape.clone());
-            if let Some(origin) = self.moved_shapes.remove(&key) {
-                self.removed_shapes.insert(origin);
-            } else if !self.extra_shapes.remove(&key) {
-                self.removed_shapes.insert(key.clone());
-            }
-            self.shape_transforms.remove(&key);
-            self.edited_paths.remove(&key);
         }
         for group in &mut self.groups {
             group.members.retain(|member| !refs.contains(member));
@@ -1887,13 +1674,6 @@ impl OrleansApp {
         }
         self.push_structure_undo();
         self.doc.layers.remove(position);
-        self.deleted_layers.insert(index);
-        self.moved_shapes.retain(|(layer, _), _| *layer != index);
-        self.extra_shapes.retain(|(layer, _)| *layer != index);
-        self.removed_shapes.retain(|(layer, _)| *layer != index);
-        self.shape_transforms
-            .retain(|(layer, _), _| *layer != index);
-        self.edited_paths.retain(|(layer, _)| *layer != index);
         for group in &mut self.groups {
             group.members.retain(|member| member.layer != index);
         }
@@ -1982,8 +1762,6 @@ impl OrleansApp {
                     layer: source.layer,
                     shape: id,
                 };
-                self.extra_shapes
-                    .insert((source.layer, new_ref.shape.clone()));
                 mapping.insert(source.clone(), new_ref.clone());
                 copies.insert(new_ref);
             }
@@ -2118,21 +1896,8 @@ impl OrleansApp {
             let Some(shape) = self.shape_by_ref(source) else {
                 continue;
             };
-            let origin = if copy {
-                None
-            } else {
-                Some(
-                    self.moved_shapes
-                        .get(&(source.layer, source.shape.clone()))
-                        .cloned()
-                        .unwrap_or((source.layer, source.shape.clone())),
-                )
-            };
-            let was_extra = self
-                .extra_shapes
-                .contains(&(source.layer, source.shape.clone()));
             let tabs = self.manual_tabs_for(source.layer, &source.shape);
-            payload.push((source.clone(), shape.clone(), origin, was_extra, tabs));
+            payload.push((source.clone(), shape.clone(), tabs));
         }
         if payload.is_empty() {
             self.set_status("nothing to move or copy", true);
@@ -2141,7 +1906,7 @@ impl OrleansApp {
 
         self.push_structure_undo();
         if !copy {
-            for (source, _, _, _, _) in &payload {
+            for (source, _, _) in &payload {
                 if let Some(layer) = self
                     .doc
                     .layers
@@ -2151,12 +1916,6 @@ impl OrleansApp {
                     layer.shapes.retain(|shape| shape.id != source.shape);
                 }
                 self.remove_manual_tabs(source.layer, &source.shape);
-                let key = (source.layer, source.shape.clone());
-                self.moved_shapes.remove(&key);
-                self.extra_shapes.remove(&key);
-                self.removed_shapes.remove(&key);
-                self.shape_transforms.remove(&key);
-                self.edited_paths.remove(&key);
             }
         }
 
@@ -2174,7 +1933,7 @@ impl OrleansApp {
             .map(|shape| shape.id.clone())
             .collect();
         let mut mapping: BTreeMap<ShapeRef, ShapeRef> = BTreeMap::new();
-        for (source, mut shape, origin, was_extra, mut tabs) in payload {
+        for (source, mut shape, mut tabs) in payload {
             let id = unique_shape_id(&shape.id, &mut used);
             shape.id = id.clone();
             self.doc.layers[target_pos].shapes.push(shape);
@@ -2186,14 +1945,7 @@ impl OrleansApp {
                 layer: target_layer,
                 shape: id,
             };
-            mapping.insert(source, new_ref.clone());
-            if copy || was_extra {
-                self.extra_shapes
-                    .insert((target_layer, new_ref.shape.clone()));
-            } else if let Some(origin) = origin {
-                self.moved_shapes
-                    .insert((target_layer, new_ref.shape.clone()), origin);
-            }
+            mapping.insert(source, new_ref);
         }
 
         self.remap_groups(&mapping, copy);
@@ -2469,8 +2221,6 @@ impl OrleansApp {
         }
         self.push_undo(UndoSnapshot {
             shapes,
-            transforms: Some(self.shape_transforms.clone()),
-            edited_paths: Some(self.edited_paths.clone()),
             rasters: Vec::new(),
             settings: None,
             groups: None,
@@ -2490,8 +2240,6 @@ impl OrleansApp {
         };
         self.push_undo(UndoSnapshot {
             shapes: Vec::new(),
-            transforms: Some(self.shape_transforms.clone()),
-            edited_paths: Some(self.edited_paths.clone()),
             rasters: vec![RasterSnapshot {
                 layer: layer_index,
                 x: raster.x,
@@ -2543,14 +2291,6 @@ impl OrleansApp {
             .collect();
         UndoSnapshot {
             shapes,
-            transforms: snapshot
-                .transforms
-                .as_ref()
-                .map(|_| self.shape_transforms.clone()),
-            edited_paths: snapshot
-                .edited_paths
-                .as_ref()
-                .map(|_| self.edited_paths.clone()),
             rasters,
             settings: snapshot.settings.as_ref().map(|_| self.capture_settings()),
             groups: snapshot.groups.as_ref().map(|_| self.groups.clone()),
@@ -2562,9 +2302,7 @@ impl OrleansApp {
     }
 
     fn restore_snapshot(&mut self, snapshot: UndoSnapshot) {
-        let has_geometry = snapshot.transforms.is_some()
-            || snapshot.edited_paths.is_some()
-            || !snapshot.shapes.is_empty()
+        let has_geometry = !snapshot.shapes.is_empty()
             || !snapshot.rasters.is_empty()
             || snapshot.structure.is_some();
 
@@ -2578,12 +2316,6 @@ impl OrleansApp {
             {
                 shape.path = path;
             }
-        }
-        if let Some(transforms) = snapshot.transforms {
-            self.shape_transforms = transforms;
-        }
-        if let Some(edited_paths) = snapshot.edited_paths {
-            self.edited_paths = edited_paths;
         }
         for raster in snapshot.rasters {
             if let Some(layer) = self
@@ -2635,12 +2367,6 @@ impl OrleansApp {
             }
             self.doc.layers = layers;
             self.groups = structure.groups;
-            self.moved_shapes = structure.moved_shapes;
-            self.extra_shapes = structure.extra_shapes;
-            self.removed_shapes = structure.removed_shapes;
-            self.deleted_layers = structure.deleted_layers;
-            self.shape_transforms = structure.transforms;
-            self.edited_paths = structure.edited_paths;
             if let Some(target) = self.node_edit.clone() {
                 if self.shape_by_ref(&target).is_none() {
                     self.node_edit = None;
@@ -2744,11 +2470,6 @@ impl OrleansApp {
                 };
                 shape.path.apply_affine(affine);
             }
-            let entry = self
-                .shape_transforms
-                .entry((selection.layer, selection.shape.clone()))
-                .or_insert(Affine::IDENTITY);
-            *entry = affine * *entry;
             if let Some(preview) = self.preview.shape_mut(selection.layer, &selection.shape) {
                 for contour in &mut preview.contours {
                     for point in &mut contour.points {
@@ -3449,8 +3170,7 @@ impl OrleansApp {
         if moved {
             self.preview
                 .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
-            self.edited_paths
-                .insert((target.layer, target.shape.clone()));
+            // Node edits are stored directly in the shape path.
             self.dirty = true;
         }
     }
@@ -3503,8 +3223,7 @@ impl OrleansApp {
         }
         self.preview
             .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
-        self.edited_paths
-            .insert((target.layer, target.shape.clone()));
+        // Node edits are stored directly in the shape path.
         self.selected_nodes.clear();
         self.selected_nodes.insert(node);
         self.dirty = true;
@@ -3564,8 +3283,7 @@ impl OrleansApp {
         }
         self.preview
             .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
-        self.edited_paths
-            .insert((target.layer, target.shape.clone()));
+        // Node edits are stored directly in the shape path.
         self.selected_nodes.clear();
         self.node_drag = None;
         self.dirty = true;
@@ -3603,8 +3321,7 @@ impl OrleansApp {
         }
         self.preview
             .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
-        self.edited_paths
-            .insert((target.layer, target.shape.clone()));
+        // Node edits are stored directly in the shape path.
         self.selected_nodes.clear();
         self.node_drag = None;
         self.dirty = true;

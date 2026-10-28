@@ -2557,6 +2557,7 @@ dependencies = [
  "anyhow",
  "base64",
  "eframe",
+ "image",
  "kurbo 0.11.3",
  "orleans-core",
  "orleans-driver",

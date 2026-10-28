@@ -40,7 +40,7 @@ was decompiled or copied.
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
-| Project save/load (`.orleans`, embedded SVG + settings/path edits) | ✅ |
+| Project save/load (`.orleans`, canonical layer/shape snapshot) | ✅ |
 | Import SVG/DXF/images into the current design (hybrid jobs) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -53,7 +53,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-155 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+143 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -191,12 +191,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   jobs select G54. The position readout shows `WPos` when the controller
   reports it, otherwise `MPos`;
 * **Save project…** (`Ctrl+S`) writes a self-contained `.orleans` JSON file
-  with the SVG, layer parameters, job settings, per-shape transforms,
-  node-edited paths, groups, objects moved, copied or deleted between layers,
-  deleted layers, and embedded raster image data.
-  **Open…** accepts SVG, DXF, images and `.orleans`; **Reload** reloads whichever
-  is current. Imported and DXF-origin vector geometry is embedded as paths, so
-  hybrid projects are self-contained;
+  containing the current document: page size, job settings, every layer and
+  shape path, groups, fill/tab settings and PNG-compressed raster images. It is
+  a canonical snapshot (format 2), not an SVG plus edit history, so loading
+  never depends on re-importing a source file. **Open…** accepts SVG, DXF,
+  images and `.orleans`; **Reload** reloads whichever is current;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
   homing `$22`, and the raw `$$` list. **Apply** writes the changed settings
   to EEPROM; editing is blocked while cutting or homing;
@@ -342,10 +341,9 @@ concept of a line and some bridges emit negotiation on connect.
 * The simulator is protocol-level, not a motion model.
 * The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
   assumes work zero coincides with machine zero.
-* Project layer settings, Show/Cut state and cut order are matched by layer
-  index; shape transforms, node-edited paths and groups are matched by layer
-  index plus shape id. If the SVG's colour grouping changes after saving, check
-  that the settings landed on the right layers.
+* `.orleans` files use format 2 and are not backward-compatible with pre-release
+  v1 files. Projects store full geometry, so they are larger than the original
+  SVG but no longer depend on re-import or index matching.
 * Interactive handles scale uniformly around the opposite corner and rotate
   around the selection centre. There is no non-uniform/skewed scaling.
 * DXF import covers ASCII files and the listed entities only. Blocks,
