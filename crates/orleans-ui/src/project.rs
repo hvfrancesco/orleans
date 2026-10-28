@@ -5,7 +5,7 @@
 //! parameters, the job-level options, shape transforms and node-edited paths.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use orleans_core::{CutParams, Document, Layer, LayerMode, RasterImage, RasterMode};
+use orleans_core::{CutParams, Document, Layer, LayerMode, RasterImage, RasterMode, Shape};
 use orleans_driver::gcode::LaserMode;
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,35 @@ pub struct ProjectFile {
     /// Editor groups. They affect selection and transforms, not cutting.
     #[serde(default)]
     pub groups: Vec<GroupSettings>,
+    /// Shapes moved out of their original SVG layer.
+    #[serde(default)]
+    pub moved_shapes: Vec<MovedShape>,
+    /// Shapes created by copying, with no source in the embedded SVG.
+    #[serde(default)]
+    pub extra_shapes: Vec<ExtraShape>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MovedShape {
+    pub source_layer: usize,
+    pub source_shape: String,
+    pub target_layer: usize,
+    pub target_shape: String,
+    /// Final path in document coordinates.
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub is_fill: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExtraShape {
+    pub layer: usize,
+    pub shape: String,
+    /// Final path in document coordinates.
+    pub path: String,
+    #[serde(default)]
+    pub is_fill: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -252,6 +281,8 @@ impl ProjectFile {
             transforms,
             edited_paths: Vec::new(),
             groups: Vec::new(),
+            moved_shapes: Vec::new(),
+            extra_shapes: Vec::new(),
         }
     }
 
@@ -365,6 +396,67 @@ impl ProjectFile {
                 })
             {
                 shape.path = path;
+            }
+        }
+
+        // Move shapes after transforms and node edits, so their stored final
+        // path and target layer win over the original SVG geometry.
+        for moved in &self.moved_shapes {
+            if !doc
+                .layers
+                .iter()
+                .any(|layer| layer.index == moved.target_layer)
+            {
+                continue;
+            }
+            let Some(source_layer) = doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == moved.source_layer)
+            else {
+                continue;
+            };
+            let Some(position) = source_layer
+                .shapes
+                .iter()
+                .position(|shape| shape.id == moved.source_shape)
+            else {
+                continue;
+            };
+            let source = source_layer.shapes.remove(position);
+            let (path, is_fill) = moved
+                .path
+                .as_deref()
+                .and_then(|path| kurbo::BezPath::from_svg(path).ok())
+                .filter(|path| !path.elements().is_empty())
+                .map(|path| (path, moved.is_fill))
+                .unwrap_or((source.path, moved.is_fill || source.is_fill));
+            if let Some(target) = doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == moved.target_layer)
+            {
+                target
+                    .shapes
+                    .push(Shape::new(moved.target_shape.clone(), path, is_fill));
+            }
+        }
+
+        for extra in &self.extra_shapes {
+            let Ok(path) = kurbo::BezPath::from_svg(&extra.path) else {
+                continue;
+            };
+            if path.elements().is_empty() {
+                continue;
+            }
+            if let Some(layer) = doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == extra.layer)
+            {
+                layer
+                    .shapes
+                    .push(Shape::new(extra.shape.clone(), path, extra.is_fill));
             }
         }
     }
@@ -509,6 +601,70 @@ mod tests {
             .remove("groups");
         let old: ProjectFile = serde_json::from_value(value).expect("old project");
         assert!(old.groups.is_empty());
+    }
+
+    #[test]
+    fn apply_moves_and_adds_shapes_between_layers() {
+        use kurbo::BezPath;
+
+        let mut doc = Document::new(100.0, 100.0);
+        let mut source = Layer::new(0, "source", [0, 0, 0], CutParams::default());
+        source.shapes.push(Shape::new(
+            "moved",
+            BezPath::from_svg("M0,0 L10,0").expect("path"),
+            false,
+        ));
+        let target = Layer::new(1, "target", [255, 0, 0], CutParams::default());
+        doc.layers.push(source);
+        doc.layers.push(target);
+
+        let mut project = ProjectFile::new(
+            "<svg/>".to_owned(),
+            None,
+            &doc,
+            0.0,
+            true,
+            LaserMode::M3,
+            1000,
+            Vec::new(),
+        );
+        project.moved_shapes = vec![MovedShape {
+            source_layer: 0,
+            source_shape: "moved".to_owned(),
+            target_layer: 1,
+            target_shape: "moved".to_owned(),
+            path: Some("M0,0 L0,20".to_owned()),
+            is_fill: false,
+        }];
+        project.extra_shapes = vec![ExtraShape {
+            layer: 1,
+            shape: "copy".to_owned(),
+            path: "M5,5 L15,5".to_owned(),
+            is_fill: true,
+        }];
+
+        let json = serde_json::to_string(&project).expect("serialise");
+        let project: ProjectFile = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(project.moved_shapes.len(), 1);
+        assert_eq!(project.extra_shapes.len(), 1);
+
+        let mut loaded = doc.clone();
+        project.apply(&mut loaded);
+        assert!(loaded.layers[0].shapes.is_empty());
+        assert_eq!(loaded.layers[1].shapes.len(), 2);
+        let moved = loaded.layers[1]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == "moved")
+            .expect("moved shape");
+        assert!((moved.bounds().height() - 20.0).abs() < 1e-9);
+        let copy = loaded.layers[1]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == "copy")
+            .expect("copied shape");
+        assert!(copy.is_fill);
+        assert!((copy.bounds().width() - 10.0).abs() < 1e-9);
     }
 
     #[test]
@@ -708,6 +864,8 @@ mod tests {
                 path: "M0,0 L0,20".to_owned(),
             }],
             groups: Vec::new(),
+            moved_shapes: Vec::new(),
+            extra_shapes: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -748,6 +906,8 @@ mod tests {
             }],
             edited_paths: Vec::new(),
             groups: Vec::new(),
+            moved_shapes: Vec::new(),
+            extra_shapes: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -785,6 +945,8 @@ mod tests {
             }],
             edited_paths: Vec::new(),
             groups: Vec::new(),
+            moved_shapes: Vec::new(),
+            extra_shapes: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -833,6 +995,8 @@ mod tests {
             transforms: Vec::new(),
             edited_paths: Vec::new(),
             groups: Vec::new(),
+            moved_shapes: Vec::new(),
+            extra_shapes: Vec::new(),
         };
         project.apply(&mut doc);
         assert_eq!(
@@ -881,6 +1045,8 @@ mod tests {
             transforms: Vec::new(),
             edited_paths: Vec::new(),
             groups: Vec::new(),
+            moved_shapes: Vec::new(),
+            extra_shapes: Vec::new(),
         };
         project.apply(&mut doc);
         let layer = &doc.layers[0];

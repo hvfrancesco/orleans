@@ -34,6 +34,7 @@ was decompiled or copied.
 | Tabs/bridges on contour cuts | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
+| New layers; move/copy objects between layers | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
@@ -49,7 +50,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-134 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+136 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -117,7 +118,13 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   passes. **Cut** decides whether the layer is planned, framed and sent;
   **Show** controls whether it is drawn. A visible layer with Cut off remains
   as a grey reference, while a hidden layer with Cut on still cuts. Move layers
-  in cut order, and the selected layer is highlighted on the canvas;
+  in cut order, and the selected layer is highlighted on the canvas. **+**
+  beside the heading creates an empty layer and chooses it as the move/copy
+  destination. With objects selected, pick any layer in the **To** row and
+  press **Move** or **Copy**; transfers are undoable. Groups move with their
+  members, copied grouped objects get their own group, and copies are ordinary
+  shapes that follow the destination layer's cut settings. Raster layers cannot
+  be destinations, and layers cannot be deleted yet;
 * choose **Line** or **Fill** for each layer. Fill mode adds **Fill spacing**,
   **Angle**, **Overlap** and **Alternate**; it hatches closed contours and
   previews the fill. Open contours are ignored by fill mode. Line mode adds
@@ -152,7 +159,8 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   reports it, otherwise `MPos`;
 * **Save project…** (`Ctrl+S`) writes a self-contained `.orleans` JSON file
   with the SVG, layer parameters, job settings, per-shape transforms,
-  node-edited paths, groups and embedded raster image data.
+  node-edited paths, groups, objects moved or copied between layers, and
+  embedded raster image data.
   **Open…** accepts SVG, images and `.orleans`; **Reload** reloads whichever is
   current;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,

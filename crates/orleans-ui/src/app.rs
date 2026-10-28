@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use kurbo::{Affine, Point};
-use orleans_core::{Document, Job, LayerMode, Op, RasterMode};
+use orleans_core::{Document, Job, Layer, LayerMode, Op, RasterMode, Shape};
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_geom::{flatten_path, hatch_contours, point_in_polygon, HatchOptions};
 use orleans_import::{import_image, import_svg, ImportOptions, DEFAULT_RASTER_DPI};
@@ -15,10 +15,22 @@ use orleans_toolpath::{plan, PlanOptions};
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
-use crate::project::{EditedPath, GroupMember, GroupSettings, ProjectFile, ShapeTransform, FORMAT};
+use crate::project::{
+    EditedPath, ExtraShape, GroupMember, GroupSettings, MovedShape, ProjectFile, ShapeTransform,
+    FORMAT,
+};
 use crate::viewport::Viewport;
 
 const DISPLAY_TOLERANCE: f64 = 0.05;
+
+const NEW_LAYER_COLORS: [[u8; 3]; 6] = [
+    [200, 60, 50],
+    [50, 150, 80],
+    [60, 120, 200],
+    [220, 140, 40],
+    [150, 80, 180],
+    [40, 160, 160],
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Theme {
@@ -205,6 +217,36 @@ struct UndoSnapshot {
     rasters: Vec<RasterSnapshot>,
     settings: Option<SettingsSnapshot>,
     groups: Option<Vec<ShapeGroup>>,
+    structure: Option<StructureSnapshot>,
+}
+
+/// Membership of shapes in layers, plus the group and source tracking that
+/// moves and copies invalidate. Raster pixels stay in the document.
+#[derive(Clone)]
+struct StructureSnapshot {
+    layers: Vec<LayerStructureSnapshot>,
+    groups: Vec<ShapeGroup>,
+    moved_shapes: BTreeMap<(usize, String), (usize, String)>,
+    extra_shapes: BTreeSet<(usize, String)>,
+    transforms: ShapeTransforms,
+    edited_paths: BTreeSet<(usize, String)>,
+}
+
+#[derive(Clone)]
+struct LayerStructureSnapshot {
+    index: usize,
+    settings: LayerSettingsSnapshot,
+    shapes: Vec<Shape>,
+}
+
+impl LayerStructureSnapshot {
+    fn capture(layer: &Layer) -> Self {
+        Self {
+            index: layer.index,
+            settings: LayerSettingsSnapshot::capture(layer),
+            shapes: layer.shapes.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -232,6 +274,57 @@ struct LayerSettingsSnapshot {
     visible: bool,
     output: bool,
     raster: Option<RasterSettingsSnapshot>,
+}
+
+impl LayerSettingsSnapshot {
+    fn capture(layer: &Layer) -> Self {
+        Self {
+            index: layer.index,
+            name: layer.name.clone(),
+            color: layer.color,
+            mode: layer.mode,
+            cut: layer.cut,
+            fill: layer.fill,
+            tabs: layer.tabs,
+            visible: layer.visible,
+            output: layer.output,
+            raster: layer.raster.as_ref().map(|raster| RasterSettingsSnapshot {
+                x: raster.x,
+                y: raster.y,
+                width_mm: raster.width_mm,
+                height_mm: raster.height_mm,
+                angle: raster.angle,
+                mode: raster.mode,
+                threshold: raster.threshold,
+                invert: raster.invert,
+                line_interval: raster.line_interval,
+                bidirectional: raster.bidirectional,
+            }),
+        }
+    }
+
+    fn apply_to(&self, layer: &mut Layer) {
+        layer.name.clone_from(&self.name);
+        layer.color = self.color;
+        layer.mode = self.mode;
+        layer.cut = self.cut;
+        layer.fill = self.fill;
+        layer.tabs = self.tabs;
+        layer.visible = self.visible;
+        layer.output = self.output;
+        if let (Some(image), Some(saved)) = (layer.raster.as_mut(), self.raster.as_ref()) {
+            image.x = saved.x;
+            image.y = saved.y;
+            image.width_mm = saved.width_mm;
+            image.height_mm = saved.height_mm;
+            image.angle = saved.angle;
+            image.mode = saved.mode;
+            image.threshold = saved.threshold;
+            image.invert = saved.invert;
+            image.line_interval = saved.line_interval;
+            image.bidirectional = saved.bidirectional;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -264,29 +357,7 @@ impl SettingsSnapshot {
             layers: doc
                 .layers
                 .iter()
-                .map(|layer| LayerSettingsSnapshot {
-                    index: layer.index,
-                    name: layer.name.clone(),
-                    color: layer.color,
-                    mode: layer.mode,
-                    cut: layer.cut,
-                    fill: layer.fill,
-                    tabs: layer.tabs,
-                    visible: layer.visible,
-                    output: layer.output,
-                    raster: layer.raster.as_ref().map(|raster| RasterSettingsSnapshot {
-                        x: raster.x,
-                        y: raster.y,
-                        width_mm: raster.width_mm,
-                        height_mm: raster.height_mm,
-                        angle: raster.angle,
-                        mode: raster.mode,
-                        threshold: raster.threshold,
-                        invert: raster.invert,
-                        line_interval: raster.line_interval,
-                        bidirectional: raster.bidirectional,
-                    }),
-                })
+                .map(LayerSettingsSnapshot::capture)
                 .collect(),
             order: doc.layers.iter().map(|layer| layer.index).collect(),
             plan: plan.clone(),
@@ -299,26 +370,7 @@ impl SettingsSnapshot {
             let Some(saved) = self.layers.iter().find(|saved| saved.index == layer.index) else {
                 continue;
             };
-            layer.name.clone_from(&saved.name);
-            layer.color = saved.color;
-            layer.mode = saved.mode;
-            layer.cut = saved.cut;
-            layer.fill = saved.fill;
-            layer.tabs = saved.tabs;
-            layer.visible = saved.visible;
-            layer.output = saved.output;
-            if let (Some(image), Some(saved)) = (layer.raster.as_mut(), saved.raster.as_ref()) {
-                image.x = saved.x;
-                image.y = saved.y;
-                image.width_mm = saved.width_mm;
-                image.height_mm = saved.height_mm;
-                image.angle = saved.angle;
-                image.mode = saved.mode;
-                image.threshold = saved.threshold;
-                image.invert = saved.invert;
-                image.line_interval = saved.line_interval;
-                image.bidirectional = saved.bidirectional;
-            }
+            saved.apply_to(layer);
         }
         let order = self.order;
         if order.len() == doc.layers.len()
@@ -473,6 +525,12 @@ pub struct OrleansApp {
     selected_layer: Option<usize>,
     selected_shapes: BTreeSet<ShapeRef>,
     groups: Vec<ShapeGroup>,
+    /// Current shape ref -> where it came from in the embedded SVG.
+    moved_shapes: BTreeMap<(usize, String), (usize, String)>,
+    /// Shapes created by copying, which have no SVG source.
+    extra_shapes: BTreeSet<(usize, String)>,
+    /// Destination chosen in the move/copy row.
+    transfer_layer: Option<usize>,
     shape_transforms: ShapeTransforms,
     undo_stack: Vec<UndoSnapshot>,
     redo_stack: Vec<UndoSnapshot>,
@@ -554,6 +612,9 @@ impl OrleansApp {
             selected_layer: None,
             selected_shapes: BTreeSet::new(),
             groups: Vec::new(),
+            moved_shapes: BTreeMap::new(),
+            extra_shapes: BTreeSet::new(),
+            transfer_layer: None,
             shape_transforms: ShapeTransforms::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -668,6 +729,9 @@ impl OrleansApp {
                     .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
                 self.groups.clear();
+                self.moved_shapes.clear();
+                self.extra_shapes.clear();
+                self.transfer_layer = None;
                 self.shape_transforms.clear();
                 self.clear_undo();
                 self.dragging_shape = false;
@@ -727,6 +791,9 @@ impl OrleansApp {
                     .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
                 self.groups.clear();
+                self.moved_shapes.clear();
+                self.extra_shapes.clear();
+                self.transfer_layer = None;
                 self.shape_transforms.clear();
                 self.clear_undo();
                 self.dragging_shape = false;
@@ -865,6 +932,22 @@ impl OrleansApp {
                 })
             })
             .collect();
+        self.moved_shapes = project
+            .moved_shapes
+            .iter()
+            .map(|moved| {
+                (
+                    (moved.target_layer, moved.target_shape.clone()),
+                    (moved.source_layer, moved.source_shape.clone()),
+                )
+            })
+            .collect();
+        self.extra_shapes = project
+            .extra_shapes
+            .iter()
+            .map(|extra| (extra.layer, extra.shape.clone()))
+            .collect();
+        self.transfer_layer = None;
         self.clear_undo();
         self.dragging_shape = false;
         self.active_handle = None;
@@ -910,9 +993,19 @@ impl OrleansApp {
             return;
         };
         let source = self.path.as_ref().map(|path| path.display().to_string());
+        // Shapes moved or copied between layers carry their final geometry in
+        // dedicated overrides; a transform or node-edit entry would be relative
+        // to an SVG shape that is no longer there.
+        let overrides: BTreeSet<(usize, String)> = self
+            .moved_shapes
+            .keys()
+            .cloned()
+            .chain(self.extra_shapes.iter().cloned())
+            .collect();
         let transforms = self
             .shape_transforms
             .iter()
+            .filter(|((layer, shape), _)| !overrides.contains(&(*layer, (*shape).clone())))
             .map(|((layer, shape), affine)| ShapeTransform {
                 layer: *layer,
                 shape: shape.clone(),
@@ -924,6 +1017,7 @@ impl OrleansApp {
         let edited_paths = self
             .edited_paths
             .iter()
+            .filter(|(layer, shape)| !overrides.contains(&(*layer, (*shape).clone())))
             .filter_map(|(layer, shape)| {
                 self.doc
                     .layers
@@ -964,6 +1058,40 @@ impl OrleansApp {
                         shape: member.shape.clone(),
                     })
                     .collect(),
+            })
+            .collect();
+        project.moved_shapes = self
+            .moved_shapes
+            .iter()
+            .filter_map(|((layer, shape), (source_layer, source_shape))| {
+                let entry = self.shape_by_ref(&ShapeRef {
+                    layer: *layer,
+                    shape: shape.clone(),
+                })?;
+                Some(MovedShape {
+                    source_layer: *source_layer,
+                    source_shape: source_shape.clone(),
+                    target_layer: *layer,
+                    target_shape: shape.clone(),
+                    path: Some(entry.path.to_svg()),
+                    is_fill: entry.is_fill,
+                })
+            })
+            .collect();
+        project.extra_shapes = self
+            .extra_shapes
+            .iter()
+            .filter_map(|(layer, shape)| {
+                let entry = self.shape_by_ref(&ShapeRef {
+                    layer: *layer,
+                    shape: shape.clone(),
+                })?;
+                Some(ExtraShape {
+                    layer: *layer,
+                    shape: shape.clone(),
+                    path: entry.path.to_svg(),
+                    is_fill: entry.is_fill,
+                })
             })
             .collect();
         let json = match serde_json::to_string_pretty(&project) {
@@ -1405,11 +1533,219 @@ impl OrleansApp {
         self.selected_raster = None;
     }
 
+    fn capture_structure(&self) -> StructureSnapshot {
+        StructureSnapshot {
+            layers: self
+                .doc
+                .layers
+                .iter()
+                .map(LayerStructureSnapshot::capture)
+                .collect(),
+            groups: self.groups.clone(),
+            moved_shapes: self.moved_shapes.clone(),
+            extra_shapes: self.extra_shapes.clone(),
+            transforms: self.shape_transforms.clone(),
+            edited_paths: self.edited_paths.clone(),
+        }
+    }
+
+    fn push_structure_undo(&mut self) {
+        self.push_undo(UndoSnapshot {
+            structure: Some(self.capture_structure()),
+            ..UndoSnapshot::default()
+        });
+        // Layer membership changed: a settings baseline from before this
+        // gesture no longer describes the document.
+        self.settings_edit = None;
+        self.settings_edit_changed = false;
+    }
+
     fn push_groups_undo(&mut self) {
         self.push_undo(UndoSnapshot {
             groups: Some(self.groups.clone()),
             ..UndoSnapshot::default()
         });
+    }
+
+    fn new_layer(&mut self) {
+        self.push_structure_undo();
+        let index = self
+            .doc
+            .layers
+            .iter()
+            .map(|layer| layer.index)
+            .max()
+            .map_or(0, |index| index + 1);
+        let name = format!("Layer {}", self.doc.layers.len() + 1);
+        let color = NEW_LAYER_COLORS[self.doc.layers.len() % NEW_LAYER_COLORS.len()];
+        let layer = Layer::new(index, name, color, orleans_core::CutParams::default());
+        self.doc.layers.push(layer);
+        self.selected_layer = Some(index);
+        self.transfer_layer = Some(index);
+        self.selected_raster = None;
+        self.dirty = true;
+        self.set_status(format!("created layer #{index}"), false);
+    }
+
+    /// Move or copy the selected shapes to `target_layer`, keeping groups,
+    /// project provenance and selection coherent.
+    fn transfer_selection(&mut self, target_layer: usize, copy: bool) {
+        if self.selected_shapes.is_empty() {
+            self.set_status("select objects to move or copy", true);
+            return;
+        }
+        let Some(target_is_raster) = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == target_layer)
+            .map(|layer| layer.raster.is_some())
+        else {
+            self.set_status("choose a target layer", true);
+            return;
+        };
+        if target_is_raster {
+            self.set_status("cannot put vector objects on a raster layer", true);
+            return;
+        }
+
+        let sources: Vec<ShapeRef> = self.selected_shapes.iter().cloned().collect();
+        let mut payload = Vec::new();
+        for source in &sources {
+            let Some(shape) = self.shape_by_ref(source) else {
+                continue;
+            };
+            let origin = if copy {
+                None
+            } else {
+                Some(
+                    self.moved_shapes
+                        .get(&(source.layer, source.shape.clone()))
+                        .cloned()
+                        .unwrap_or((source.layer, source.shape.clone())),
+                )
+            };
+            let was_extra = self
+                .extra_shapes
+                .contains(&(source.layer, source.shape.clone()));
+            payload.push((source.clone(), shape.clone(), origin, was_extra));
+        }
+        if payload.is_empty() {
+            self.set_status("nothing to move or copy", true);
+            return;
+        }
+
+        self.push_structure_undo();
+        if !copy {
+            for (source, _, _, _) in &payload {
+                if let Some(layer) = self
+                    .doc
+                    .layers
+                    .iter_mut()
+                    .find(|layer| layer.index == source.layer)
+                {
+                    layer.shapes.retain(|shape| shape.id != source.shape);
+                }
+                let key = (source.layer, source.shape.clone());
+                self.moved_shapes.remove(&key);
+                self.extra_shapes.remove(&key);
+                self.shape_transforms.remove(&key);
+                self.edited_paths.remove(&key);
+            }
+        }
+
+        let Some(target_pos) = self
+            .doc
+            .layers
+            .iter()
+            .position(|layer| layer.index == target_layer)
+        else {
+            return;
+        };
+        let mut used: BTreeSet<String> = self.doc.layers[target_pos]
+            .shapes
+            .iter()
+            .map(|shape| shape.id.clone())
+            .collect();
+        let mut mapping: BTreeMap<ShapeRef, ShapeRef> = BTreeMap::new();
+        for (source, mut shape, origin, was_extra) in payload {
+            let id = unique_shape_id(&shape.id, &mut used);
+            shape.id = id.clone();
+            self.doc.layers[target_pos].shapes.push(shape);
+            let new_ref = ShapeRef {
+                layer: target_layer,
+                shape: id,
+            };
+            mapping.insert(source, new_ref.clone());
+            if copy || was_extra {
+                self.extra_shapes
+                    .insert((target_layer, new_ref.shape.clone()));
+            } else if let Some(origin) = origin {
+                self.moved_shapes
+                    .insert((target_layer, new_ref.shape.clone()), origin);
+            }
+        }
+
+        self.remap_groups(&mapping, copy);
+        self.selected_shapes = mapping.values().cloned().collect();
+        self.selected_layer = Some(target_layer);
+        self.transfer_layer = Some(target_layer);
+        self.selected_raster = None;
+        self.node_edit = None;
+        self.selected_nodes.clear();
+        self.node_drag = None;
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.dirty = true;
+        let action = if copy { "copied" } else { "moved" };
+        self.set_status(
+            format!(
+                "{action} {} object(s) to layer #{target_layer}",
+                mapping.len()
+            ),
+            false,
+        );
+    }
+
+    fn remap_groups(&mut self, mapping: &BTreeMap<ShapeRef, ShapeRef>, copy: bool) {
+        if copy {
+            let source_groups = self.groups.clone();
+            let mut next_id = self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+            for group in source_groups {
+                let members: BTreeSet<ShapeRef> = group
+                    .members
+                    .iter()
+                    .filter_map(|member| mapping.get(member).cloned())
+                    .collect();
+                if members.is_empty() {
+                    continue;
+                }
+                let name = if group.name.is_empty() {
+                    "Group copy".to_owned()
+                } else {
+                    format!("{} copy", group.name)
+                };
+                self.groups.push(ShapeGroup {
+                    id: next_id,
+                    name,
+                    members,
+                });
+                next_id += 1;
+            }
+        } else {
+            for group in &mut self.groups {
+                group.members = group
+                    .members
+                    .iter()
+                    .map(|member| {
+                        mapping
+                            .get(member)
+                            .cloned()
+                            .unwrap_or_else(|| member.clone())
+                    })
+                    .collect();
+            }
+            self.groups.retain(|group| !group.members.is_empty());
+        }
     }
 
     fn group_selection(&mut self) {
@@ -1627,6 +1963,7 @@ impl OrleansApp {
             rasters: Vec::new(),
             settings: None,
             groups: None,
+            structure: None,
         });
     }
 
@@ -1654,6 +1991,7 @@ impl OrleansApp {
             }],
             settings: None,
             groups: None,
+            structure: None,
         });
     }
 
@@ -1705,6 +2043,10 @@ impl OrleansApp {
             rasters,
             settings: snapshot.settings.as_ref().map(|_| self.capture_settings()),
             groups: snapshot.groups.as_ref().map(|_| self.groups.clone()),
+            structure: snapshot
+                .structure
+                .as_ref()
+                .map(|_| self.capture_structure()),
         }
     }
 
@@ -1712,7 +2054,8 @@ impl OrleansApp {
         let has_geometry = snapshot.transforms.is_some()
             || snapshot.edited_paths.is_some()
             || !snapshot.shapes.is_empty()
-            || !snapshot.rasters.is_empty();
+            || !snapshot.rasters.is_empty()
+            || snapshot.structure.is_some();
 
         for (layer_index, shape_id, path) in snapshot.shapes {
             if let Some(shape) = self
@@ -1753,6 +2096,39 @@ impl OrleansApp {
         if let Some(groups) = snapshot.groups {
             self.groups = groups;
         }
+        if let Some(structure) = snapshot.structure {
+            let mut existing: BTreeMap<usize, Layer> = self
+                .doc
+                .layers
+                .drain(..)
+                .map(|layer| (layer.index, layer))
+                .collect();
+            let mut layers = Vec::with_capacity(structure.layers.len());
+            for saved in structure.layers {
+                let mut layer = existing.remove(&saved.index).unwrap_or_else(|| {
+                    Layer::new(
+                        saved.index,
+                        saved.settings.name.clone(),
+                        saved.settings.color,
+                        saved.settings.cut,
+                    )
+                });
+                saved.settings.apply_to(&mut layer);
+                layer.shapes = saved.shapes;
+                layers.push(layer);
+            }
+            self.doc.layers = layers;
+            self.groups = structure.groups;
+            self.moved_shapes = structure.moved_shapes;
+            self.extra_shapes = structure.extra_shapes;
+            self.shape_transforms = structure.transforms;
+            self.edited_paths = structure.edited_paths;
+            if let Some(target) = self.node_edit.clone() {
+                if self.shape_by_ref(&target).is_none() {
+                    self.node_edit = None;
+                }
+            }
+        }
 
         self.settings_edit = None;
         self.settings_edit_changed = false;
@@ -1785,6 +2161,12 @@ impl OrleansApp {
             if !self.doc.layers.iter().any(|layer| layer.index == index) {
                 self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
             }
+        }
+        if self
+            .transfer_layer
+            .is_some_and(|index| !self.doc.layers.iter().any(|layer| layer.index == index))
+        {
+            self.transfer_layer = None;
         }
     }
 
@@ -3537,6 +3919,13 @@ impl OrleansApp {
                 let cutting = self.doc.layers.iter().filter(|layer| layer.output).count();
                 ui.horizontal(|ui| {
                     ui.heading("Layers");
+                    if ui
+                        .small_button("+")
+                        .on_hover_text("Create a new empty layer")
+                        .clicked()
+                    {
+                        self.new_layer();
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if total > 0 {
                             ui.label(
@@ -4153,6 +4542,80 @@ impl OrleansApp {
                             }
                         });
                     }
+                    let layer_choices: Vec<(usize, String)> = self
+                        .doc
+                        .layers
+                        .iter()
+                        .filter(|layer| layer.raster.is_none())
+                        .map(|layer| {
+                            let name = if layer.name.is_empty() {
+                                format!("#{}", layer.index)
+                            } else {
+                                format!("#{} {}", layer.index, layer.name)
+                            };
+                            (layer.index, name)
+                        })
+                        .collect();
+                    let target_name = self
+                        .transfer_layer
+                        .and_then(|index| {
+                            layer_choices
+                                .iter()
+                                .find(|(choice, _)| *choice == index)
+                                .map(|(_, name)| name.clone())
+                        })
+                        .unwrap_or_else(|| "Choose layer".to_owned());
+                    ui.horizontal(|ui| {
+                        ui.label("To");
+                        egui::ComboBox::from_id_salt("transfer-layer")
+                            .selected_text(target_name)
+                            .show_ui(ui, |ui| {
+                                for (index, name) in &layer_choices {
+                                    ui.selectable_value(
+                                        &mut self.transfer_layer,
+                                        Some(*index),
+                                        name,
+                                    );
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        let target = self.transfer_layer.filter(|index| {
+                            layer_choices
+                                .iter()
+                                .any(|(choice, _)| choice == index)
+                        });
+                        let can_transfer = target.is_some();
+                        if ui
+                            .add_enabled(can_transfer, egui::Button::new("Move"))
+                            .on_hover_text("Move the selected objects to this layer")
+                            .clicked()
+                        {
+                            if let Some(target) = target {
+                                self.transfer_selection(target, false);
+                            }
+                        }
+                        if ui
+                            .add_enabled(can_transfer, egui::Button::new("Copy"))
+                            .on_hover_text("Copy the selected objects into this layer")
+                            .clicked()
+                        {
+                            if let Some(target) = target {
+                                self.transfer_selection(target, true);
+                            }
+                        }
+                        if let Some((_, name)) = target
+                            .and_then(|target| {
+                                layer_choices
+                                    .iter()
+                                    .find(|(index, _)| *index == target)
+                            })
+                        {
+                            ui.label(
+                                RichText::new(format!("→ {name}")).small().weak(),
+                            );
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.label("Move");
                         ui.label("X");
@@ -5364,6 +5827,25 @@ fn layer_color(rgb: [u8; 3], light: bool) -> Color32 {
     Color32::from_rgb(darken(r), darken(g), darken(b))
 }
 
+/// Return `base`, or the first free `base-copy[-n]` suffix.
+fn unique_shape_id(base: &str, used: &mut BTreeSet<String>) -> String {
+    if used.insert(base.to_owned()) {
+        return base.to_owned();
+    }
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 {
+            format!("{base}-copy")
+        } else {
+            format!("{base}-copy-{n}")
+        };
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// Darken pastel status accents for the light theme.
 fn readable_accent(color: Color32, light: bool) -> Color32 {
     if !light {
@@ -5752,6 +6234,14 @@ mod tests {
         assert_eq!(format_duration(42.4), "42s");
         assert_eq!(format_duration(61.0), "1m 01s");
         assert_eq!(format_duration(3725.0), "1h 02m");
+    }
+
+    #[test]
+    fn copied_shape_ids_get_a_free_suffix() {
+        let mut used = BTreeSet::from(["a".to_owned()]);
+        assert_eq!(unique_shape_id("a", &mut used), "a-copy");
+        assert_eq!(unique_shape_id("a", &mut used), "a-copy-2");
+        assert_eq!(unique_shape_id("b", &mut used), "b");
     }
 
     #[test]
