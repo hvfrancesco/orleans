@@ -115,23 +115,37 @@ impl RasterImage {
         Point::new(self.x + self.width_mm * 0.5, self.y + self.height_mm * 0.5)
     }
 
-    /// Corners in top-left, top-right, bottom-right, bottom-left order.
-    pub fn corners(&self) -> [Point; 4] {
+    /// Convert an unrotated local point into world space.
+    pub fn local_to_world(&self, local: Point) -> Point {
         let center = self.center();
         let (sin, cos) = self.angle.to_radians().sin_cos();
-        let rotate = |x: f64, y: f64| {
-            let dx = x - center.x;
-            let dy = y - center.y;
-            Point::new(
-                center.x + dx * cos - dy * sin,
-                center.y + dx * sin + dy * cos,
-            )
-        };
+        let dx = local.x - center.x;
+        let dy = local.y - center.y;
+        Point::new(
+            center.x + dx * cos - dy * sin,
+            center.y + dx * sin + dy * cos,
+        )
+    }
+
+    /// Convert a world point into the image's unrotated local frame.
+    pub fn world_to_local(&self, world: Point) -> Point {
+        let center = self.center();
+        let (sin, cos) = self.angle.to_radians().sin_cos();
+        let dx = world.x - center.x;
+        let dy = world.y - center.y;
+        Point::new(
+            center.x + dx * cos + dy * sin,
+            center.y - dx * sin + dy * cos,
+        )
+    }
+
+    /// Corners in top-left, top-right, bottom-right, bottom-left order.
+    pub fn corners(&self) -> [Point; 4] {
         [
-            rotate(self.x, self.y + self.height_mm),
-            rotate(self.x + self.width_mm, self.y + self.height_mm),
-            rotate(self.x + self.width_mm, self.y),
-            rotate(self.x, self.y),
+            self.local_to_world(Point::new(self.x, self.y + self.height_mm)),
+            self.local_to_world(Point::new(self.x + self.width_mm, self.y + self.height_mm)),
+            self.local_to_world(Point::new(self.x + self.width_mm, self.y)),
+            self.local_to_world(Point::new(self.x, self.y)),
         ]
     }
 
@@ -400,6 +414,36 @@ mod tests {
         assert_eq!(bounds.y0, 20.0);
         assert_eq!(bounds.x1, 30.0);
         assert_eq!(bounds.y1, 40.0);
+    }
+
+    #[test]
+    fn raster_local_world_round_trip_with_rotation() {
+        let raster = RasterImage {
+            width: 2,
+            height: 2,
+            grayscale: vec![0; 4],
+            x: 5.0,
+            y: 10.0,
+            width_mm: 10.0,
+            height_mm: 5.0,
+            angle: 37.0,
+            mode: RasterMode::Threshold,
+            threshold: 128,
+            invert: false,
+            line_interval: 0.2,
+            bidirectional: true,
+        };
+        for point in [
+            Point::new(5.0, 10.0),
+            Point::new(15.0, 15.0),
+            Point::new(7.5, 12.5),
+        ] {
+            let back = raster.world_to_local(raster.local_to_world(point));
+            assert!((back - point).hypot() < 1e-9, "{back:?} != {point:?}");
+        }
+        let bounds = raster.bounds();
+        assert!(bounds.width() > 10.0);
+        assert!(bounds.height() > 5.0);
     }
 
     #[test]

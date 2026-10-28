@@ -53,6 +53,17 @@ struct UndoSnapshot {
     shapes: Vec<(usize, String, kurbo::BezPath)>,
     transforms: ShapeTransforms,
     edited_paths: BTreeSet<(usize, String)>,
+    rasters: Vec<RasterSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RasterSnapshot {
+    layer: usize,
+    x: f64,
+    y: f64,
+    width_mm: f64,
+    height_mm: f64,
+    angle: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -131,6 +142,36 @@ impl SelectionAnchor {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RasterHandle {
+    Corner(HandleCorner),
+    Rotate,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RasterDrag {
+    Move {
+        layer: usize,
+        start_pointer: Point,
+        start_x: f64,
+        start_y: f64,
+    },
+    Resize {
+        layer: usize,
+        corner: HandleCorner,
+        anchor_world: Point,
+        anchor_local: Point,
+        initial_center: Point,
+        angle: f64,
+    },
+    Rotate {
+        layer: usize,
+        center: Point,
+        start_angle: f64,
+        initial_angle: f64,
+    },
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ActiveHandle {
     Scale { anchor: Point, last_distance: f64 },
@@ -175,6 +216,8 @@ pub struct OrleansApp {
     move_to_y: f64,
     move_sync: Option<(BTreeSet<ShapeRef>, SelectionAnchor, Option<[u64; 2]>)>,
     active_handle: Option<ActiveHandle>,
+    selected_raster: Option<usize>,
+    raster_drag: Option<RasterDrag>,
     node_edit: Option<ShapeRef>,
     selected_node: Option<NodeRef>,
     node_drag: Option<NodeDrag>,
@@ -248,6 +291,8 @@ impl OrleansApp {
             move_to_y: 0.0,
             move_sync: None,
             active_handle: None,
+            selected_raster: None,
+            raster_drag: None,
             node_edit: None,
             selected_node: None,
             node_drag: None,
@@ -320,6 +365,11 @@ impl OrleansApp {
                 self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
                 self.doc = doc;
                 self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+                self.selected_raster = self
+                    .doc
+                    .layers
+                    .first()
+                    .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
                 self.shape_transforms.clear();
                 self.undo_stack.clear();
@@ -373,6 +423,11 @@ impl OrleansApp {
                 self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
                 self.doc = doc;
                 self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+                self.selected_raster = self
+                    .doc
+                    .layers
+                    .first()
+                    .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
                 self.shape_transforms.clear();
                 self.undo_stack.clear();
@@ -465,6 +520,11 @@ impl OrleansApp {
         self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
         self.doc = doc;
         self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+        self.selected_raster = self
+            .doc
+            .layers
+            .first()
+            .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
         self.selected_shapes.clear();
         self.shape_transforms = project
             .transforms
@@ -980,6 +1040,35 @@ impl OrleansApp {
             shapes,
             transforms: self.shape_transforms.clone(),
             edited_paths: self.edited_paths.clone(),
+            rasters: Vec::new(),
+        });
+        if self.undo_stack.len() > 30 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn push_raster_undo(&mut self, layer_index: usize) {
+        let Some(raster) = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index)
+            .and_then(|layer| layer.raster.as_ref())
+        else {
+            return;
+        };
+        self.undo_stack.push(UndoSnapshot {
+            shapes: Vec::new(),
+            transforms: self.shape_transforms.clone(),
+            edited_paths: self.edited_paths.clone(),
+            rasters: vec![RasterSnapshot {
+                layer: layer_index,
+                x: raster.x,
+                y: raster.y,
+                width_mm: raster.width_mm,
+                height_mm: raster.height_mm,
+                angle: raster.angle,
+            }],
         });
         if self.undo_stack.len() > 30 {
             self.undo_stack.remove(0);
@@ -1004,6 +1093,23 @@ impl OrleansApp {
         }
         self.shape_transforms = snapshot.transforms;
         self.edited_paths = snapshot.edited_paths;
+        for raster in snapshot.rasters {
+            if let Some(layer) = self
+                .doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == raster.layer)
+            {
+                if let Some(image) = layer.raster.as_mut() {
+                    image.x = raster.x;
+                    image.y = raster.y;
+                    image.width_mm = raster.width_mm;
+                    image.height_mm = raster.height_mm;
+                    image.angle = raster.angle;
+                }
+            }
+        }
+        self.raster_drag = None;
         self.node_drag = None;
         self.selected_node = None;
         self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
@@ -1298,6 +1404,312 @@ impl OrleansApp {
         self.active_handle = Some(active);
     }
 
+    fn select_raster_layer(&mut self, layer_index: usize) {
+        self.selected_raster = Some(layer_index);
+        self.selected_layer = Some(layer_index);
+        self.selected_shapes.clear();
+        self.selected_node = None;
+        self.node_edit = None;
+        self.node_drag = None;
+        self.active_handle = None;
+        self.dragging_shape = false;
+    }
+
+    fn raster_at(&self, world: Point) -> Option<usize> {
+        for layer in self.doc.layers.iter().rev() {
+            if !layer.visible {
+                continue;
+            }
+            let Some(raster) = &layer.raster else {
+                continue;
+            };
+            let local = raster.world_to_local(world);
+            if local.x >= raster.x
+                && local.x <= raster.x + raster.width_mm
+                && local.y >= raster.y
+                && local.y <= raster.y + raster.height_mm
+            {
+                return Some(layer.index);
+            }
+        }
+        None
+    }
+
+    fn raster_handle_positions(
+        &self,
+        raster: &orleans_core::RasterImage,
+        area: Rect,
+    ) -> [(RasterHandle, Pos2); 5] {
+        let corners = raster.corners();
+        let rotate_offset = 22.0 / f64::from(self.view.zoom);
+        let rotate = raster.local_to_world(Point::new(
+            raster.x + raster.width_mm * 0.5,
+            raster.y + raster.height_mm + rotate_offset,
+        ));
+        [
+            (
+                RasterHandle::Corner(HandleCorner::TopLeft),
+                self.view.world_to_screen(area, corners[0]),
+            ),
+            (
+                RasterHandle::Corner(HandleCorner::TopRight),
+                self.view.world_to_screen(area, corners[1]),
+            ),
+            (
+                RasterHandle::Corner(HandleCorner::BottomRight),
+                self.view.world_to_screen(area, corners[2]),
+            ),
+            (
+                RasterHandle::Corner(HandleCorner::BottomLeft),
+                self.view.world_to_screen(area, corners[3]),
+            ),
+            (
+                RasterHandle::Rotate,
+                self.view.world_to_screen(area, rotate),
+            ),
+        ]
+    }
+
+    fn raster_handle_at(&self, screen: Pos2, area: Rect) -> Option<RasterHandle> {
+        let layer_index = self.selected_raster?;
+        let raster = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index && layer.visible)?
+            .raster
+            .as_ref()?;
+        for (handle, position) in self.raster_handle_positions(raster, area) {
+            let radius = if handle == RasterHandle::Rotate {
+                10.0
+            } else {
+                9.0
+            };
+            if position.distance(screen) <= radius {
+                return Some(handle);
+            }
+        }
+        None
+    }
+
+    fn begin_raster_move(&mut self, layer_index: usize, pointer: Point) {
+        let Some(raster) = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index)
+            .and_then(|layer| layer.raster.as_ref())
+        else {
+            return;
+        };
+        let start_x = raster.x;
+        let start_y = raster.y;
+        self.select_raster_layer(layer_index);
+        self.push_raster_undo(layer_index);
+        self.raster_drag = Some(RasterDrag::Move {
+            layer: layer_index,
+            start_pointer: pointer,
+            start_x,
+            start_y,
+        });
+    }
+
+    fn begin_raster_resize(&mut self, layer_index: usize, corner: HandleCorner) {
+        let (anchor_local, anchor_world, initial_center, angle) = {
+            let Some(raster) = self
+                .doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == layer_index)
+                .and_then(|layer| layer.raster.as_ref())
+            else {
+                return;
+            };
+            let anchor_local = match corner {
+                HandleCorner::TopLeft => Point::new(raster.x + raster.width_mm, raster.y),
+                HandleCorner::TopRight => Point::new(raster.x, raster.y),
+                HandleCorner::BottomRight => Point::new(raster.x, raster.y + raster.height_mm),
+                HandleCorner::BottomLeft => {
+                    Point::new(raster.x + raster.width_mm, raster.y + raster.height_mm)
+                }
+            };
+            (
+                anchor_local,
+                raster.local_to_world(anchor_local),
+                raster.center(),
+                raster.angle,
+            )
+        };
+        self.select_raster_layer(layer_index);
+        self.push_raster_undo(layer_index);
+        self.raster_drag = Some(RasterDrag::Resize {
+            layer: layer_index,
+            corner,
+            anchor_world,
+            anchor_local,
+            initial_center,
+            angle,
+        });
+    }
+
+    fn begin_raster_rotate(&mut self, layer_index: usize, pointer: Point) {
+        let Some(raster) = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index)
+            .and_then(|layer| layer.raster.as_ref())
+        else {
+            return;
+        };
+        let center = raster.center();
+        let start_angle = (pointer.y - center.y).atan2(pointer.x - center.x);
+        let initial_angle = raster.angle;
+        self.select_raster_layer(layer_index);
+        self.push_raster_undo(layer_index);
+        self.raster_drag = Some(RasterDrag::Rotate {
+            layer: layer_index,
+            center,
+            start_angle,
+            initial_angle,
+        });
+    }
+
+    fn update_raster_drag(&mut self, pointer: Point) {
+        let Some(drag) = self.raster_drag else {
+            return;
+        };
+        match drag {
+            RasterDrag::Move {
+                layer,
+                start_pointer,
+                start_x,
+                start_y,
+            } => {
+                if let Some(raster) = self
+                    .doc
+                    .layers
+                    .iter_mut()
+                    .find(|entry| entry.index == layer)
+                    .and_then(|entry| entry.raster.as_mut())
+                {
+                    raster.x = start_x + (pointer.x - start_pointer.x);
+                    raster.y = start_y + (pointer.y - start_pointer.y);
+                    self.dirty = true;
+                }
+            }
+            RasterDrag::Resize {
+                layer,
+                corner,
+                anchor_world,
+                anchor_local,
+                initial_center,
+                angle,
+            } => {
+                let (x, y, width, height) = raster_resize_frame(
+                    corner,
+                    pointer,
+                    initial_center,
+                    angle,
+                    anchor_world,
+                    anchor_local,
+                );
+                let new_center = Point::new(x + width * 0.5, y + height * 0.5);
+                let (sin, cos) = angle.to_radians().sin_cos();
+                let dx = anchor_local.x - new_center.x;
+                let dy = anchor_local.y - new_center.y;
+                let rotated = Point::new(dx * cos - dy * sin, dx * sin + dy * cos);
+                let center_world =
+                    Point::new(anchor_world.x - rotated.x, anchor_world.y - rotated.y);
+                if let Some(raster) = self
+                    .doc
+                    .layers
+                    .iter_mut()
+                    .find(|entry| entry.index == layer)
+                    .and_then(|entry| entry.raster.as_mut())
+                {
+                    raster.x = center_world.x - width * 0.5;
+                    raster.y = center_world.y - height * 0.5;
+                    raster.width_mm = width;
+                    raster.height_mm = height;
+                    raster.angle = angle;
+                    self.dirty = true;
+                }
+            }
+            RasterDrag::Rotate {
+                layer,
+                center,
+                start_angle,
+                initial_angle,
+            } => {
+                let angle = (pointer.y - center.y).atan2(pointer.x - center.x);
+                let delta = normalize_angle(angle - start_angle);
+                if let Some(raster) = self
+                    .doc
+                    .layers
+                    .iter_mut()
+                    .find(|entry| entry.index == layer)
+                    .and_then(|entry| entry.raster.as_mut())
+                {
+                    raster.angle = initial_angle + delta.to_degrees();
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    fn draw_raster_selection(&self, painter: &egui::Painter, area: Rect) {
+        let Some(layer_index) = self.selected_raster else {
+            return;
+        };
+        let Some(raster) = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index && layer.visible)
+            .and_then(|layer| layer.raster.as_ref())
+        else {
+            return;
+        };
+        let corners: Vec<Pos2> = raster
+            .corners()
+            .iter()
+            .map(|point| self.view.world_to_screen(area, *point))
+            .collect();
+        painter.add(egui::Shape::closed_line(
+            corners.clone(),
+            Stroke::new(2.0, Color32::from_rgb(255, 230, 120)),
+        ));
+        let top_center = raster.local_to_world(Point::new(
+            raster.x + raster.width_mm * 0.5,
+            raster.y + raster.height_mm,
+        ));
+        let top_center_screen = self.view.world_to_screen(area, top_center);
+        for (handle, position) in self.raster_handle_positions(raster, area) {
+            if handle == RasterHandle::Rotate {
+                painter.line_segment(
+                    [top_center_screen, position],
+                    Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+                );
+                painter.circle_filled(position, 5.0, Color32::from_rgb(255, 225, 120));
+                painter.circle_stroke(
+                    position,
+                    5.0,
+                    Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                );
+            } else {
+                let square = Rect::from_center_size(position, egui::vec2(8.0, 8.0));
+                painter.rect_filled(square, 1.0, Color32::from_rgb(255, 232, 140));
+                painter.rect_stroke(
+                    square,
+                    1.0,
+                    Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+    }
+
     fn node_shape(&self) -> Option<&orleans_core::Shape> {
         let target = self.node_edit.as_ref()?;
         self.doc
@@ -1525,6 +1937,7 @@ impl OrleansApp {
         self.node_edit = self.selected_shapes.iter().next().cloned();
         self.selected_node = None;
         self.node_drag = None;
+        self.selected_raster = None;
         self.active_handle = None;
         self.dragging_shape = false;
         self.set_status("node editing: drag anchors and control points", false);
@@ -2418,14 +2831,25 @@ impl OrleansApp {
                             }
                         });
                     if let Some(index) = pick {
-                        if !self
-                            .selected_shapes
+                        let is_raster = self
+                            .doc
+                            .layers
                             .iter()
-                            .any(|shape| shape.layer == index)
-                        {
-                            self.selected_shapes.clear();
+                            .find(|layer| layer.index == index)
+                            .is_some_and(|layer| layer.raster.is_some());
+                        if is_raster {
+                            self.select_raster_layer(index);
+                        } else {
+                            self.selected_raster = None;
+                            if !self
+                                .selected_shapes
+                                .iter()
+                                .any(|shape| shape.layer == index)
+                            {
+                                self.selected_shapes.clear();
+                            }
+                            self.selected_layer = Some(index);
                         }
-                        self.selected_layer = Some(index);
                     }
                     changed |= output_changed;
                     if self.selected_layer.is_none() {
@@ -2775,8 +3199,10 @@ impl OrleansApp {
                 let selected_count = self.selected_shapes.len();
                 let hint = if self.node_edit.is_some() {
                     "Drag nodes · dbl-click segment adds · Del removes · Esc finishes"
+                } else if self.selected_raster.is_some() {
+                    "Drag image to move · corners resize · top handle rotates"
                 } else if selected_count == 0 {
-                    "Click a shape · Ctrl/Shift-click for multiple · drag to move · right-drag to pan"
+                    "Click a shape or image · Ctrl/Shift-click for multiple · right-drag to pan"
                 } else {
                     "Corner handles scale · top handle rotates · Ctrl+Z to undo"
                 };
@@ -3044,6 +3470,7 @@ impl OrleansApp {
         self.draw_layers(&painter, area);
         self.draw_selected_shape(&painter, area);
         self.draw_nodes(&painter, area);
+        self.draw_raster_selection(&painter, area);
         self.draw_origin(&painter, area);
 
         let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
@@ -3053,7 +3480,9 @@ impl OrleansApp {
             if let Some(position) = response.interact_pointer_pos() {
                 if node_editing {
                     self.selected_node = self.node_at(position, area);
-                } else if self.selection_handle_at(position, area).is_none() {
+                } else if self.selection_handle_at(position, area).is_none()
+                    && self.raster_handle_at(position, area).is_none()
+                {
                     let world = self.view.screen_to_world(area, position);
                     let hit = self.hit_test(world);
                     if let Some(hit) = hit {
@@ -3066,8 +3495,12 @@ impl OrleansApp {
                             self.selected_shapes.insert(hit.clone());
                         }
                         self.selected_layer = Some(hit.layer);
+                        self.selected_raster = None;
+                    } else if let Some(layer) = self.raster_at(world) {
+                        self.select_raster_layer(layer);
                     } else if !additive {
                         self.selected_shapes.clear();
+                        self.selected_raster = None;
                     }
                 }
             }
@@ -3087,21 +3520,34 @@ impl OrleansApp {
                     }
                 }
             } else {
-                let mut handle_started = false;
+                let mut started = false;
                 if let Some(position) = origin {
-                    if let Some(handle) = self.selection_handle_at(position, area) {
+                    if let Some(handle) = self.raster_handle_at(position, area) {
+                        let layer = self.selected_raster.expect("raster handle has a layer");
+                        let world = self.view.screen_to_world(area, position);
+                        match handle {
+                            RasterHandle::Corner(corner) => {
+                                self.begin_raster_resize(layer, corner);
+                            }
+                            RasterHandle::Rotate => {
+                                self.begin_raster_rotate(layer, world);
+                            }
+                        }
+                        started = true;
+                    } else if let Some(handle) = self.selection_handle_at(position, area) {
                         let world = self.view.screen_to_world(area, position);
                         self.begin_handle_drag(handle, world);
-                        handle_started = true;
+                        started = true;
                     }
                 }
-                if !handle_started {
+                if !started {
                     let world = origin.map(|position| self.view.screen_to_world(area, position));
+                    let vector_hit = world.and_then(|world| self.hit_test(world));
                     let mut drag = false;
                     if let Some(world) = world {
                         if self.press_on_selection(world) {
                             drag = true;
-                        } else if let Some(hit) = self.hit_test(world) {
+                        } else if let Some(hit) = vector_hit {
                             if additive {
                                 self.selected_shapes.insert(hit.clone());
                             } else {
@@ -3109,13 +3555,17 @@ impl OrleansApp {
                                 self.selected_shapes.insert(hit.clone());
                             }
                             self.selected_layer = Some(hit.layer);
+                            self.selected_raster = None;
                             drag = true;
+                        } else if let Some(layer) = self.raster_at(world) {
+                            self.begin_raster_move(layer, world);
+                            started = true;
                         }
                     }
                     if drag {
                         self.push_selection_undo();
                         self.dragging_shape = true;
-                    } else {
+                    } else if !started {
                         self.dragging_shape = false;
                     }
                 }
@@ -3134,6 +3584,14 @@ impl OrleansApp {
             if self.node_drag.take().is_some() {
                 self.set_status("moved node", false);
             }
+            if let Some(drag) = self.raster_drag.take() {
+                let action = match drag {
+                    RasterDrag::Move { .. } => "moved image",
+                    RasterDrag::Resize { .. } => "resized image",
+                    RasterDrag::Rotate { .. } => "rotated image",
+                };
+                self.set_status(action, false);
+            }
         }
 
         if response.dragged_by(egui::PointerButton::Secondary)
@@ -3141,7 +3599,12 @@ impl OrleansApp {
         {
             self.view.pan(response.drag_delta());
         } else if response.dragged_by(egui::PointerButton::Primary) {
-            if self.node_drag.is_some() {
+            if self.raster_drag.is_some() {
+                if let Some(position) = response.interact_pointer_pos() {
+                    let world = self.view.screen_to_world(area, position);
+                    self.update_raster_drag(world);
+                }
+            } else if self.node_drag.is_some() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let world = self.view.screen_to_world(area, position);
                     self.update_node_drag(world);
@@ -3165,6 +3628,22 @@ impl OrleansApp {
                 if self.node_at(position, area).is_some() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
+            } else if let Some(handle) = self.raster_handle_at(position, area) {
+                let icon = match handle {
+                    RasterHandle::Rotate => egui::CursorIcon::Crosshair,
+                    RasterHandle::Corner(HandleCorner::TopLeft | HandleCorner::BottomRight) => {
+                        egui::CursorIcon::ResizeNwSe
+                    }
+                    RasterHandle::Corner(HandleCorner::TopRight | HandleCorner::BottomLeft) => {
+                        egui::CursorIcon::ResizeNeSw
+                    }
+                };
+                ui.ctx().set_cursor_icon(icon);
+            } else if self
+                .raster_at(self.view.screen_to_world(area, position))
+                .is_some()
+            {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
             } else if let Some(handle) = self.selection_handle_at(position, area) {
                 let icon = match handle {
                     Handle::Rotate => egui::CursorIcon::Crosshair,
@@ -3669,6 +4148,67 @@ fn scale_about(anchor: Point, factor: f64) -> Affine {
         * Affine::translate((-anchor.x, -anchor.y))
 }
 
+fn raster_resize_frame(
+    corner: HandleCorner,
+    pointer: Point,
+    initial_center: Point,
+    angle: f64,
+    anchor_world: Point,
+    anchor_local: Point,
+) -> (f64, f64, f64, f64) {
+    let local = inverse_rotate_about(pointer, initial_center, angle);
+    let minimum = 0.1;
+    let (x, y, width, height) = match corner {
+        HandleCorner::TopLeft => {
+            let px = local.x.min(anchor_local.x - minimum);
+            let py = local.y.max(anchor_local.y + minimum);
+            (px, anchor_local.y, anchor_local.x - px, py - anchor_local.y)
+        }
+        HandleCorner::TopRight => {
+            let px = local.x.max(anchor_local.x + minimum);
+            let py = local.y.max(anchor_local.y + minimum);
+            (
+                anchor_local.x,
+                anchor_local.y,
+                px - anchor_local.x,
+                py - anchor_local.y,
+            )
+        }
+        HandleCorner::BottomRight => {
+            let px = local.x.max(anchor_local.x + minimum);
+            let py = local.y.min(anchor_local.y - minimum);
+            (anchor_local.x, py, px - anchor_local.x, anchor_local.y - py)
+        }
+        HandleCorner::BottomLeft => {
+            let px = local.x.min(anchor_local.x - minimum);
+            let py = local.y.min(anchor_local.y - minimum);
+            (px, py, anchor_local.x - px, anchor_local.y - py)
+        }
+    };
+    let new_center = Point::new(x + width * 0.5, y + height * 0.5);
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let dx = anchor_local.x - new_center.x;
+    let dy = anchor_local.y - new_center.y;
+    let rotated = Point::new(dx * cos - dy * sin, dx * sin + dy * cos);
+    let center_world = Point::new(anchor_world.x - rotated.x, anchor_world.y - rotated.y);
+    (
+        center_world.x - width * 0.5,
+        center_world.y - height * 0.5,
+        width,
+        height,
+    )
+}
+
+fn inverse_rotate_about(point: Point, center: Point, angle_deg: f64) -> Point {
+    let (sin, cos) = angle_deg.to_radians().sin_cos();
+    let dx = point.x - center.x;
+    let dy = point.y - center.y;
+    Point::new(
+        center.x + dx * cos + dy * sin,
+        center.y - dx * sin + dy * cos,
+    )
+}
+
 fn rotate_about(center: Point, radians: f64) -> Affine {
     Affine::translate((center.x, center.y))
         * Affine::rotate(radians)
@@ -3999,6 +4539,46 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn raster_resize_keeps_the_opposite_corner_fixed() {
+        let (x, y, width, height) = raster_resize_frame(
+            HandleCorner::TopRight,
+            Point::new(12.0, 4.0),
+            Point::new(5.0, 2.5),
+            0.0,
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 0.0),
+        );
+        assert!((x - 0.0).abs() < 1e-9);
+        assert!((y - 0.0).abs() < 1e-9);
+        assert!((width - 12.0).abs() < 1e-9);
+        assert!((height - 4.0).abs() < 1e-9);
+
+        let center = Point::new(5.0, 2.5);
+        let angle = 45.0_f64;
+        let anchor_local = Point::new(0.0, 0.0);
+        let (sin, cos) = angle.to_radians().sin_cos();
+        let anchor_world = Point::new(
+            center.x - center.x * cos + center.y * sin,
+            center.y - center.x * sin - center.y * cos,
+        );
+        let (x, y, width, height) = raster_resize_frame(
+            HandleCorner::TopRight,
+            Point::new(20.0, 0.0),
+            center,
+            angle,
+            anchor_world,
+            anchor_local,
+        );
+        let new_center = Point::new(x + width * 0.5, y + height * 0.5);
+        let dx = x - new_center.x;
+        let dy = y - new_center.y;
+        let rotated = Point::new(dx * cos - dy * sin, dx * sin + dy * cos);
+        let new_anchor = Point::new(new_center.x + rotated.x, new_center.y + rotated.y);
+        assert!((new_anchor - anchor_world).hypot() < 1e-9);
+        assert!(width > 0.0 && height > 0.0);
     }
 
     #[test]

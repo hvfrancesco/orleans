@@ -47,7 +47,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-118 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+120 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -122,8 +122,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   line interval, angle, invert, alternate rows, position, physical size and
   DPI. The 96 DPI import size is only a starting point; size and DPI can be
   changed after import. Opening an image replaces the current design. The
-  raster is shown as a translucent image with engraving scanlines over it; use
-  a separate vector layer for outlines;
+  raster is shown as a translucent image with engraving scanlines over it. Click
+  an image on the canvas or select its layer to show handles: drag inside to
+  move, drag a corner to resize and drag the top handle to rotate. Use a
+  separate vector layer for outlines;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
   (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
@@ -296,10 +298,10 @@ concept of a line and some bridges emit negotiation on connect.
   of closed contours with even-odd holes; cross-hatch and offset fill are not
   implemented yet.
 * Raster import starts at 96 DPI but size and DPI can be changed after import;
-  scan lines rotate with the image angle. More dithering algorithms and direct
-  canvas manipulation of raster layers are not implemented yet. Raster layers
-  with Cut disabled show the image preview but not the engraving scan lines.
-  Select raster layers from the layer list; canvas hit-testing remains vector-only.
+  scan lines rotate with the image angle. More dithering algorithms are not
+  implemented yet. Raster layers with Cut disabled show the image preview but
+  not the engraving scan lines; raster selection handles are available on the
+  canvas.
 * Tabs are distributed evenly by arc length and start at the contour seam; there
   is no manual tab placement yet.
 * Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
@@ -317,8 +319,7 @@ concept of a line and some bridges emit negotiation on connect.
    node-editing refinements such as join/break and snapping to geometry.
 2. **Fill refinements and manual tabs** — cross-hatch, offset fill and
    manual tab placement.
-3. **Raster refinements** — more dithering algorithms and direct canvas
-   manipulation of raster layers.
+3. **Raster refinements** — more dithering algorithms and image cropping.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
 5. **Second driver** — Marlin, then Ruida over UDP.
 6. **Job control extras** — feed/power overrides, rotary setup.
