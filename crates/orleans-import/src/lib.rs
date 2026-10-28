@@ -98,7 +98,7 @@ pub fn import_image(data: &[u8], dpi: f64) -> Result<Document, ImportError> {
     layer.raster = Some(RasterImage {
         width,
         height,
-        grayscale: grayscale_data,
+        grayscale: grayscale_data.into(),
         x: 0.0,
         y: 0.0,
         width_mm,
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(layer.mode, LayerMode::Raster);
         let raster = layer.raster.as_ref().expect("raster");
         assert_eq!((raster.width, raster.height), (2, 1));
-        assert_eq!(raster.grayscale, vec![0, 255]);
+        assert_eq!(raster.grayscale.as_ref(), &[0, 255]);
         assert!((raster.width_mm - 2.0 * 25.4 / 96.0).abs() < 1e-9);
         assert!((raster.height_mm - 25.4 / 96.0).abs() < 1e-9);
         assert!((doc.bounds().expect("bounds").width() - raster.width_mm).abs() < 1e-9);

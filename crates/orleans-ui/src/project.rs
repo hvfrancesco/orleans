@@ -258,7 +258,7 @@ impl RasterSettings {
         Some(RasterImage {
             width: self.width,
             height: self.height,
-            grayscale: pixels,
+            grayscale: pixels.into(),
             x: self.x,
             y: self.y,
             width_mm: self.width_mm,
@@ -845,6 +845,44 @@ mod tests {
     }
 
     #[test]
+    fn empty_svg_projects_restore_imported_geometry() {
+        use kurbo::BezPath;
+
+        let mut doc = Document::new(50.0, 40.0);
+        let mut layer = Layer::new(0, "imported", [0, 0, 0], CutParams::default());
+        layer.shapes.push(Shape::new(
+            "a",
+            BezPath::from_svg("M0,0 L20,0").expect("path"),
+            false,
+        ));
+        doc.layers.push(layer);
+        let mut project = ProjectFile::new(
+            String::new(),
+            None,
+            &doc,
+            0.0,
+            true,
+            LaserMode::M3,
+            1000,
+            Vec::new(),
+        );
+        project.extra_shapes = vec![ExtraShape {
+            layer: 0,
+            shape: "a".to_owned(),
+            path: "M0,0 L20,0".to_owned(),
+            is_fill: false,
+        }];
+
+        let mut loaded = Document::new(1.0, 1.0);
+        project.apply(&mut loaded);
+        assert_eq!(loaded.layers.len(), 1);
+        assert_eq!(loaded.layers[0].name, "imported");
+        assert_eq!(loaded.layers[0].shapes.len(), 1);
+        let bounds = loaded.layers[0].shapes[0].bounds();
+        assert!((bounds.width() - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn json_round_trip_keeps_affine_matrix() {
         use kurbo::{Affine, Point};
         let affine = Affine::translate((5.0, 3.0)) * Affine::rotate(0.5) * Affine::scale(2.0);
@@ -891,7 +929,7 @@ mod tests {
         layer.raster = Some(orleans_core::RasterImage {
             width: 2,
             height: 1,
-            grayscale: vec![0, 255],
+            grayscale: vec![0, 255].into(),
             x: 1.0,
             y: 2.0,
             width_mm: 10.0,
@@ -932,7 +970,7 @@ mod tests {
         let mut loaded = Document::new(1.0, 1.0);
         back.apply(&mut loaded);
         let raster = loaded.layers[0].raster.as_ref().expect("raster image");
-        assert_eq!(raster.grayscale, vec![0, 255]);
+        assert_eq!(raster.grayscale.as_ref(), &[0, 255]);
         assert_eq!(raster.mode, orleans_core::RasterMode::Dither);
         assert!(raster.invert);
         assert!((raster.width_mm - 10.0).abs() < 1e-9);

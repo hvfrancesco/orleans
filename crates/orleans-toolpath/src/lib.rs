@@ -749,7 +749,7 @@ mod tests {
         doc.layers[0].raster = Some(RasterImage {
             width: 4,
             height: 2,
-            grayscale,
+            grayscale: grayscale.into(),
             x: 0.0,
             y: 0.0,
             width_mm: 4.0,

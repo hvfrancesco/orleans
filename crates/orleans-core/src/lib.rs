@@ -5,6 +5,8 @@
 //! laser cutters). Importers are responsible for converting whatever
 //! convention their source format uses into this one.
 
+use std::sync::Arc;
+
 use kurbo::Shape as _;
 use kurbo::{BezPath, Point, Rect};
 
@@ -115,8 +117,9 @@ pub struct RasterCrop {
 pub struct RasterImage {
     pub width: u32,
     pub height: u32,
-    /// Row-major grayscale, top row first.
-    pub grayscale: Vec<u8>,
+    /// Row-major grayscale, top row first. Shared so snapshots and undo
+    /// entries can clone the image without copying its pixels.
+    pub grayscale: Arc<[u8]>,
     pub x: f64,
     pub y: f64,
     pub width_mm: f64,
@@ -477,7 +480,7 @@ mod tests {
         let raster = RasterImage {
             width: 2,
             height: 2,
-            grayscale: vec![0; 4],
+            grayscale: vec![0; 4].into(),
             x: 5.0,
             y: 10.0,
             width_mm: 10.0,
@@ -508,7 +511,7 @@ mod tests {
         let raster = RasterImage {
             width: 10,
             height: 8,
-            grayscale: vec![0; 80],
+            grayscale: vec![0; 80].into(),
             x: 0.0,
             y: 0.0,
             width_mm: 10.0,

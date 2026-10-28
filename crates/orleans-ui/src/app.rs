@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use kurbo::{Affine, Point};
 use orleans_core::{
-    Document, Job, Layer, LayerMode, ManualTabs, Op, RasterCrop, RasterMode, Shape,
+    Document, Job, Layer, LayerMode, ManualTabs, Op, RasterCrop, RasterImage, RasterMode, Shape,
 };
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_geom::{
@@ -247,6 +247,7 @@ struct LayerStructureSnapshot {
     index: usize,
     settings: LayerSettingsSnapshot,
     shapes: Vec<Shape>,
+    raster: Option<RasterImage>,
 }
 
 impl LayerStructureSnapshot {
@@ -255,6 +256,7 @@ impl LayerStructureSnapshot {
             index: layer.index,
             settings: LayerSettingsSnapshot::capture(layer),
             shapes: layer.shapes.clone(),
+            raster: layer.raster.clone(),
         }
     }
 }
@@ -527,6 +529,7 @@ enum LinkState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     Open,
+    Import,
     Export,
     Reload,
     Fit,
@@ -853,6 +856,20 @@ impl OrleansApp {
                     self.doc.shape_count(),
                     self.preview.contour_count()
                 ));
+                let imported_refs: Vec<(usize, String)> = self
+                    .doc
+                    .layers
+                    .iter()
+                    .flat_map(|layer| {
+                        layer
+                            .shapes
+                            .iter()
+                            .map(move |shape| (layer.index, shape.id.clone()))
+                    })
+                    .collect();
+                for key in imported_refs {
+                    self.extra_shapes.insert(key);
+                }
                 self.path = Some(path);
                 self.project_path = None;
                 self.source_svg = None;
@@ -863,6 +880,104 @@ impl OrleansApp {
                 self.status = Status::error(format!("importing {}: {err}", path.display()));
             }
         }
+    }
+
+    fn import_path(&mut self, path: PathBuf) {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = Status::error(format!("reading {}: {err}", path.display()));
+                return;
+            }
+        };
+        let image_name = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned());
+        let result = if is_image_path(&path) {
+            import_image(&bytes, DEFAULT_RASTER_DPI)
+        } else if is_dxf_path(&path) {
+            import_dxf(&bytes, &ImportOptions::default())
+        } else {
+            import_svg(&bytes, &ImportOptions::default())
+        };
+        let doc = match result {
+            Ok(doc) if doc.is_empty() => {
+                self.status =
+                    Status::error(format!("{} contains no supported geometry", path.display()));
+                return;
+            }
+            Ok(doc) => doc,
+            Err(err) => {
+                self.status = Status::error(format!("importing {}: {err}", path.display()));
+                return;
+            }
+        };
+        self.merge_imported(doc, image_name);
+    }
+
+    fn merge_imported(&mut self, mut imported: Document, image_name: Option<String>) {
+        if imported.layers.is_empty() {
+            self.set_status("nothing to import", true);
+            return;
+        }
+        self.push_structure_undo();
+        let start_index = self
+            .doc
+            .layers
+            .iter()
+            .map(|layer| layer.index)
+            .max()
+            .map_or(0, |index| index + 1);
+        let mut used_names: BTreeSet<String> = self
+            .doc
+            .layers
+            .iter()
+            .map(|layer| layer.name.clone())
+            .collect();
+        let mut first_new = None;
+        let mut layer_count = 0;
+        let mut shape_count = 0;
+        for (offset, mut layer) in imported.layers.drain(..).enumerate() {
+            if layer.raster.is_some() {
+                if let Some(name) = &image_name {
+                    layer.name.clone_from(name);
+                }
+            }
+            let index = start_index + offset;
+            layer.index = index;
+            layer.name = unique_layer_name(&mut used_names, &layer.name);
+            self.deleted_layers.remove(&index);
+            shape_count += layer.shapes.len();
+            for shape in &layer.shapes {
+                self.extra_shapes.insert((index, shape.id.clone()));
+            }
+            first_new.get_or_insert(index);
+            self.doc.layers.push(layer);
+            layer_count += 1;
+        }
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.selected_layer = first_new;
+        self.selected_raster = first_new.and_then(|index| {
+            self.doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == index)
+                .and_then(|layer| layer.raster.as_ref().map(|_| index))
+        });
+        self.selected_shapes.clear();
+        self.selected_nodes.clear();
+        self.node_edit = None;
+        self.node_drag = None;
+        self.tab_edit_layer = None;
+        self.dragging_shape = false;
+        self.active_handle = None;
+        self.transfer_layer = first_new;
+        self.fit_pending = true;
+        self.dirty = true;
+        self.set_status(
+            format!("imported {layer_count} layer(s), {shape_count} shape(s)"),
+            false,
+        );
     }
 
     fn load_image(&mut self, path: PathBuf) {
@@ -1092,10 +1207,6 @@ impl OrleansApp {
     }
 
     fn save_project(&mut self) {
-        if self.source_svg.is_none() && self.doc.shape_count() > 0 {
-            self.set_status("project save is not supported for DXF imports yet", true);
-            return;
-        }
         let svg = self.source_svg.clone().unwrap_or_default();
         let default_name = self
             .display_path()
@@ -2505,7 +2616,9 @@ impl OrleansApp {
                 .collect();
             let mut layers = Vec::with_capacity(structure.layers.len());
             for saved in structure.layers {
-                let mut layer = existing.remove(&saved.index).unwrap_or_else(|| {
+                let existing_layer = existing.remove(&saved.index);
+                let created = existing_layer.is_none();
+                let mut layer = existing_layer.unwrap_or_else(|| {
                     Layer::new(
                         saved.index,
                         saved.settings.name.clone(),
@@ -2514,6 +2627,9 @@ impl OrleansApp {
                     )
                 });
                 saved.settings.apply_to(&mut layer);
+                if created {
+                    layer.raster = saved.raster;
+                }
                 layer.shapes = saved.shapes;
                 layers.push(layer);
             }
@@ -4436,6 +4552,13 @@ impl OrleansApp {
             ui.horizontal(|ui| {
                 if ui.button("Open…").clicked() {
                     *action = Some(Action::Open);
+                }
+                if ui
+                    .button("Import…")
+                    .on_hover_text("Add SVG, DXF or image layers to the current design")
+                    .clicked()
+                {
+                    *action = Some(Action::Import);
                 }
                 let has_doc = !self.doc.is_empty();
                 if ui
@@ -6772,6 +6895,25 @@ fn layer_color(rgb: [u8; 3], light: bool) -> Color32 {
     Color32::from_rgb(darken(r), darken(g), darken(b))
 }
 
+fn unique_layer_name(used: &mut BTreeSet<String>, base: &str) -> String {
+    let base = if base.trim().is_empty() {
+        "Layer"
+    } else {
+        base
+    };
+    if used.insert(base.to_owned()) {
+        return base.to_owned();
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base} ({suffix})");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 /// Offsets for every array position except the original at the origin.
 fn array_offsets(cols: u32, rows: u32, dx: f64, dy: f64) -> Vec<(f64, f64)> {
     let mut offsets = Vec::new();
@@ -6938,6 +7080,17 @@ impl eframe::App for OrleansApp {
                     .pick_file()
                 {
                     self.open_path(path);
+                }
+            }
+            Some(Action::Import) => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("SVG", &["svg"])
+                    .add_filter("DXF", &["dxf"])
+                    .add_filter("Image", &["png", "jpg", "jpeg", "bmp"])
+                    .set_title("Import layers into the current design")
+                    .pick_file()
+                {
+                    self.import_path(path);
                 }
             }
             Some(Action::Export) => self.export(),
@@ -7214,6 +7367,13 @@ mod tests {
     }
 
     #[test]
+    fn imported_layer_names_are_made_unique() {
+        let mut used = BTreeSet::from(["Layer".to_owned(), "Layer (2)".to_owned()]);
+        assert_eq!(unique_layer_name(&mut used, "Layer"), "Layer (3)");
+        assert_eq!(unique_layer_name(&mut used, "Other"), "Other");
+    }
+
+    #[test]
     fn array_offsets_skip_the_original_position() {
         assert_eq!(array_offsets(2, 1, 10.0, 10.0), vec![(10.0, 0.0)]);
         assert_eq!(
@@ -7294,7 +7454,7 @@ mod tests {
         image.raster = Some(RasterImage {
             width: 2,
             height: 2,
-            grayscale: vec![0, 64, 128, 255],
+            grayscale: vec![0, 64, 128, 255].into(),
             x: 5.0,
             y: 6.0,
             width_mm: 20.0,

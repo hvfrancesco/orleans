@@ -41,6 +41,7 @@ was decompiled or copied.
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
 | Project save/load (`.orleans`, embedded SVG + settings/path edits) | ✅ |
+| Import SVG/DXF/images into the current design (hybrid jobs) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
@@ -52,7 +53,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-153 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+155 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -153,15 +154,24 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   position, physical size and DPI. The 96 DPI import size is only a starting
   point; size and DPI can be changed after import. **Crop** X/Y/W/H selects a
   pixel region to engrave; **Full** restores the whole image, while position,
-  size and rotation stay fixed. Opening an image replaces the current design. The
-  raster is shown as a translucent image with engraving scanlines over it. Click
+  size and rotation stay fixed. **Open…** replaces the current design; use
+  **Import…** to add the image as a new layer instead. The raster is shown as a
+  translucent image with engraving scanlines over it. Click
   an image on the canvas or select its layer to show handles: drag inside to
   move, drag a corner to resize and drag the top handle to rotate. Use a
   separate vector layer for outlines;
-* DXF files open as one layer per DXF layer, using the layer's ACI or true
-  colour. `LINE`, `LWPOLYLINE`/`POLYLINE` (including bulges), `CIRCLE`, `ARC`,
-  `ELLIPSE` and `SPLINE` are read; `$INSUNITS` sets the millimetre scale.
-  Blocks/`INSERT`, `HATCH`, text, dimensions and binary DXF are not expanded;
+* DXF files open or import as one layer per DXF layer, using the layer's ACI or
+  true colour. `LINE`, `LWPOLYLINE`/`POLYLINE` (including bulges), `CIRCLE`,
+  `ARC`, `ELLIPSE` and `SPLINE` are read; `$INSUNITS` sets the millimetre
+  scale. Blocks/`INSERT`, `HATCH`, text, dimensions and binary DXF are not
+  expanded;
+* **Import…** adds SVG, DXF or raster layers to the current document instead of
+  replacing it. Imported layers are appended at the end of the cut order with
+  unique names, and the action is undoable. This is how hybrid vector/raster
+  jobs are built: an imported image keeps its own engraving settings while
+  vector layers cut around it. Imported vector geometry is stored in the
+  project as self-contained paths, so hybrid and DXF-imported projects reload
+  correctly;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
   (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
@@ -185,8 +195,8 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   node-edited paths, groups, objects moved, copied or deleted between layers,
   deleted layers, and embedded raster image data.
   **Open…** accepts SVG, DXF, images and `.orleans`; **Reload** reloads whichever
-  is current. Projects saved from a DXF import are not supported yet, because
-  the project format embeds SVG geometry;
+  is current. Imported and DXF-origin vector geometry is embedded as paths, so
+  hybrid projects are self-contained;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
   homing `$22`, and the raw `$$` list. **Apply** writes the changed settings
   to EEPROM; editing is blocked while cutting or homing;
@@ -339,9 +349,9 @@ concept of a line and some bridges emit negotiation on connect.
 * Interactive handles scale uniformly around the opposite corner and rotate
   around the selection centre. There is no non-uniform/skewed scaling.
 * DXF import covers ASCII files and the listed entities only. Blocks,
-  `INSERT`, `HATCH`, text, dimensions, meshes and binary DXF are skipped, and a
-  DXF-imported design cannot be saved as a `.orleans` project yet because the
-  project format embeds SVG geometry.
+  `INSERT`, `HATCH`, text, dimensions, meshes and binary DXF are skipped.
+  Imported vector layers are self-contained: they are not linked to their
+  source file, and later source edits are not tracked.
 * Only empty vector layers can be deleted. Delete all their objects first; a
   raster layer disappears only when the design is replaced.
 * Arrays are rectangular only: there is no polar/circular array, and copies
