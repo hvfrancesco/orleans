@@ -61,6 +61,8 @@ pub struct Layer {
     pub mode: LayerMode,
     pub cut: CutParams,
     pub shapes: Vec<Shape>,
+    /// Whether the layer participates in previews, job planning and framing.
+    pub visible: bool,
 }
 
 impl Layer {
@@ -72,6 +74,7 @@ impl Layer {
             mode: LayerMode::Line,
             cut,
             shapes: Vec::new(),
+            visible: true,
         }
     }
 
@@ -126,7 +129,12 @@ impl Document {
     /// Bounding box of all geometry, if the document is not empty.
     pub fn bounds(&self) -> Option<Rect> {
         let mut bounds: Option<Rect> = None;
-        for shape in self.layers.iter().flat_map(|l| l.shapes.iter()) {
+        for shape in self
+            .layers
+            .iter()
+            .filter(|layer| layer.visible)
+            .flat_map(|layer| layer.shapes.iter())
+        {
             if shape.path.elements().is_empty() {
                 continue;
             }
@@ -236,6 +244,33 @@ mod tests {
         assert_eq!(bounds.y0, 20.0);
         assert_eq!(bounds.x1, 30.0);
         assert_eq!(bounds.y1, 40.0);
+    }
+
+    #[test]
+    fn document_bounds_ignore_hidden_layers() {
+        let mut doc = Document::new(100.0, 100.0);
+        let mut hidden = Layer::new(0, "hidden", [0, 0, 0], CutParams::default());
+        hidden.visible = false;
+        hidden.shapes.push(Shape::new(
+            "hidden",
+            Line::new((10.0, 20.0), (30.0, 40.0)).into_path(0.01),
+            false,
+        ));
+        doc.layers.push(hidden);
+
+        let mut shown = Layer::new(1, "shown", [0, 0, 0], CutParams::default());
+        shown.shapes.push(Shape::new(
+            "shown",
+            Line::new((0.0, 0.0), (5.0, 5.0)).into_path(0.01),
+            false,
+        ));
+        doc.layers.push(shown);
+
+        let bounds = doc.bounds().expect("bounds");
+        assert_eq!(bounds.x0, 0.0);
+        assert_eq!(bounds.y0, 0.0);
+        assert_eq!(bounds.x1, 5.0);
+        assert_eq!(bounds.y1, 5.0);
     }
 
     #[test]

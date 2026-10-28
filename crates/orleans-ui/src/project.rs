@@ -34,6 +34,12 @@ pub struct LayerSettings {
     pub speed: f64,
     pub power: f64,
     pub passes: u32,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ProjectFile {
@@ -62,6 +68,7 @@ impl ProjectFile {
                     speed: layer.cut.speed,
                     power: layer.cut.power,
                     passes: layer.cut.passes,
+                    visible: layer.visible,
                 })
                 .collect(),
             kerf,
@@ -75,12 +82,28 @@ impl ProjectFile {
         }
     }
 
-    /// Apply the stored per-layer settings to a freshly imported document.
+    /// Apply the stored per-layer settings and cut order to a freshly imported
+    /// document.
     pub fn apply(&self, doc: &mut Document) {
+        // The order of `layers` in the project is the cut order.
+        let mut ordered = Vec::with_capacity(doc.layers.len());
+        for saved in &self.layers {
+            if let Some(position) = doc
+                .layers
+                .iter()
+                .position(|layer| layer.index == saved.index)
+            {
+                ordered.push(doc.layers.remove(position));
+            }
+        }
+        ordered.append(&mut doc.layers);
+        doc.layers = ordered;
+
         for layer in &mut doc.layers {
             if let Some(saved) = self.layers.iter().find(|saved| saved.index == layer.index) {
                 layer.name = saved.name.clone();
                 layer.color = saved.color;
+                layer.visible = saved.visible;
                 layer.mode = if saved.mode.eq_ignore_ascii_case("fill") {
                     LayerMode::Fill
                 } else {
@@ -137,6 +160,43 @@ mod tests {
     }
 
     #[test]
+    fn apply_restores_layer_cut_order() {
+        let mut doc = Document::new(10.0, 10.0);
+        doc.layers
+            .push(Layer::new(0, "first", [0, 0, 0], CutParams::default()));
+        doc.layers
+            .push(Layer::new(1, "second", [0, 0, 0], CutParams::default()));
+        let saved = |index: usize| LayerSettings {
+            index,
+            name: format!("layer {index}"),
+            color: [0, 0, 0],
+            mode: "Line".to_owned(),
+            speed: 1000.0,
+            power: 20.0,
+            passes: 1,
+            visible: true,
+        };
+        let project = ProjectFile {
+            format: FORMAT,
+            svg: "<svg/>".to_owned(),
+            source: None,
+            layers: vec![saved(1), saved(0)],
+            kerf: 0.0,
+            optimize: true,
+            laser_mode: "M4".to_owned(),
+            max_s: 1000,
+        };
+        project.apply(&mut doc);
+        assert_eq!(
+            doc.layers
+                .iter()
+                .map(|layer| layer.index)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+    }
+
+    #[test]
     fn apply_overrides_imported_defaults() {
         let mut doc = Document::new(100.0, 80.0);
         doc.layers
@@ -153,6 +213,7 @@ mod tests {
                 speed: 800.0,
                 power: 12.5,
                 passes: 3,
+                visible: false,
             }],
             kerf: 0.1,
             optimize: false,
@@ -166,5 +227,6 @@ mod tests {
         assert_eq!(layer.cut.speed, 800.0);
         assert_eq!(layer.cut.power, 12.5);
         assert_eq!(layer.cut.passes, 3);
+        assert!(!layer.visible);
     }
 }

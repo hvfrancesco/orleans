@@ -52,7 +52,7 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
     let mut stats = JobStats::default();
 
     for layer in &doc.layers {
-        if layer.is_empty() {
+        if !layer.visible || layer.is_empty() {
             continue;
         }
         let contours: Vec<Contour> = layer
@@ -251,6 +251,14 @@ mod tests {
         // The hole is 4x4 and the outer contour 10x10.
         let hole_area = orleans_geom::signed_area(&cuts[0].0[..4]).abs();
         assert!((hole_area - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hidden_layers_are_not_planned() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
+        doc.layers[0].visible = false;
+        let job = plan(&doc, &PlanOptions::default());
+        assert!(job.is_empty());
     }
 
     #[test]

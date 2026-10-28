@@ -59,6 +59,7 @@ enum Action {
 pub struct OrleansApp {
     doc: Document,
     preview: Preview,
+    selected_layer: Option<usize>,
     job: Job,
     path: Option<PathBuf>,
     view: Viewport,
@@ -111,6 +112,7 @@ impl OrleansApp {
         let mut app = Self {
             doc: Document::new(100.0, 100.0),
             preview: Preview::default(),
+            selected_layer: None,
             job: Job::default(),
             path: None,
             view: Viewport::default(),
@@ -175,6 +177,7 @@ impl OrleansApp {
             Ok(doc) => {
                 self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
                 self.doc = doc;
+                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
                 self.replan();
                 self.status = Status::ok(format!(
                     "{}: {} layers, {} shapes, {} contours",
@@ -232,6 +235,7 @@ impl OrleansApp {
                 project.apply(&mut doc);
                 self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
                 self.doc = doc;
+                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
                 self.plan_opts.kerf = project.kerf;
                 self.plan_opts.optimize = project.optimize;
                 self.gcode_opts.laser_mode = project.laser_mode();
@@ -1363,79 +1367,222 @@ impl OrleansApp {
             .max_size(560.0)
             .show(ui, |ui| {
                 ui.add_space(6.0);
-                ui.heading("Layers");
-                ui.add_space(2.0);
-
-                let mut changed = false;
-                let list_height = (ui.available_height() - 210.0).max(120.0);
-                egui::ScrollArea::vertical()
-                    .max_height(list_height)
-                    .show(ui, |ui| {
-                        if self.doc.layers.is_empty() {
+                let total = self.doc.layers.len();
+                let visible = self.doc.layers.iter().filter(|layer| layer.visible).count();
+                ui.horizontal(|ui| {
+                    ui.heading("Layers");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if total > 0 {
                             ui.label(
-                                RichText::new("No layers yet. Open an SVG or drop one here.")
+                                RichText::new(format!("{visible}/{total} shown"))
+                                    .small()
                                     .weak(),
                             );
                         }
-                        for layer in &mut self.doc.layers {
-                            let color = display_color(layer.color);
-                            ui.horizontal(|ui| {
-                                ui.colored_label(color, "●");
-                                ui.strong(&layer.name);
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let shapes = layer.shapes.len();
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{shapes} shape{}",
-                                                if shapes == 1 { "" } else { "s" }
-                                            ))
-                                            .weak(),
-                                        );
-                                    },
-                                );
-                            });
-                            egui::Grid::new(format!("params-{}", layer.index))
-                                .num_columns(2)
-                                .spacing([8.0, 4.0])
-                                .show(ui, |ui| {
-                                    ui.label("Speed");
-                                    changed |= ui
-                                        .add(
-                                            egui::DragValue::new(&mut layer.cut.speed)
-                                                .speed(10.0)
-                                                .range(0.0..=30000.0)
-                                                .suffix(" mm/min"),
-                                        )
-                                        .changed();
-                                    ui.end_row();
-
-                                    ui.label("Power");
-                                    changed |= ui
-                                        .add(
-                                            egui::DragValue::new(&mut layer.cut.power)
-                                                .speed(1.0)
-                                                .range(0.0..=100.0)
-                                                .suffix(" %"),
-                                        )
-                                        .changed();
-                                    ui.end_row();
-
-                                    ui.label("Passes");
-                                    changed |= ui
-                                        .add(
-                                            egui::DragValue::new(&mut layer.cut.passes)
-                                                .speed(1.0)
-                                                .range(1..=50),
-                                        )
-                                        .changed();
-                                    ui.end_row();
-                                });
-                            ui.add_space(4.0);
-                            ui.separator();
-                        }
                     });
+                });
+                ui.add_space(2.0);
+
+                let mut changed = false;
+                if total == 0 {
+                    ui.label(RichText::new("No layers yet. Open an SVG or drop one here.").weak());
+                } else {
+                    let list_height = (ui.available_height() - 350.0).clamp(100.0, 360.0);
+                    let mut pick = None;
+                    let mut visibility_changed = false;
+                    egui::ScrollArea::vertical()
+                        .id_salt("layer-list")
+                        .max_height(list_height)
+                        .show(ui, |ui| {
+                            for layer in &mut self.doc.layers {
+                                let selected = self.selected_layer == Some(layer.index);
+                                let name = if layer.name.is_empty() {
+                                    format!("#{}", layer.index)
+                                } else {
+                                    layer.name.clone()
+                                };
+                                let shapes = layer.shapes.len();
+                                let summary = format!(
+                                    "{:.0} mm/min  ·  {:.0}%  ·  ×{}",
+                                    layer.cut.speed, layer.cut.power, layer.cut.passes
+                                );
+                                let row = egui::Frame::new()
+                                    .fill(if selected {
+                                        ui.visuals().selection.bg_fill
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .corner_radius(3.0)
+                                    .inner_margin(egui::Margin::symmetric(4, 2))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .checkbox(&mut layer.visible, "")
+                                                .on_hover_text("Show/hide layer")
+                                                .changed()
+                                            {
+                                                visibility_changed = true;
+                                            }
+                                            let (chip, _) = ui.allocate_exact_size(
+                                                egui::vec2(10.0, 10.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                chip,
+                                                2.0,
+                                                if layer.visible {
+                                                    display_color(layer.color)
+                                                } else {
+                                                    Color32::from_gray(90)
+                                                },
+                                            );
+                                            let text = if layer.visible {
+                                                RichText::new(name).strong()
+                                            } else {
+                                                RichText::new(name).weak()
+                                            };
+                                            ui.label(text);
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{shapes} shape{}",
+                                                            if shapes == 1 { "" } else { "s" }
+                                                        ))
+                                                        .small()
+                                                        .weak(),
+                                                    );
+                                                },
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(30.0);
+                                            let text = if layer.visible {
+                                                RichText::new(summary).small().weak()
+                                            } else {
+                                                RichText::new(summary)
+                                                    .small()
+                                                    .color(Color32::from_gray(95))
+                                            };
+                                            ui.label(text);
+                                        });
+                                    });
+                                if row.response.interact(egui::Sense::click()).clicked() {
+                                    pick = Some(layer.index);
+                                }
+                                ui.add_space(2.0);
+                            }
+                        });
+                    if let Some(index) = pick {
+                        self.selected_layer = Some(index);
+                    }
+                    changed |= visibility_changed;
+                    if self.selected_layer.is_none() {
+                        self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+                    }
+                }
+
+                ui.separator();
+                let selected_index = self
+                    .selected_layer
+                    .or_else(|| self.doc.layers.first().map(|layer| layer.index));
+                self.selected_layer = selected_index;
+                let selected_pos = selected_index.and_then(|index| {
+                    self.doc
+                        .layers
+                        .iter()
+                        .position(|layer| layer.index == index)
+                });
+                if let Some(pos) = selected_pos {
+                    let layer_count = self.doc.layers.len();
+                    let mut move_up = false;
+                    let mut move_down = false;
+                    {
+                        let layer = &mut self.doc.layers[pos];
+                        ui.horizontal(|ui| {
+                            ui.strong("Selected layer");
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(format!("#{}", layer.index)).small().weak(),
+                                    );
+                                },
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.color_edit_button_srgb(&mut layer.color);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut layer.name)
+                                    .hint_text("Layer name")
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                        egui::Grid::new("selected-layer-params")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Speed");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut layer.cut.speed)
+                                            .speed(10.0)
+                                            .range(0.0..=30000.0)
+                                            .suffix(" mm/min"),
+                                    )
+                                    .changed();
+                                ui.end_row();
+
+                                ui.label("Power");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut layer.cut.power)
+                                            .speed(1.0)
+                                            .range(0.0..=100.0)
+                                            .suffix(" %"),
+                                    )
+                                    .changed();
+                                ui.end_row();
+
+                                ui.label("Passes");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut layer.cut.passes)
+                                            .speed(1.0)
+                                            .range(1..=50),
+                                    )
+                                    .changed();
+                                ui.end_row();
+                            });
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut layer.visible, "Visible").changed();
+                            ui.label(RichText::new("· Line").small().weak());
+                        });
+                        ui.horizontal(|ui| {
+                            move_up = ui
+                                .add_enabled(pos > 0, egui::Button::new("Up"))
+                                .on_hover_text("Cut earlier")
+                                .clicked();
+                            move_down = ui
+                                .add_enabled(pos + 1 < layer_count, egui::Button::new("Down"))
+                                .on_hover_text("Cut later")
+                                .clicked();
+                            ui.label(RichText::new("cut order").small().weak());
+                        });
+                    }
+                    if move_up {
+                        self.doc.layers.swap(pos, pos - 1);
+                        changed = true;
+                    }
+                    if move_down {
+                        self.doc.layers.swap(pos, pos + 1);
+                        changed = true;
+                    }
+                } else {
+                    ui.label(RichText::new("Select a layer to edit it.").weak());
+                }
 
                 ui.separator();
                 ui.heading("Job");
@@ -1685,9 +1832,20 @@ impl OrleansApp {
     }
 
     fn draw_layers(&self, painter: &egui::Painter, area: Rect) {
-        for (layer, preview) in self.doc.layers.iter().zip(&self.preview.layers) {
+        for layer in &self.doc.layers {
+            if !layer.visible {
+                continue;
+            }
+            let Some(preview) = self.preview.layer(layer.index) else {
+                continue;
+            };
             let color = display_color(layer.color);
-            let stroke = Stroke::new(1.4, color);
+            let width = if self.selected_layer == Some(layer.index) {
+                2.4
+            } else {
+                1.4
+            };
+            let stroke = Stroke::new(width, color);
             for contour in &preview.contours {
                 let mut points: Vec<Pos2> = contour
                     .points

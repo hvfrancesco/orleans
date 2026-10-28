@@ -15,6 +15,8 @@ pub struct PreviewContour {
 
 #[derive(Clone, Debug, Default)]
 pub struct LayerPreview {
+    /// The stable `Layer::index` this preview belongs to.
+    pub index: usize,
     pub contours: Vec<PreviewContour>,
 }
 
@@ -30,6 +32,7 @@ impl Preview {
             .layers
             .iter()
             .map(|layer| LayerPreview {
+                index: layer.index,
                 contours: layer
                     .shapes
                     .iter()
@@ -47,6 +50,10 @@ impl Preview {
 
     pub fn contour_count(&self) -> usize {
         self.layers.iter().map(|l| l.contours.len()).sum()
+    }
+
+    pub fn layer(&self, index: usize) -> Option<&LayerPreview> {
+        self.layers.iter().find(|layer| layer.index == index)
     }
 }
 
@@ -67,6 +74,7 @@ mod tests {
         let preview = Preview::build(&doc, 0.05);
         assert_eq!(preview.layers.len(), 1);
         assert_eq!(preview.contour_count(), 1);
+        assert_eq!(preview.layers[0].index, 0);
         assert_eq!(preview.layers[0].contours[0].points.len(), 2);
     }
 }
