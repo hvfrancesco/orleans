@@ -306,6 +306,104 @@ pub fn hatch_contours(contours: &[Contour], options: &HatchOptions) -> Vec<Vec<P
     hatch(&union(&rings), options)
 }
 
+/// Split a closed contour into cut runs around evenly spaced holding tabs.
+///
+/// The first tab straddles the contour seam, so the returned open runs are
+/// ordered from the end of the seam tab around the contour. If tabs are
+/// disabled, invalid, or wider than the contour, the original closed polyline
+/// is returned unchanged.
+pub fn split_tabs(points: &[Point], count: u32, width: f64) -> Vec<Vec<Point>> {
+    if count == 0 || !width.is_finite() || width <= 0.0 || points.len() < 4 {
+        return vec![points.to_vec()];
+    }
+    let mut ring = points.to_vec();
+    if let (Some(first), Some(last)) = (ring.first(), ring.last()) {
+        if (*first - *last).hypot() < 1e-6 {
+            ring.pop();
+        }
+    }
+    let n = ring.len();
+    if n < 3 {
+        return vec![points.to_vec()];
+    }
+
+    let mut cumulative = Vec::with_capacity(n);
+    cumulative.push(0.0);
+    for index in 1..n {
+        cumulative.push(cumulative[index - 1] + (ring[index] - ring[index - 1]).hypot());
+    }
+    let total = cumulative[n - 1] + (ring[0] - ring[n - 1]).hypot();
+    let count_f = f64::from(count);
+    if !total.is_finite() || total <= 1e-9 || width * count_f >= total {
+        return vec![points.to_vec()];
+    }
+
+    let point_at = |distance: f64| -> Point {
+        if distance <= 0.0 || distance >= total {
+            return ring[0];
+        }
+        for index in 0..n {
+            let next = (index + 1) % n;
+            let edge_start = cumulative[index];
+            let edge_end = if next == 0 { total } else { cumulative[next] };
+            if distance <= edge_end {
+                let t = (distance - edge_start) / (edge_end - edge_start).max(1e-12);
+                let a = ring[index];
+                let b = ring[next];
+                return Point::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+            }
+        }
+        ring[0]
+    };
+
+    let step = total / count_f;
+    let half = width * 0.5;
+    let mut parts = Vec::new();
+    for index in 0..count {
+        let start = if index == 0 {
+            half
+        } else {
+            f64::from(index) * step + half
+        };
+        let end = if index + 1 == count {
+            total - half
+        } else {
+            f64::from(index + 1) * step - half
+        };
+        if end - start <= 1e-9 {
+            continue;
+        }
+
+        let mut part = vec![point_at(start)];
+        for (vertex, &point) in ring.iter().enumerate() {
+            let distance = cumulative[vertex];
+            if distance > start + 1e-9 && distance < end - 1e-9 {
+                part.push(point);
+            }
+        }
+        part.push(point_at(end));
+
+        let mut clean = Vec::with_capacity(part.len());
+        for point in part {
+            if clean
+                .last()
+                .is_none_or(|last: &Point| (*last - point).hypot() > 1e-9)
+            {
+                clean.push(point);
+            }
+        }
+        if clean.len() >= 2 {
+            parts.push(clean);
+        }
+    }
+
+    if parts.is_empty() {
+        vec![points.to_vec()]
+    } else {
+        parts
+    }
+}
+
 /// Union of a set of rings (even-odd holes are preserved by Clipper).
 pub fn union(rings: &[Vec<Point>]) -> Vec<Vec<Point>> {
     to_clipper(rings)
@@ -427,6 +525,30 @@ mod tests {
         let mut cw = square(10.0);
         cw.reverse();
         assert!((signed_area(&cw) + 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tabs_leave_even_uncut_gaps() {
+        let parts = split_tabs(&square(10.0), 4, 4.0);
+        assert_eq!(parts.len(), 4);
+        for part in &parts {
+            assert!((polyline_length(part) - 6.0).abs() < 1e-9);
+        }
+        assert!((parts[0][0] - Point::new(2.0, 0.0)).hypot() < 1e-9);
+        assert!((parts[0][1] - Point::new(8.0, 0.0)).hypot() < 1e-9);
+        assert!((parts[3][0] - Point::new(0.0, 8.0)).hypot() < 1e-9);
+        assert!((parts[3][1] - Point::new(0.0, 2.0)).hypot() < 1e-9);
+    }
+
+    #[test]
+    fn tabs_can_be_disabled_or_rejected_when_too_wide() {
+        let full = split_tabs(&square(10.0), 0, 4.0);
+        assert_eq!(full.len(), 1);
+        assert_eq!(full[0], square(10.0));
+
+        let full = split_tabs(&square(10.0), 20, 5.0);
+        assert_eq!(full.len(), 1);
+        assert_eq!(full[0], square(10.0));
     }
 
     #[test]

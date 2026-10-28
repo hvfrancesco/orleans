@@ -74,6 +74,12 @@ pub struct LayerSettings {
     pub fill_overlap: f64,
     #[serde(default = "default_true")]
     pub fill_alternate: bool,
+    #[serde(default)]
+    pub tab_count: u32,
+    #[serde(default = "default_tab_width")]
+    pub tab_width: f64,
+    #[serde(default)]
+    pub tab_inner: bool,
 }
 
 fn default_true() -> bool {
@@ -82,6 +88,10 @@ fn default_true() -> bool {
 
 fn default_fill_spacing() -> f64 {
     orleans_core::FillParams::default().spacing
+}
+
+fn default_tab_width() -> f64 {
+    orleans_core::TabParams::default().width
 }
 
 impl ProjectFile {
@@ -117,6 +127,9 @@ impl ProjectFile {
                     fill_angle: layer.fill.angle,
                     fill_overlap: layer.fill.overlap,
                     fill_alternate: layer.fill.alternate,
+                    tab_count: layer.tabs.count,
+                    tab_width: layer.tabs.width,
+                    tab_inner: layer.tabs.inner,
                 })
                 .collect(),
             kerf,
@@ -170,6 +183,11 @@ impl ProjectFile {
                     angle: saved.fill_angle.clamp(0.0, 180.0),
                     overlap: saved.fill_overlap.clamp(0.0, 5.0),
                     alternate: saved.fill_alternate,
+                };
+                layer.tabs = orleans_core::TabParams {
+                    count: saved.tab_count.min(16),
+                    width: saved.tab_width.clamp(0.5, 20.0),
+                    inner: saved.tab_inner,
                 };
             }
         }
@@ -244,6 +262,11 @@ mod tests {
             overlap: 0.1,
             alternate: false,
         };
+        layer.tabs = orleans_core::TabParams {
+            count: 4,
+            width: 2.5,
+            inner: true,
+        };
         doc.layers.push(layer);
 
         let project = ProjectFile::new(
@@ -276,6 +299,9 @@ mod tests {
         assert!((back.layers[0].fill_angle - 45.0).abs() < 1e-9);
         assert!((back.layers[0].fill_overlap - 0.1).abs() < 1e-9);
         assert!(!back.layers[0].fill_alternate);
+        assert_eq!(back.layers[0].tab_count, 4);
+        assert!((back.layers[0].tab_width - 2.5).abs() < 1e-9);
+        assert!(back.layers[0].tab_inner);
         assert_eq!(back.transforms.len(), 1);
         assert_eq!(back.transforms[0].dx, 1.5);
         assert_eq!(back.transforms[0].dy, -2.0);
@@ -363,6 +389,9 @@ mod tests {
         assert!((layer.fill_angle).abs() < 1e-9);
         assert!((layer.fill_overlap).abs() < 1e-9);
         assert!(layer.fill_alternate);
+        assert_eq!(layer.tab_count, 0);
+        assert!((layer.tab_width - 3.0).abs() < 1e-9);
+        assert!(!layer.tab_inner);
     }
 
     #[test]
@@ -522,6 +551,9 @@ mod tests {
             fill_angle: 0.0,
             fill_overlap: 0.0,
             fill_alternate: true,
+            tab_count: 0,
+            tab_width: 3.0,
+            tab_inner: false,
         };
         let project = ProjectFile {
             format: FORMAT,
@@ -568,6 +600,9 @@ mod tests {
                 fill_angle: 45.0,
                 fill_overlap: 0.1,
                 fill_alternate: false,
+                tab_count: 3,
+                tab_width: 1.5,
+                tab_inner: true,
             }],
             kerf: 0.1,
             optimize: false,
@@ -587,6 +622,9 @@ mod tests {
         assert!((layer.fill.angle - 45.0).abs() < 1e-9);
         assert!((layer.fill.overlap - 0.1).abs() < 1e-9);
         assert!(!layer.fill.alternate);
+        assert_eq!(layer.tabs.count, 3);
+        assert!((layer.tabs.width - 1.5).abs() < 1e-9);
+        assert!(layer.tabs.inner);
         assert!(!layer.visible);
         assert!(layer.output);
     }

@@ -76,6 +76,27 @@ impl Default for FillParams {
     }
 }
 
+/// Holding tabs left uncut around closed contours.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabParams {
+    /// Number of tabs per contour. Zero disables tabs.
+    pub count: u32,
+    /// Width of each uncut tab in millimetres.
+    pub width: f64,
+    /// Also place tabs on inner contours (holes).
+    pub inner: bool,
+}
+
+impl Default for TabParams {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            width: 3.0,
+            inner: false,
+        }
+    }
+}
+
 /// A group of shapes sharing cutting parameters, equivalent to a LightBurn layer.
 #[derive(Clone, Debug)]
 pub struct Layer {
@@ -86,6 +107,7 @@ pub struct Layer {
     pub mode: LayerMode,
     pub cut: CutParams,
     pub fill: FillParams,
+    pub tabs: TabParams,
     pub shapes: Vec<Shape>,
     /// Whether the layer is drawn in the editor.
     pub visible: bool,
@@ -102,6 +124,7 @@ impl Layer {
             mode: LayerMode::Line,
             cut,
             fill: FillParams::default(),
+            tabs: TabParams::default(),
             shapes: Vec::new(),
             visible: true,
             output: true,

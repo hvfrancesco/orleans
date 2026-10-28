@@ -11,7 +11,8 @@
 use kurbo::Point;
 use orleans_core::{Document, Job, JobStats, LayerMode, Op};
 use orleans_geom::{
-    dedup, flatten_path, hatch_contours, offset_closed, point_in_polygon, Contour, HatchOptions,
+    dedup, flatten_path, hatch_contours, offset_closed, point_in_polygon, split_tabs, Contour,
+    HatchOptions,
 };
 
 /// Knobs for [`plan`].
@@ -119,33 +120,39 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
             if points.len() < 2 {
                 continue;
             }
+            let parts = if layer.tabs.count > 0
+                && contours[contour_idx].closed
+                && (layer.tabs.inner || depths[contour_idx].is_multiple_of(2))
+            {
+                split_tabs(&points, layer.tabs.count, layer.tabs.width)
+            } else {
+                vec![points]
+            };
 
-            let start = points[0];
-            if (start - pos).hypot() > 1e-6 {
-                stats.travel_mm += (start - pos).hypot();
-                job.ops.push(Op::Rapid { to: start });
-            }
-
-            // A closed contour ends where it started, so extra passes need no
-            // travel. Open contours do.
-            for pass in 0..layer.cut.passes.max(1) {
-                if pass > 0 {
-                    let last = *points.last().expect("non-empty");
-                    if (last - start).hypot() > 1e-6 {
-                        stats.travel_mm += (last - start).hypot();
+            for _ in 0..layer.cut.passes.max(1) {
+                for part in &parts {
+                    if part.len() < 2 {
+                        continue;
+                    }
+                    let start = part[0];
+                    if (start - pos).hypot() > 1e-6 {
+                        stats.travel_mm += (start - pos).hypot();
                         job.ops.push(Op::Rapid { to: start });
                     }
+                    let length = orleans_geom::polyline_length(part);
+                    if length <= 1e-9 {
+                        continue;
+                    }
+                    stats.cut_mm += length;
+                    stats.seconds += length / layer.cut.speed.max(1.0) * 60.0;
+                    job.ops.push(Op::Cut {
+                        polyline: part.clone(),
+                        params: layer.cut,
+                        layer: layer.index,
+                    });
+                    pos = *part.last().expect("non-empty");
                 }
-                stats.cut_mm += orleans_geom::polyline_length(&points);
-                stats.seconds +=
-                    orleans_geom::polyline_length(&points) / layer.cut.speed.max(1.0) * 60.0;
-                job.ops.push(Op::Cut {
-                    polyline: points.clone(),
-                    params: layer.cut,
-                    layer: layer.index,
-                });
             }
-            pos = *points.last().expect("non-empty");
         }
     }
 
@@ -297,6 +304,34 @@ mod tests {
         // The hole is 4x4 and the outer contour 10x10.
         let hole_area = orleans_geom::signed_area(&cuts[0].0[..4]).abs();
         assert!((hole_area - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tabs_split_outer_contours_into_cut_runs() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
+        doc.layers[0].tabs = orleans_core::TabParams {
+            count: 4,
+            width: 2.0,
+            inner: false,
+        };
+        let job = plan(&doc, &PlanOptions::default());
+        assert_eq!(job.cuts().count(), 4);
+        assert!((job.stats.cut_mm - 32.0).abs() < 1e-6);
+        assert!(job.stats.travel_mm > 1.0);
+    }
+
+    #[test]
+    fn tabs_can_be_enabled_for_inner_contours() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0), rect(4.0, 4.0, 6.0, 6.0)]);
+        doc.layers[0].tabs = orleans_core::TabParams {
+            count: 2,
+            width: 0.5,
+            inner: false,
+        };
+        assert_eq!(plan(&doc, &PlanOptions::default()).cuts().count(), 3);
+
+        doc.layers[0].tabs.inner = true;
+        assert_eq!(plan(&doc, &PlanOptions::default()).cuts().count(), 4);
     }
 
     #[test]

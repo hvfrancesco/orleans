@@ -30,7 +30,7 @@ was decompiled or copied.
 | Hardware-free GRBL simulator | ✅ |
 | DXF / PDF / AI import | ❌ |
 | Raster engraving and dithering | ❌ |
-| Tabs/bridges | ❌ |
+| Tabs/bridges on contour cuts | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo | ✅ |
@@ -46,7 +46,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-108 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+112 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -110,7 +110,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   in cut order, and the selected layer is highlighted on the canvas;
 * choose **Line** or **Fill** for each layer. Fill mode adds **Fill spacing**,
   **Angle**, **Overlap** and **Alternate**; it hatches closed contours and
-  previews the fill. Open contours are ignored by fill mode;
+  previews the fill. Open contours are ignored by fill mode. Line mode adds
+  **Tabs**: count and width of uncut holding bridges per contour, with an
+  optional **Holes** setting for inner contours;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
   (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
@@ -280,8 +282,10 @@ concept of a line and some bridges emit negotiation on connect.
   covers transforms and node edits.
 * Fill mode emits hatch strokes only, not the shape outline; put the outline on
   a separate Line layer/colour if you need both. It supports scanline hatching
-  of closed contours with even-odd holes; cross-hatch, offset fill and tabs are
-  not implemented yet.
+  of closed contours with even-odd holes; cross-hatch and offset fill are not
+  implemented yet.
+* Tabs are distributed evenly by arc length and start at the contour seam; there
+  is no manual tab placement yet.
 * Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
   Framing uses a fixed 3000 mm/min and the design bounds, with no margin
   setting.
@@ -295,8 +299,8 @@ concept of a line and some bridges emit negotiation on connect.
 
 1. **Finish the editor** — job history for the streaming panel, plus
    node-editing refinements such as join/break and snapping to geometry.
-2. **Tabs/bridges and fill refinements** — hold-down tabs, cross-hatch and
-   offset fill.
+2. **Fill refinements and manual tabs** — cross-hatch, offset fill and
+   manual tab placement.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.

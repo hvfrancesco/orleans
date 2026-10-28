@@ -2411,6 +2411,37 @@ impl OrleansApp {
                                 .selectable_value(&mut layer.mode, LayerMode::Fill, "Fill")
                                 .changed();
                         });
+                        if layer.mode == LayerMode::Line {
+                            ui.horizontal(|ui| {
+                                ui.label("Tabs");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut layer.tabs.count)
+                                            .speed(1.0)
+                                            .range(0..=16),
+                                    )
+                                    .on_hover_text(
+                                        "Number of holding tabs per outer contour; 0 disables",
+                                    )
+                                    .changed();
+                                if layer.tabs.count > 0 {
+                                    ui.label("Width");
+                                    changed |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut layer.tabs.width)
+                                                .speed(0.1)
+                                                .range(0.5..=20.0)
+                                                .suffix(" mm"),
+                                        )
+                                        .on_hover_text("Width of each uncut tab")
+                                        .changed();
+                                    changed |= ui
+                                        .checkbox(&mut layer.tabs.inner, "Holes")
+                                        .on_hover_text("Also place tabs on inner contours")
+                                        .changed();
+                                }
+                            });
+                        }
                         if layer.mode == LayerMode::Fill {
                             egui::Grid::new("layer-fill-params")
                                 .num_columns(2)
