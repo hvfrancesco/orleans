@@ -368,6 +368,70 @@ pub fn offset_closed(points: &[Point], distance: f64, miter_limit: f64) -> Vec<P
         .unwrap_or_default()
 }
 
+/// Offset a filled region bounded by outer rings and holes. Positive
+/// `distance` shrinks the filled area: outer rings move inward and holes grow.
+pub fn offset_region(rings: &[Vec<Point>], distance: f64, miter_limit: f64) -> Vec<Vec<Point>> {
+    let contours: Vec<Contour> = rings
+        .iter()
+        .map(|ring| Contour {
+            points: dedup(ring, true),
+            closed: true,
+        })
+        .filter(|contour| contour.points.len() >= 3)
+        .collect();
+    if contours.is_empty() {
+        return Vec::new();
+    }
+    if !distance.is_finite() || distance.abs() < EPS {
+        return contours
+            .iter()
+            .map(|contour| close(&contour.points))
+            .collect();
+    }
+
+    let areas: Vec<f64> = contours
+        .iter()
+        .map(|contour| contour.signed_area().abs())
+        .collect();
+    let depths: Vec<usize> = (0..contours.len())
+        .map(|index| {
+            let probe = contours[index].centroid();
+            contours
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| {
+                    *other_index != index
+                        && areas[*other_index] > areas[index]
+                        && point_in_polygon(probe, &other.points)
+                })
+                .count()
+        })
+        .collect();
+    let paths: Vec<Vec<Point>> = contours
+        .iter()
+        .zip(depths)
+        .map(|(contour, depth)| {
+            let mut points = contour.points.clone();
+            let ccw = signed_area(&points) >= 0.0;
+            if (depth.is_multiple_of(2)) != ccw {
+                points.reverse();
+            }
+            points
+        })
+        .collect();
+
+    let result = to_clipper(&paths).inflate(
+        -distance,
+        JoinType::Miter,
+        EndType::Polygon,
+        miter_limit.max(1.0),
+    );
+    from_clipper(result)
+        .into_iter()
+        .map(|ring| close(&ring))
+        .collect()
+}
+
 /// Options for scanline filling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HatchOptions {
@@ -760,6 +824,22 @@ mod tests {
 
         let point = point_at_fraction(&square(10.0), 0.125).expect("point");
         assert!((point - Point::new(5.0, 0.0)).hypot() < 1e-9);
+    }
+
+    #[test]
+    fn region_offset_shrinks_outer_rings_and_grows_holes() {
+        let hole = vec![
+            Point::new(3.0, 3.0),
+            Point::new(7.0, 3.0),
+            Point::new(7.0, 7.0),
+            Point::new(3.0, 7.0),
+        ];
+        let rings = offset_region(&[square(10.0), hole], 1.0, 4.0);
+        assert_eq!(rings.len(), 2);
+        let mut areas: Vec<f64> = rings.iter().map(|ring| signed_area(ring).abs()).collect();
+        areas.sort_by(|a, b| a.total_cmp(b));
+        assert!((areas[0] - 36.0).abs() < 1e-6);
+        assert!((areas[1] - 64.0).abs() < 1e-6);
     }
 
     #[test]

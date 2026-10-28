@@ -24,7 +24,7 @@ was decompiled or copied.
 | Boolean ops (union / difference / intersection) | ✅ |
 | Inside-out ordering + nearest-neighbour travel optimisation | ✅ |
 | Multi-pass cutting | ✅ |
-| Fill/hatch layers (angle, spacing, overlap, alternate, cross-hatch, outline) | ✅ |
+| Fill/hatch layers (angle, spacing, overlap, alternate, cross-hatch, offset, outline) | ✅ |
 | G-code for GRBL / GrblHAL / FluidNC / Marlin-laser (`M3`, `M4`) | ✅ |
 | GRBL streaming: character-counting flow control, `ok`/`error`, progress, status, feed hold, resume, soft reset, automatic stop on failure | ✅ |
 | USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
@@ -51,7 +51,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-144 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+146 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -134,6 +134,7 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 * choose **Line** or **Fill** for each layer. Fill mode adds **Fill spacing**,
   **Angle**, **Overlap**, **Alternate**, **Cross** and **Outline**; it hatches
   closed contours and previews the fill. **Cross** adds a second pass at 90°,
+  **Offset** fills inward with concentric closed loops instead of scan lines,
   and **Outline** traces the closed contours after filling them. Open contours
   are ignored by fill mode. Line mode adds
   **Tabs**: count and width of uncut holding bridges per contour, with an
@@ -343,9 +344,10 @@ concept of a line and some bridges emit negotiation on connect.
   There is no smoothing, node-type conversion or joining to an interior point.
   Undo and redo cover transforms, node edits, raster placement, groups, layer
   settings and job settings.
-* Fill mode supports scanline hatching of closed contours with even-odd holes,
-  an optional 90° cross-hatch pass and an optional outline cut. Offset fill is
-  not implemented yet, and fill outlines do not use holding tabs.
+* Fill mode supports scanline hatching or inward concentric offset loops on
+  closed contours with even-odd holes, an optional 90° cross-hatch pass and an
+  optional outline cut. Offset fill loops stop when the remaining region is
+  narrower than the spacing, and fill outlines do not use holding tabs.
 * Raster import starts at 96 DPI but size and DPI can be changed after import;
   scan lines rotate with the image angle. More dithering algorithms are not
   implemented yet. Raster layers with Cut disabled show the image preview but
@@ -367,11 +369,10 @@ concept of a line and some bridges emit negotiation on connect.
 ## Roadmap
 
 1. **Finish the editor** — job history for the streaming panel.
-2. **Fill refinements** — offset/concentric fill.
-3. **Raster refinements** — more dithering algorithms and image cropping.
-4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
-5. **Second driver** — Marlin, then Ruida over UDP.
-6. **Job control extras** — feed/power overrides, rotary setup.
+2. **Raster refinements** — more dithering algorithms and image cropping.
+3. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
+4. **Second driver** — Marlin, then Ruida over UDP.
+5. **Job control extras** — feed/power overrides, rotary setup.
 
 ## License
 

@@ -13,8 +13,8 @@ use orleans_core::{
     CutParams, Document, Job, JobStats, Layer, LayerMode, Op, RasterImage, RasterMode,
 };
 use orleans_geom::{
-    dedup, flatten_path, hatch_contours, offset_closed, point_in_polygon, split_manual_tabs,
-    split_tabs, Contour, HatchOptions,
+    dedup, flatten_path, hatch_contours, offset_closed, offset_region, point_in_polygon,
+    split_manual_tabs, split_tabs, Contour, HatchOptions,
 };
 
 /// Knobs for [`plan`].
@@ -83,6 +83,16 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
             continue;
         }
 
+        if layer.mode == LayerMode::Fill && layer.fill.offset {
+            plan_offset_fill(layer, &contours, opt, &mut job, &mut stats, &mut pos);
+            if layer.fill.outline {
+                plan_contours(
+                    layer, &contours, &origins, opt, false, &mut job, &mut stats, &mut pos,
+                );
+            }
+            continue;
+        }
+
         if layer.mode == LayerMode::Fill {
             let mut segments = hatch_contours(
                 &contours,
@@ -121,6 +131,93 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
     stats.seconds += stats.travel_mm / opt.rapid_speed.max(1.0) * 60.0;
     job.stats = stats;
     job
+}
+
+fn plan_offset_fill(
+    layer: &Layer,
+    contours: &[Contour],
+    opt: &PlanOptions,
+    job: &mut Job,
+    stats: &mut JobStats,
+    pos: &mut Point,
+) {
+    let spacing = layer.fill.spacing;
+    if !spacing.is_finite() || spacing <= 1e-6 {
+        return;
+    }
+    let rings: Vec<Vec<Point>> = contours
+        .iter()
+        .filter(|contour| contour.closed)
+        .map(|contour| contour.points.clone())
+        .collect();
+    if rings.is_empty() {
+        return;
+    }
+
+    let mut distance = spacing;
+    let mut guard = 0;
+    while guard < 5000 {
+        let loops = offset_region(&rings, distance, 4.0);
+        if loops.is_empty() {
+            break;
+        }
+        plan_closed_loops(layer, loops, opt.optimize, job, stats, pos);
+        distance += spacing;
+        guard += 1;
+    }
+}
+
+fn plan_closed_loops(
+    layer: &Layer,
+    loops: Vec<Vec<Point>>,
+    optimize: bool,
+    job: &mut Job,
+    stats: &mut JobStats,
+    pos: &mut Point,
+) {
+    let mut remaining: Vec<Vec<Point>> = loops
+        .into_iter()
+        .map(|ring| dedup(&ring, true))
+        .filter(|ring| ring.len() >= 3)
+        .collect();
+    while !remaining.is_empty() {
+        let index = if optimize {
+            remaining
+                .iter()
+                .enumerate()
+                .map(|(index, points)| {
+                    let (_, distance) = nearest_start(points, *pos, true);
+                    (index, distance)
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(index, _)| index)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let points = remaining.remove(index);
+        let (start_idx, _) = nearest_start(&points, *pos, true);
+        let loop_points = rotate(&points, start_idx, true);
+        let start = loop_points[0];
+        let length = orleans_geom::polyline_length(&loop_points);
+        if length <= 1e-9 {
+            continue;
+        }
+        for _ in 0..layer.cut.passes.max(1) {
+            if (*pos - start).hypot() > 1e-6 {
+                stats.travel_mm += (*pos - start).hypot();
+                job.ops.push(Op::Rapid { to: start });
+            }
+            stats.cut_mm += length;
+            stats.seconds += length / layer.cut.speed.max(1.0) * 60.0;
+            job.ops.push(Op::Cut {
+                polyline: loop_points.clone(),
+                params: layer.cut,
+                layer: layer.index,
+            });
+            *pos = *loop_points.last().expect("non-empty");
+        }
+    }
 }
 
 fn plan_hatch(
@@ -755,6 +852,25 @@ mod tests {
             .expect("filled contour");
         assert_eq!(outline.0.first(), outline.0.last());
         assert!((orleans_geom::polyline_length(outline.0) - 40.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn offset_fill_creates_concentric_loops() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
+        doc.layers[0].mode = LayerMode::Fill;
+        doc.layers[0].fill.offset = true;
+        doc.layers[0].fill.spacing = 2.0;
+
+        let job = plan(&doc, &PlanOptions::default());
+        let cuts: Vec<_> = job.cuts().collect();
+        assert_eq!(cuts.len(), 2);
+        assert!((job.stats.cut_mm - 32.0).abs() < 1e-6);
+        for (line, _, _) in cuts {
+            assert_eq!(line.first(), line.last());
+        }
+
+        doc.layers[0].fill.outline = true;
+        assert_eq!(plan(&doc, &PlanOptions::default()).cuts().count(), 3);
     }
 
     #[test]

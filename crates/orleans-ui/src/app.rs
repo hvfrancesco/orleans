@@ -9,8 +9,8 @@ use kurbo::{Affine, Point};
 use orleans_core::{Document, Job, Layer, LayerMode, ManualTabs, Op, RasterMode, Shape};
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_geom::{
-    flatten_path, hatch_contours, nearest_along_closed, point_at_fraction, point_in_polygon,
-    tab_span_polylines, HatchOptions,
+    flatten_path, hatch_contours, nearest_along_closed, offset_region, point_at_fraction,
+    point_in_polygon, tab_span_polylines, HatchOptions,
 };
 use orleans_import::{import_image, import_svg, ImportOptions, DEFAULT_RASTER_DPI};
 use orleans_toolpath::{nesting_depths, plan, PlanOptions};
@@ -4895,49 +4895,70 @@ impl OrleansApp {
                                                 .range(0.05..=10.0)
                                                 .suffix(" mm"),
                                         )
-                                        .on_hover_text("Distance between hatch lines")
-                                        .changed();
-                                    ui.end_row();
-
-                                    ui.label("Angle");
-                                    changed |= ui
-                                        .add(
-                                            egui::DragValue::new(&mut layer.fill.angle)
-                                                .speed(1.0)
-                                                .range(0.0..=180.0)
-                                                .suffix("°"),
-                                        )
-                                        .on_hover_text("0° is horizontal, 90° is vertical")
-                                        .changed();
-                                    ui.end_row();
-
-                                    ui.label("Overlap");
-                                    changed |= ui
-                                        .add(
-                                            egui::DragValue::new(&mut layer.fill.overlap)
-                                                .speed(0.05)
-                                                .range(0.0..=5.0)
-                                                .suffix(" mm"),
-                                        )
                                         .on_hover_text(
-                                            "Extend each hatch line at both ends by this distance",
+                                            "Distance between hatch lines or concentric loops",
                                         )
                                         .changed();
                                     ui.end_row();
 
-                                    ui.label("Alternate");
+                                    ui.label("Offset");
                                     changed |= ui
-                                        .checkbox(&mut layer.fill.alternate, "Reverse each line")
-                                        .on_hover_text("Alternate hatch direction to reduce travel")
+                                        .checkbox(&mut layer.fill.offset, "Concentric loops")
+                                        .on_hover_text(
+                                            "Fill inward with closed loops instead of scan lines",
+                                        )
                                         .changed();
                                     ui.end_row();
 
-                                    ui.label("Cross");
-                                    changed |= ui
-                                        .checkbox(&mut layer.fill.cross, "Second pass at 90°")
-                                        .on_hover_text("Hatch again across the first pass")
-                                        .changed();
-                                    ui.end_row();
+                                    if !layer.fill.offset {
+                                        ui.label("Angle");
+                                        changed |= ui
+                                            .add(
+                                                egui::DragValue::new(&mut layer.fill.angle)
+                                                    .speed(1.0)
+                                                    .range(0.0..=180.0)
+                                                    .suffix("°"),
+                                            )
+                                            .on_hover_text("0° is horizontal, 90° is vertical")
+                                            .changed();
+                                        ui.end_row();
+
+                                        ui.label("Overlap");
+                                        changed |= ui
+                                            .add(
+                                                egui::DragValue::new(&mut layer.fill.overlap)
+                                                    .speed(0.05)
+                                                    .range(0.0..=5.0)
+                                                    .suffix(" mm"),
+                                            )
+                                            .on_hover_text(
+                                                "Extend each hatch line at both ends by this distance",
+                                            )
+                                            .changed();
+                                        ui.end_row();
+
+                                        ui.label("Alternate");
+                                        changed |= ui
+                                            .checkbox(
+                                                &mut layer.fill.alternate,
+                                                "Reverse each line",
+                                            )
+                                            .on_hover_text(
+                                                "Alternate hatch direction to reduce travel",
+                                            )
+                                            .changed();
+                                        ui.end_row();
+
+                                        ui.label("Cross");
+                                        changed |= ui
+                                            .checkbox(
+                                                &mut layer.fill.cross,
+                                                "Second pass at 90°",
+                                            )
+                                            .on_hover_text("Hatch again across the first pass")
+                                            .changed();
+                                        ui.end_row();
+                                    }
 
                                     ui.label("Outline");
                                     changed |= ui
@@ -5914,35 +5935,65 @@ impl OrleansApp {
                         .iter()
                         .flat_map(|shape| flatten_path(&shape.path, DISPLAY_TOLERANCE))
                         .collect();
-                    let mut segments = hatch_contours(
-                        &contours,
-                        &HatchOptions {
-                            spacing: layer.fill.spacing,
-                            angle_deg: layer.fill.angle,
-                            overlap: layer.fill.overlap,
-                            alternate: layer.fill.alternate,
-                        },
-                    );
-                    if layer.fill.cross {
-                        segments.extend(hatch_contours(
+                    if layer.fill.offset {
+                        let rings: Vec<Vec<Point>> = contours
+                            .iter()
+                            .filter(|contour| contour.closed)
+                            .map(|contour| contour.points.clone())
+                            .collect();
+                        let spacing = layer.fill.spacing;
+                        if !rings.is_empty() && spacing.is_finite() && spacing > 1e-6 {
+                            let mut distance = spacing;
+                            let mut guard = 0;
+                            while guard < 5000 {
+                                let loops = offset_region(&rings, distance, 4.0);
+                                if loops.is_empty() {
+                                    break;
+                                }
+                                for ring in loops {
+                                    let points: Vec<Pos2> = ring
+                                        .iter()
+                                        .map(|point| self.view.world_to_screen(area, *point))
+                                        .collect();
+                                    if points.len() >= 2 {
+                                        painter.add(egui::Shape::line(points, fill_stroke));
+                                    }
+                                }
+                                distance += spacing;
+                                guard += 1;
+                            }
+                        }
+                    } else {
+                        let mut segments = hatch_contours(
                             &contours,
                             &HatchOptions {
                                 spacing: layer.fill.spacing,
-                                angle_deg: layer.fill.angle + 90.0,
+                                angle_deg: layer.fill.angle,
                                 overlap: layer.fill.overlap,
                                 alternate: layer.fill.alternate,
                             },
-                        ));
-                    }
-                    for segment in segments {
-                        if segment.len() < 2 {
-                            continue;
+                        );
+                        if layer.fill.cross {
+                            segments.extend(hatch_contours(
+                                &contours,
+                                &HatchOptions {
+                                    spacing: layer.fill.spacing,
+                                    angle_deg: layer.fill.angle + 90.0,
+                                    overlap: layer.fill.overlap,
+                                    alternate: layer.fill.alternate,
+                                },
+                            ));
                         }
-                        let points: Vec<Pos2> = segment
-                            .iter()
-                            .map(|point| self.view.world_to_screen(area, *point))
-                            .collect();
-                        painter.add(egui::Shape::line(points, fill_stroke));
+                        for segment in segments {
+                            if segment.len() < 2 {
+                                continue;
+                            }
+                            let points: Vec<Pos2> = segment
+                                .iter()
+                                .map(|point| self.view.world_to_screen(area, *point))
+                                .collect();
+                            painter.add(egui::Shape::line(points, fill_stroke));
+                        }
                     }
                 }
             }

@@ -69,6 +69,8 @@ pub struct FillParams {
     pub cross: bool,
     /// Also cut the closed contours after filling them.
     pub outline: bool,
+    /// Fill with concentric offset loops instead of scan lines.
+    pub offset: bool,
 }
 
 impl Default for FillParams {
@@ -80,6 +82,7 @@ impl Default for FillParams {
             alternate: true,
             cross: false,
             outline: false,
+            offset: false,
         }
     }
 }

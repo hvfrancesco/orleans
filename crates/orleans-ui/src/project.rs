@@ -143,6 +143,8 @@ pub struct LayerSettings {
     pub fill_cross: bool,
     #[serde(default)]
     pub fill_outline: bool,
+    #[serde(default)]
+    pub fill_offset: bool,
     /// Embedded grayscale raster image, if this is a raster layer.
     #[serde(default)]
     pub raster: Option<RasterSettings>,
@@ -292,6 +294,7 @@ impl ProjectFile {
                     fill_alternate: layer.fill.alternate,
                     fill_cross: layer.fill.cross,
                     fill_outline: layer.fill.outline,
+                    fill_offset: layer.fill.offset,
                     raster: layer.raster.as_ref().map(RasterSettings::from_image),
                     tab_count: layer.tabs.count,
                     tab_width: layer.tabs.width,
@@ -548,6 +551,7 @@ fn fill_from(saved: &LayerSettings) -> orleans_core::FillParams {
         alternate: saved.fill_alternate,
         cross: saved.fill_cross,
         outline: saved.fill_outline,
+        offset: saved.fill_offset,
     }
 }
 
@@ -593,6 +597,7 @@ mod tests {
             alternate: false,
             cross: true,
             outline: true,
+            offset: true,
         };
         layer.tabs = orleans_core::TabParams {
             count: 4,
@@ -639,6 +644,7 @@ mod tests {
         assert!(!back.layers[0].fill_alternate);
         assert!(back.layers[0].fill_cross);
         assert!(back.layers[0].fill_outline);
+        assert!(back.layers[0].fill_offset);
         assert_eq!(back.layers[0].tab_count, 4);
         assert!((back.layers[0].tab_width - 2.5).abs() < 1e-9);
         assert!(back.layers[0].tab_inner);
@@ -942,6 +948,7 @@ mod tests {
         assert!(layer.fill_alternate);
         assert!(!layer.fill_cross);
         assert!(!layer.fill_outline);
+        assert!(!layer.fill_offset);
         assert_eq!(layer.tab_count, 0);
         assert!((layer.tab_width - 3.0).abs() < 1e-9);
         assert!(!layer.tab_inner);
@@ -1127,6 +1134,7 @@ mod tests {
             fill_alternate: true,
             fill_cross: false,
             fill_outline: false,
+            fill_offset: false,
             raster: None,
             tab_count: 0,
             tab_width: 3.0,
@@ -1188,6 +1196,7 @@ mod tests {
                 fill_alternate: false,
                 fill_cross: false,
                 fill_outline: false,
+                fill_offset: false,
                 raster: None,
                 tab_count: 3,
                 tab_width: 1.5,
