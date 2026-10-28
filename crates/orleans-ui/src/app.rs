@@ -377,9 +377,10 @@ pub struct OrleansApp {
     selected_raster: Option<usize>,
     raster_drag: Option<RasterDrag>,
     node_edit: Option<ShapeRef>,
-    selected_node: Option<NodeRef>,
+    selected_nodes: BTreeSet<NodeRef>,
     node_drag: Option<NodeDrag>,
     node_snap: bool,
+    node_snap_geometry: bool,
     edited_paths: BTreeSet<(usize, String)>,
     raster_textures: BTreeMap<usize, egui::TextureHandle>,
     raster_texture_keys: BTreeMap<usize, (u32, u32, bool, [u8; 3])>,
@@ -456,9 +457,10 @@ impl OrleansApp {
             selected_raster: None,
             raster_drag: None,
             node_edit: None,
-            selected_node: None,
+            selected_nodes: BTreeSet::new(),
             node_drag: None,
             node_snap: false,
+            node_snap_geometry: true,
             edited_paths: BTreeSet::new(),
             raster_textures: BTreeMap::new(),
             raster_texture_keys: BTreeMap::new(),
@@ -539,7 +541,7 @@ impl OrleansApp {
                 self.dragging_shape = false;
                 self.active_handle = None;
                 self.node_edit = None;
-                self.selected_node = None;
+                self.selected_nodes.clear();
                 self.node_drag = None;
                 self.edited_paths.clear();
                 self.raster_textures.clear();
@@ -598,7 +600,7 @@ impl OrleansApp {
                 self.dragging_shape = false;
                 self.active_handle = None;
                 self.node_edit = None;
-                self.selected_node = None;
+                self.selected_nodes.clear();
                 self.node_drag = None;
                 self.edited_paths.clear();
                 self.raster_textures.clear();
@@ -735,7 +737,7 @@ impl OrleansApp {
         self.dragging_shape = false;
         self.active_handle = None;
         self.node_edit = None;
-        self.selected_node = None;
+        self.selected_nodes.clear();
         self.node_drag = None;
         self.edited_paths = project
             .edited_paths
@@ -1624,7 +1626,7 @@ impl OrleansApp {
         self.settings_edit_changed = false;
         self.raster_drag = None;
         self.node_drag = None;
-        self.selected_node = None;
+        self.selected_nodes.clear();
         self.dragging_shape = false;
         self.active_handle = None;
         if has_geometry {
@@ -1956,7 +1958,7 @@ impl OrleansApp {
         self.selected_raster = Some(layer_index);
         self.selected_layer = Some(layer_index);
         self.selected_shapes.clear();
-        self.selected_node = None;
+        self.selected_nodes.clear();
         self.node_edit = None;
         self.node_drag = None;
         self.active_handle = None;
@@ -2306,7 +2308,10 @@ impl OrleansApp {
         else {
             return;
         };
-        self.selected_node = Some(node);
+        if !self.selected_nodes.contains(&node) {
+            self.selected_nodes.clear();
+            self.selected_nodes.insert(node);
+        }
         self.push_selection_undo();
         self.node_drag = Some(NodeDrag {
             node,
@@ -2314,6 +2319,29 @@ impl OrleansApp {
             start_node,
         });
         self.dragging_shape = false;
+    }
+
+    /// Nearest anchor (preferred) or point on a segment of another visible
+    /// shape, within `tolerance` world millimetres.
+    fn snap_node_to_geometry(
+        &self,
+        target: &ShapeRef,
+        desired: Point,
+        tolerance: f64,
+    ) -> Option<Point> {
+        let mut paths: Vec<&kurbo::BezPath> = Vec::new();
+        for layer in &self.doc.layers {
+            if !layer.visible {
+                continue;
+            }
+            for shape in &layer.shapes {
+                if layer.index == target.layer && shape.id == target.shape {
+                    continue;
+                }
+                paths.push(&shape.path);
+            }
+        }
+        nearest_geometry_point(&paths, desired, tolerance)
     }
 
     fn update_node_drag(&mut self, world: Point) {
@@ -2326,6 +2354,18 @@ impl OrleansApp {
         };
         let snap = self.node_snap;
         let step = self.grid_step();
+        let geometry_tolerance = (8.0 / f64::from(self.view.zoom)).max(0.05);
+
+        let mut desired = drag.start_node + (world - drag.start_world);
+        if self.node_snap_geometry {
+            if let Some(point) = self.snap_node_to_geometry(&target, desired, geometry_tolerance) {
+                desired = point;
+            } else if snap {
+                desired = snap_point(desired, step);
+            }
+        } else if snap {
+            desired = snap_point(desired, step);
+        }
 
         let (path, moved) = {
             let Some(shape) = self
@@ -2345,10 +2385,6 @@ impl OrleansApp {
             let Some(current) = nodes::node_position(&shape.path, drag.node) else {
                 return;
             };
-            let mut desired = drag.start_node + (world - drag.start_world);
-            if snap {
-                desired = snap_point(desired, step);
-            }
             let delta = desired - current;
             let moved = delta.hypot() > 1e-9 && nodes::move_node(&mut shape.path, drag.node, delta);
             (shape.path.clone(), moved)
@@ -2413,15 +2449,22 @@ impl OrleansApp {
             .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
         self.edited_paths
             .insert((target.layer, target.shape.clone()));
-        self.selected_node = Some(node);
+        self.selected_nodes.clear();
+        self.selected_nodes.insert(node);
         self.dirty = true;
         self.set_status("added node", false);
         true
     }
 
     fn delete_selected_node(&mut self) {
-        let Some(node) = self.selected_node else {
-            self.set_status("select an anchor to delete", true);
+        let Some(node) = self
+            .selected_nodes
+            .iter()
+            .next()
+            .copied()
+            .filter(|_| self.selected_nodes.len() == 1)
+        else {
+            self.set_status("select one anchor to delete", true);
             return;
         };
         if node.kind != NodeKind::Anchor {
@@ -2467,10 +2510,96 @@ impl OrleansApp {
             .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
         self.edited_paths
             .insert((target.layer, target.shape.clone()));
-        self.selected_node = None;
+        self.selected_nodes.clear();
         self.node_drag = None;
         self.dirty = true;
         self.set_status("deleted node", false);
+    }
+
+    fn node_path(&self, target: &ShapeRef) -> Option<kurbo::BezPath> {
+        self.doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == target.layer)?
+            .shapes
+            .iter()
+            .find(|shape| shape.id == target.shape)
+            .map(|shape| shape.path.clone())
+    }
+
+    /// Replace the path being node-edited, with one undo entry and a refreshed
+    /// preview. Node indices usually change, so the node selection is cleared.
+    fn apply_node_edit(&mut self, target: &ShapeRef, path: kurbo::BezPath, status: &str) {
+        self.push_selection_undo();
+        if let Some(shape) = self
+            .doc
+            .layers
+            .iter_mut()
+            .find(|layer| layer.index == target.layer)
+            .and_then(|layer| {
+                layer
+                    .shapes
+                    .iter_mut()
+                    .find(|shape| shape.id == target.shape)
+            })
+        {
+            shape.path = path.clone();
+        }
+        self.preview
+            .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
+        self.edited_paths
+            .insert((target.layer, target.shape.clone()));
+        self.selected_nodes.clear();
+        self.node_drag = None;
+        self.dirty = true;
+        self.set_status(status, false);
+    }
+
+    fn break_selected_node(&mut self) {
+        let Some(node) = self
+            .selected_nodes
+            .iter()
+            .next()
+            .copied()
+            .filter(|_| self.selected_nodes.len() == 1)
+        else {
+            self.set_status("select one anchor to break", true);
+            return;
+        };
+        if node.kind != NodeKind::Anchor {
+            self.set_status("select one anchor to break", true);
+            return;
+        }
+        let Some(target) = self.node_edit.clone() else {
+            return;
+        };
+        let Some(mut path) = self.node_path(&target) else {
+            return;
+        };
+        if !nodes::break_path(&mut path, node) {
+            self.set_status("cannot break at this node", true);
+            return;
+        }
+        self.apply_node_edit(&target, path, "broke path at node");
+    }
+
+    fn join_selected_nodes(&mut self) {
+        let selected: Vec<NodeRef> = self.selected_nodes.iter().copied().collect();
+        if selected.len() != 2 || selected.iter().any(|node| node.kind != NodeKind::Anchor) {
+            self.set_status("select two endpoint anchors to join", true);
+            return;
+        }
+        let Some(target) = self.node_edit.clone() else {
+            return;
+        };
+        let Some(mut path) = self.node_path(&target) else {
+            return;
+        };
+        if !nodes::join_nodes(&mut path, selected[0], selected[1]) {
+            self.set_status("cannot join these nodes", true);
+            return;
+        }
+        self.apply_node_edit(&target, path, "joined nodes");
     }
 
     fn toggle_node_edit(&mut self) {
@@ -2483,7 +2612,7 @@ impl OrleansApp {
             return;
         }
         self.node_edit = self.selected_shapes.iter().next().cloned();
-        self.selected_node = None;
+        self.selected_nodes.clear();
         self.node_drag = None;
         self.selected_raster = None;
         self.active_handle = None;
@@ -2493,7 +2622,7 @@ impl OrleansApp {
 
     fn exit_node_edit(&mut self) {
         if self.node_edit.take().is_some() {
-            self.selected_node = None;
+            self.selected_nodes.clear();
             self.node_drag = None;
             self.set_status("node editing finished", false);
         }
@@ -3759,7 +3888,7 @@ impl OrleansApp {
 
                 let selected_count = self.selected_shapes.len();
                 let hint = if self.node_edit.is_some() {
-                    "Drag nodes · dbl-click segment adds · Del removes · Esc finishes"
+                    "Drag nodes · Ctrl-click adds · dbl-click segment inserts · Break/Join · Esc finishes"
                 } else if self.selected_raster.is_some() {
                     "Drag image to move · corners resize · top handle rotates"
                 } else if selected_count == 0 {
@@ -3992,16 +4121,46 @@ impl OrleansApp {
                             ui.horizontal(|ui| {
                                 ui.checkbox(&mut self.node_snap, "Snap")
                                     .on_hover_text("Snap dragged nodes to the canvas grid");
-                                let can_delete = matches!(
-                                    self.selected_node,
-                                    Some(node) if node.kind == NodeKind::Anchor
-                                );
+                                ui.checkbox(&mut self.node_snap_geometry, "Geometry")
+                                    .on_hover_text(
+                                        "Snap dragged nodes to anchors and segments of other shapes",
+                                    );
+                            });
+                            ui.horizontal(|ui| {
+                                let single_anchor = self.selected_nodes.len() == 1
+                                    && self
+                                        .selected_nodes
+                                        .iter()
+                                        .all(|node| node.kind == NodeKind::Anchor);
+                                let two_anchors = self.selected_nodes.len() == 2
+                                    && self
+                                        .selected_nodes
+                                        .iter()
+                                        .all(|node| node.kind == NodeKind::Anchor);
                                 if ui
-                                    .add_enabled(can_delete, egui::Button::new("Delete node"))
+                                    .add_enabled(single_anchor, egui::Button::new("Delete node"))
                                     .on_hover_text("Delete the selected anchor (Del)")
                                     .clicked()
                                 {
                                     self.delete_selected_node();
+                                }
+                                if ui
+                                    .add_enabled(single_anchor, egui::Button::new("Break"))
+                                    .on_hover_text(
+                                        "Open a closed contour at this anchor, or split an open path in two",
+                                    )
+                                    .clicked()
+                                {
+                                    self.break_selected_node();
+                                }
+                                if ui
+                                    .add_enabled(two_anchors, egui::Button::new("Join"))
+                                    .on_hover_text(
+                                        "Join two endpoint anchors; Ctrl/Shift-click selects multiple nodes",
+                                    )
+                                    .clicked()
+                                {
+                                    self.join_selected_nodes();
                                 }
                             });
                         }
@@ -4140,7 +4299,18 @@ impl OrleansApp {
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some(position) = response.interact_pointer_pos() {
                 if node_editing {
-                    self.selected_node = self.node_at(position, area);
+                    if let Some(node) = self.node_at(position, area) {
+                        if additive {
+                            if !self.selected_nodes.remove(&node) {
+                                self.selected_nodes.insert(node);
+                            }
+                        } else {
+                            self.selected_nodes.clear();
+                            self.selected_nodes.insert(node);
+                        }
+                    } else if !additive {
+                        self.selected_nodes.clear();
+                    }
                 } else if self.selection_handle_at(position, area).is_none()
                     && self.raster_handle_at(position, area).is_none()
                 {
@@ -4745,8 +4915,8 @@ impl OrleansApp {
             }
         }
 
-        if let Some(selected) = self.selected_node {
-            if let Some(node) = path_nodes.iter().find(|node| node.node == selected) {
+        for selected in &self.selected_nodes {
+            if let Some(node) = path_nodes.iter().find(|node| node.node == *selected) {
                 let position = self.view.world_to_screen(area, node.point);
                 painter.circle_stroke(position, 7.0, Stroke::new(2.0, Color32::WHITE));
             }
@@ -4776,6 +4946,34 @@ fn selection_handle_positions(rect: Rect) -> [(Handle, Pos2); 5] {
         ),
         (Handle::Scale(HandleCorner::BottomLeft), rect.left_bottom()),
     ]
+}
+
+/// Nearest anchor or segment point among `paths`, preferring anchors when both
+/// are within `tolerance`.
+fn nearest_geometry_point(
+    paths: &[&kurbo::BezPath],
+    desired: Point,
+    tolerance: f64,
+) -> Option<Point> {
+    let mut anchor: Option<(f64, Point)> = None;
+    let mut segment: Option<(f64, Point)> = None;
+    for path in paths {
+        for node in nodes::nodes(path) {
+            if !node.is_anchor() {
+                continue;
+            }
+            let distance = (node.point - desired).hypot();
+            if distance <= tolerance && anchor.is_none_or(|(best, _)| distance < best) {
+                anchor = Some((distance, node.point));
+            }
+        }
+        if let Some(hit) = nodes::nearest_segment(path, desired) {
+            if hit.distance <= tolerance && segment.is_none_or(|(best, _)| hit.distance < best) {
+                segment = Some((hit.distance, hit.point));
+            }
+        }
+    }
+    anchor.or(segment).map(|(_, point)| point)
 }
 
 /// Translation needed to align `bounds` with the selection bounds `target`.
@@ -5369,6 +5567,23 @@ mod tests {
         assert_eq!(format_duration(42.4), "42s");
         assert_eq!(format_duration(61.0), "1m 01s");
         assert_eq!(format_duration(3725.0), "1h 02m");
+    }
+
+    #[test]
+    fn geometry_snapping_prefers_anchors_then_segments() {
+        let line = kurbo::BezPath::from_svg("M0,0 L100,0").expect("line");
+        let other = kurbo::BezPath::from_svg("M200,0 L200,100").expect("other");
+        let paths = [&line, &other];
+
+        let segment =
+            nearest_geometry_point(&paths, Point::new(50.0, 2.0), 5.0).expect("segment snap");
+        assert!((segment - Point::new(50.0, 0.0)).hypot() < 1e-9);
+
+        let anchor =
+            nearest_geometry_point(&paths, Point::new(1.0, 1.0), 5.0).expect("anchor snap");
+        assert_eq!(anchor, Point::new(0.0, 0.0));
+
+        assert!(nearest_geometry_point(&paths, Point::new(500.0, 500.0), 5.0).is_none());
     }
 
     #[test]

@@ -44,11 +44,11 @@ was decompiled or copied.
 | GUI jog (X/Y) and work zero: temporary `G92` or stored `G54` | ✅ |
 | Controller settings editor (`$32`, `$30`, `$22`, raw `$$`) | ✅ |
 | GUI pause/resume (M4 + `$32=1`; framing always) | ✅ |
-| Node editing: drag, insert, delete, grid snap | ✅ |
+| Node editing: drag, insert, delete, break/join, grid and geometry snap | ✅ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-124 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+133 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -168,16 +168,21 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   selected, **Edit nodes** shows its anchors and Bézier controls. Drag them to
   reshape
   the path; double-click a segment to insert an anchor; select an anchor and
-  press `Delete` or **Delete node** to remove it; enable **Snap** to snap node
-  drags to the canvas grid. Use **Done** or `Esc` to leave node mode.
+  press `Delete` or **Delete node** to remove it. Ctrl/Shift-click selects
+  several anchors: **Break** opens a closed contour at the selected anchor or
+  splits an open path there, and **Join** connects two selected endpoint
+  anchors, closing the contour when both belong to the same open path. Enable
+  **Snap** to snap node drags to the canvas grid and **Geometry** to snap them
+  to anchors and segments of other visible shapes. Use **Done** or `Esc` to
+  leave node mode.
   **Group** makes the selection one object: clicking any member selects the
   whole group, and drags, handles and align/distribute move it as a unit.
   **Ungroup** releases its members. With two or more objects selected, the
   **Align** row aligns left/centre/right and top/middle/bottom; with
   three or more, **Distribute** spaces their centres evenly horizontally or
   vertically. Groups can span layers; ungroup before node-editing a member.
-  **Undo**/`Ctrl+Z` reverses the last transform, node drag, insertion,
-  deletion, raster move, group change or layer/job setting change;
+  **Undo**/`Ctrl+Z` reverses the last transform, node edit, raster move,
+  group change or layer/job setting change;
   `Ctrl+Shift+Z` (or `Ctrl+Y`) redoes it. Right-drag pans;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
@@ -301,10 +306,12 @@ concept of a line and some bridges emit negotiation on connect.
   member. Align/distribute treat each group as one object, and distribution
   equalises object centres rather than edge gaps.
 * Node editing supports moving anchors and Bézier controls, inserting anchors
-  on segments, deleting anchors, and optional grid snapping while dragging.
-  Deleting an anchor reconnects the remaining segments directly; there is no
-  join/break or smoothing, and nodes do not snap to other geometry yet. Undo
-  and redo cover transforms, node edits, raster placement, groups, layer
+  on segments, deleting anchors, breaking a contour at an anchor and joining
+  two endpoint anchors, with optional grid and geometry snapping while
+  dragging. Breaking a closed contour leaves the same anchor at both open ends;
+  joining different contours inserts a straight line when the endpoints differ.
+  There is no smoothing, node-type conversion or joining to an interior point.
+  Undo and redo cover transforms, node edits, raster placement, groups, layer
   settings and job settings.
 * Fill mode emits hatch strokes only, not the shape outline; put the outline on
   a separate Line layer/colour if you need both. It supports scanline hatching
@@ -328,8 +335,7 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **Finish the editor** — job history for the streaming panel, plus
-   node-editing refinements such as join/break and snapping to geometry.
+1. **Finish the editor** — job history for the streaming panel.
 2. **Fill refinements and manual tabs** — cross-hatch, offset fill and
    manual tab placement.
 3. **Raster refinements** — more dithering algorithms and image cropping.

@@ -400,6 +400,251 @@ pub fn delete_anchor(path: &mut BezPath, node: NodeRef) -> bool {
     true
 }
 
+/// Break a path at an anchor. A closed contour opens at the anchor; an interior
+/// anchor of an open contour splits it into two subpaths. Endpoint anchors of
+/// open contours are already loose ends, so they cannot be broken.
+pub fn break_path(path: &mut BezPath, node: NodeRef) -> bool {
+    if node.kind != NodeKind::Anchor {
+        return false;
+    }
+    let elements = path.elements();
+    let Some(path_el) = elements.get(node.element) else {
+        return false;
+    };
+    if matches!(path_el, PathEl::ClosePath) {
+        return false;
+    }
+    let Some((start, end)) = subpath_range(elements, node.element) else {
+        return false;
+    };
+    let closed = matches!(elements.get(end - 1), Some(PathEl::ClosePath));
+    let content_end = if closed { end - 1 } else { end };
+    if content_end <= start + 1 {
+        return false;
+    }
+
+    let mut updated = elements.to_vec();
+    if closed {
+        let PathEl::MoveTo(start_point) = elements[start] else {
+            return false;
+        };
+        let Some(break_point) = endpoint(&elements[node.element]) else {
+            return false;
+        };
+        // Rebuild the loop starting at the broken anchor, keeping the implicit
+        // closing segment as an explicit line and dropping ClosePath. The anchor
+        // becomes both ends of the new open contour.
+        let mut subpath = Vec::with_capacity(content_end - start + 2);
+        subpath.push(PathEl::MoveTo(break_point));
+        subpath.extend_from_slice(&elements[node.element + 1..content_end]);
+        let previous = endpoint(elements.get(content_end - 1).unwrap_or(&elements[start]))
+            .unwrap_or(start_point);
+        if !same_point(previous, start_point) {
+            subpath.push(PathEl::LineTo(start_point));
+        }
+        if node.element > start {
+            subpath.extend_from_slice(&elements[start + 1..=node.element]);
+        }
+        updated.splice(start..end, subpath);
+    } else {
+        let last = content_end - 1;
+        if node.element <= start || node.element >= last {
+            return false;
+        }
+        let Some(break_point) = endpoint(&elements[node.element]) else {
+            return false;
+        };
+        updated.insert(node.element + 1, PathEl::MoveTo(break_point));
+    }
+    *path = BezPath::from_vec(updated);
+    true
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OpenSubpath {
+    start: usize,
+    end: usize,
+    start_node: NodeRef,
+    end_node: NodeRef,
+    start_point: Point,
+    end_point: Point,
+}
+
+/// The open subpath containing `element`, with its two endpoint anchors.
+fn open_subpath(elements: &[PathEl], element: usize) -> Option<OpenSubpath> {
+    let (start, end) = subpath_range(elements, element)?;
+    if matches!(elements.get(end - 1), Some(PathEl::ClosePath)) {
+        return None;
+    }
+    let PathEl::MoveTo(start_point) = *elements.get(start)? else {
+        return None;
+    };
+    let end_point = endpoint(elements.get(end - 1)?)?;
+    Some(OpenSubpath {
+        start,
+        end,
+        start_node: NodeRef {
+            element: start,
+            kind: NodeKind::Anchor,
+        },
+        end_node: NodeRef {
+            element: end - 1,
+            kind: NodeKind::Anchor,
+        },
+        start_point,
+        end_point,
+    })
+}
+
+/// Join two endpoint anchors of open contours. Two ends of the same contour
+/// close it; endpoints of different contours are merged, adding a straight line
+/// when they do not coincide.
+pub fn join_nodes(path: &mut BezPath, a: NodeRef, b: NodeRef) -> bool {
+    if a.kind != NodeKind::Anchor || b.kind != NodeKind::Anchor || a == b {
+        return false;
+    }
+    let elements = path.elements();
+    let Some(info_a) = open_subpath(elements, a.element) else {
+        return false;
+    };
+    let Some(info_b) = open_subpath(elements, b.element) else {
+        return false;
+    };
+    let a_endpoint = a == info_a.start_node || a == info_a.end_node;
+    let b_endpoint = b == info_b.start_node || b == info_b.end_node;
+    if !a_endpoint || !b_endpoint {
+        return false;
+    }
+
+    if info_a.start == info_b.start {
+        let ends = (a == info_a.start_node && b == info_a.end_node)
+            || (a == info_a.end_node && b == info_a.start_node);
+        if !ends {
+            return false;
+        }
+        let mut updated = elements.to_vec();
+        let mut insert_at = info_a.end;
+        if !same_point(info_a.end_point, info_a.start_point) {
+            updated.insert(insert_at, PathEl::LineTo(info_a.start_point));
+            insert_at += 1;
+        }
+        updated.insert(insert_at, PathEl::ClosePath);
+        *path = BezPath::from_vec(updated);
+        return true;
+    }
+
+    // Keep the earlier subpath in place and orient both so the join happens at
+    // the end of the left one and the start of the right one.
+    let (left, left_node, right, right_node) = if info_a.start < info_b.start {
+        (info_a, a, info_b, b)
+    } else {
+        (info_b, b, info_a, a)
+    };
+    let Some(left_path) = open_subpath_oriented(elements, &left, left_node, true) else {
+        return false;
+    };
+    let Some(right_path) = open_subpath_oriented(elements, &right, right_node, false) else {
+        return false;
+    };
+    if left_path.len() < 2 || right_path.len() < 2 {
+        return false;
+    }
+    let Some(left_end) = left_path.last().and_then(endpoint) else {
+        return false;
+    };
+    let Some(right_start) = right_path.first().and_then(|element| match element {
+        PathEl::MoveTo(point) => Some(*point),
+        _ => None,
+    }) else {
+        return false;
+    };
+
+    let mut merged = Vec::new();
+    merged.extend_from_slice(&elements[..left.start]);
+    merged.extend(left_path);
+    if !same_point(left_end, right_start) {
+        merged.push(PathEl::LineTo(right_start));
+    }
+    merged.extend_from_slice(&right_path[1..]);
+    merged.extend_from_slice(&elements[left.end..right.start]);
+    merged.extend_from_slice(&elements[right.end..]);
+    *path = BezPath::from_vec(merged);
+    true
+}
+
+/// Copy one open subpath, optionally reversing it, so that `selected` is its
+/// last anchor (`at_end`) or its first anchor.
+fn open_subpath_oriented(
+    elements: &[PathEl],
+    info: &OpenSubpath,
+    selected: NodeRef,
+    at_end: bool,
+) -> Option<Vec<PathEl>> {
+    let selected_end = selected == info.end_node;
+    let selected_start = selected == info.start_node;
+    if at_end {
+        if selected_end {
+            Some(elements[info.start..info.end].to_vec())
+        } else if selected_start {
+            reverse_open_subpath(elements, info.start, info.end)
+        } else {
+            None
+        }
+    } else if selected_start {
+        Some(elements[info.start..info.end].to_vec())
+    } else if selected_end {
+        reverse_open_subpath(elements, info.start, info.end)
+    } else {
+        None
+    }
+}
+
+/// Reverse an open subpath. Control points keep their positions; cubic controls
+/// swap roles because the curve is traversed the other way.
+fn reverse_open_subpath(elements: &[PathEl], start: usize, end: usize) -> Option<Vec<PathEl>> {
+    let PathEl::MoveTo(first) = *elements.get(start)? else {
+        return None;
+    };
+    let count = end.checked_sub(start + 1)?;
+    if count == 0 {
+        return Some(vec![PathEl::MoveTo(first)]);
+    }
+    let mut starts = Vec::with_capacity(count);
+    let mut current = first;
+    for element in &elements[start + 1..end] {
+        starts.push(current);
+        current = endpoint(element)?;
+    }
+    let mut reversed = Vec::with_capacity(end - start);
+    reversed.push(PathEl::MoveTo(current));
+    for index in (0..count).rev() {
+        let previous = starts[index];
+        reversed.push(match elements[start + 1 + index] {
+            PathEl::LineTo(_) => PathEl::LineTo(previous),
+            PathEl::QuadTo(control, _) => PathEl::QuadTo(control, previous),
+            PathEl::CurveTo(control1, control2, _) => PathEl::CurveTo(control2, control1, previous),
+            _ => return None,
+        });
+    }
+    Some(reversed)
+}
+
+/// The half-open element range of the subpath that contains `element`.
+fn subpath_range(elements: &[PathEl], element: usize) -> Option<(usize, usize)> {
+    if element >= elements.len() {
+        return None;
+    }
+    let start = elements[..=element]
+        .iter()
+        .rposition(|element| matches!(element, PathEl::MoveTo(_)))?;
+    let end = elements[start + 1..]
+        .iter()
+        .position(|element| matches!(element, PathEl::MoveTo(_)))
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(elements.len());
+    Some((start, end))
+}
+
 fn consider_segment(element: usize, segment: PathSeg, point: Point, best: &mut Option<SegmentHit>) {
     let nearest = segment.nearest(point, 1e-6);
     let distance = nearest.distance_sq.sqrt();
@@ -892,6 +1137,199 @@ mod tests {
             }
         ));
         assert_eq!(path.elements().len(), 2);
+    }
+
+    #[test]
+    fn breaking_a_closed_contour_opens_at_the_anchor() {
+        let mut path = BezPath::from_svg("M0,0 L10,0 L10,10 L0,10 Z").expect("path");
+        assert!(break_path(
+            &mut path,
+            NodeRef {
+                element: 1,
+                kind: NodeKind::Anchor
+            }
+        ));
+        assert_eq!(
+            path.elements(),
+            &[
+                PathEl::MoveTo(Point::new(10.0, 0.0)),
+                PathEl::LineTo(Point::new(10.0, 10.0)),
+                PathEl::LineTo(Point::new(0.0, 10.0)),
+                PathEl::LineTo(Point::new(0.0, 0.0)),
+                PathEl::LineTo(Point::new(10.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn breaking_at_the_start_keeps_the_closing_segment() {
+        let mut path = BezPath::from_svg("M0,0 L10,0 L10,10 Z").expect("path");
+        assert!(break_path(
+            &mut path,
+            NodeRef {
+                element: 0,
+                kind: NodeKind::Anchor
+            }
+        ));
+        assert_eq!(
+            path.elements(),
+            &[
+                PathEl::MoveTo(Point::new(0.0, 0.0)),
+                PathEl::LineTo(Point::new(10.0, 0.0)),
+                PathEl::LineTo(Point::new(10.0, 10.0)),
+                PathEl::LineTo(Point::new(0.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn breaking_an_interior_anchor_splits_an_open_contour() {
+        let mut path = BezPath::from_svg("M0,0 L10,0 L20,0 L30,0").expect("path");
+        assert!(break_path(
+            &mut path,
+            NodeRef {
+                element: 2,
+                kind: NodeKind::Anchor
+            }
+        ));
+        assert_eq!(
+            path.elements(),
+            &[
+                PathEl::MoveTo(Point::new(0.0, 0.0)),
+                PathEl::LineTo(Point::new(10.0, 0.0)),
+                PathEl::LineTo(Point::new(20.0, 0.0)),
+                PathEl::MoveTo(Point::new(20.0, 0.0)),
+                PathEl::LineTo(Point::new(30.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn breaking_an_endpoint_of_an_open_contour_is_rejected() {
+        let mut path = BezPath::from_svg("M0,0 L10,0").expect("path");
+        assert!(!break_path(
+            &mut path,
+            NodeRef {
+                element: 0,
+                kind: NodeKind::Anchor
+            }
+        ));
+        assert!(!break_path(
+            &mut path,
+            NodeRef {
+                element: 1,
+                kind: NodeKind::Anchor
+            }
+        ));
+        assert_eq!(path.elements().len(), 2);
+    }
+
+    #[test]
+    fn joining_the_ends_of_an_open_contour_closes_it() {
+        let mut path = BezPath::from_svg("M0,0 L10,0 L10,10").expect("path");
+        assert!(join_nodes(
+            &mut path,
+            NodeRef {
+                element: 0,
+                kind: NodeKind::Anchor
+            },
+            NodeRef {
+                element: 2,
+                kind: NodeKind::Anchor
+            }
+        ));
+        assert_eq!(
+            path.elements(),
+            &[
+                PathEl::MoveTo(Point::new(0.0, 0.0)),
+                PathEl::LineTo(Point::new(10.0, 0.0)),
+                PathEl::LineTo(Point::new(10.0, 10.0)),
+                PathEl::LineTo(Point::new(0.0, 0.0)),
+                PathEl::ClosePath,
+            ]
+        );
+    }
+
+    #[test]
+    fn joining_two_open_contours_adds_a_connecting_line() {
+        let mut path = BezPath::from_svg("M0,0 L10,0 M20,0 L30,0").expect("path");
+        assert!(join_nodes(
+            &mut path,
+            NodeRef {
+                element: 1,
+                kind: NodeKind::Anchor
+            },
+            NodeRef {
+                element: 2,
+                kind: NodeKind::Anchor
+            }
+        ));
+        assert_eq!(
+            path.elements(),
+            &[
+                PathEl::MoveTo(Point::new(0.0, 0.0)),
+                PathEl::LineTo(Point::new(10.0, 0.0)),
+                PathEl::LineTo(Point::new(20.0, 0.0)),
+                PathEl::LineTo(Point::new(30.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn joining_reversed_endpoints_swaps_cubic_controls() {
+        let mut path = BezPath::from_svg("M0,0 C0,10 10,10 10,0 M20,0 L30,0").expect("path");
+        assert!(join_nodes(
+            &mut path,
+            NodeRef {
+                element: 0,
+                kind: NodeKind::Anchor
+            },
+            NodeRef {
+                element: 2,
+                kind: NodeKind::Anchor
+            }
+        ));
+        assert_eq!(
+            path.elements(),
+            &[
+                PathEl::MoveTo(Point::new(10.0, 0.0)),
+                PathEl::CurveTo(
+                    Point::new(10.0, 10.0),
+                    Point::new(0.0, 10.0),
+                    Point::new(0.0, 0.0)
+                ),
+                PathEl::LineTo(Point::new(20.0, 0.0)),
+                PathEl::LineTo(Point::new(30.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn joining_rejects_interior_and_closed_nodes() {
+        let mut open = BezPath::from_svg("M0,0 L10,0 L20,0 L30,0").expect("path");
+        assert!(!join_nodes(
+            &mut open,
+            NodeRef {
+                element: 1,
+                kind: NodeKind::Anchor
+            },
+            NodeRef {
+                element: 2,
+                kind: NodeKind::Anchor
+            }
+        ));
+        let mut closed = BezPath::from_svg("M0,0 L10,0 L0,0 Z").expect("path");
+        assert!(!join_nodes(
+            &mut closed,
+            NodeRef {
+                element: 0,
+                kind: NodeKind::Anchor
+            },
+            NodeRef {
+                element: 1,
+                kind: NodeKind::Anchor
+            }
+        ));
     }
 
     #[test]
