@@ -65,6 +65,9 @@ enum Command {
         /// Run against the built-in simulator instead of hardware.
         #[arg(long)]
         mock: bool,
+        /// Stream even if the controller does not answer a status request.
+        #[arg(long)]
+        force: bool,
     },
     /// Ask a connected controller for its status.
     Status {
@@ -173,7 +176,8 @@ fn main() -> Result<()> {
             url,
             baud,
             mock,
-        } => run(&common, port, url, baud, mock),
+            force,
+        } => run(&common, port, url, baud, mock, force),
         Command::Status { port, url, baud } => status(port, url, baud),
     }
 }
@@ -247,6 +251,7 @@ fn run(
     url: Option<String>,
     baud: u32,
     mock: bool,
+    force: bool,
 ) -> Result<()> {
     let doc = cmd.import()?;
     let job = cmd.plan(&doc);
@@ -286,12 +291,22 @@ fn run(
         return Ok(());
     }
 
-    let mut client = GrblClient::new(open_transport(url.as_deref(), port.as_deref(), baud)?);
+    let (transport, kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
+    let mut client = GrblClient::new(transport);
+    if kind == LinkKind::Serial {
+        // Only USB serial needs the newline wake-up.
+        client.wake()?;
+    }
 
-    client.wake()?;
-    client.request_status()?;
-    if let Some(status) = client.read_status()? {
-        eprintln!("controller: {status}");
+    if !force {
+        match client.probe_status(Duration::from_secs(2))?.status {
+            Some(status) => eprintln!("controller: {status}"),
+            None => bail!(
+                "no GRBL status from the controller, so the job was not sent.\n\
+                 Run `orleans status` against the same endpoint for a diagnosis, \
+                 or pass --force to stream anyway."
+            ),
+        }
     }
 
     let acks = client.run(&program).context("streaming G-code")?;
@@ -300,17 +315,59 @@ fn run(
 }
 
 fn status(port: Option<String>, url: Option<String>, baud: u32) -> Result<()> {
-    let mut client = GrblClient::new(open_transport(url.as_deref(), port.as_deref(), baud)?);
-    client.wake()?;
-    std::thread::sleep(Duration::from_millis(100));
-    // Drain the banner before asking for a status report.
-    let _ = client.transport_mut();
-    client.request_status()?;
-    let status = client
-        .read_status()?
-        .context("no status report from controller")?;
-    println!("{status}");
-    Ok(())
+    let (transport, kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
+    let mut client = GrblClient::new(transport);
+    if kind == LinkKind::Serial {
+        client.wake()?;
+    }
+    std::thread::sleep(Duration::from_millis(150));
+
+    let probe = client.probe_status(Duration::from_secs(3))?;
+    if let Some(status) = probe.status {
+        println!("{status}");
+        return Ok(());
+    }
+
+    eprintln!("connected, but no GRBL status report within 3 s.");
+    if probe.seen.is_empty() {
+        eprintln!("  received: nothing");
+    } else {
+        for line in probe.seen.iter().take(12) {
+            eprintln!("  received: {line}");
+        }
+    }
+
+    eprintln!("probing for firmware identity ($I, M115)…");
+    let mut identity = Vec::new();
+    for cmd in ["$I", "M115"] {
+        client.transport_mut().write_line(cmd)?;
+        for line in client.collect_for(Duration::from_millis(900))? {
+            eprintln!("  {cmd} -> {line}");
+            identity.push(line);
+        }
+    }
+
+    let joined = identity.join("\n").to_ascii_uppercase();
+    if joined.contains("GRBL") || joined.contains("[VER:") {
+        bail!(
+            "the controller looks like GRBL but does not answer `?`. \
+             Check that Telnet/status reporting is enabled in the bridge \
+             (some ESP3D builds expose the laser on a different port, e.g. 81/WebSocket)."
+        );
+    }
+    if joined.contains("MARLIN") || joined.contains("FIRMWARE_NAME") {
+        bail!(
+            "this is Marlin firmware, not GRBL. Orleans only speaks GRBL today; \
+             a Marlin driver (M105/M114 status, M3/M5 laser) is still on the roadmap."
+        );
+    }
+    bail!(
+        "the TCP endpoint accepted the connection but did not speak GRBL.\n\
+         Check that the laser controller itself is powered on (the WiFi bridge \
+         can stay up while the laser is off), that port 23 is the GRBL Telnet \
+         service and not another device on the network, and that the bridge has \
+         Telnet enabled. `nc -vz <ip> 23` confirms reachability."
+    );
 }
 
 fn format_duration(seconds: f64) -> String {
@@ -327,7 +384,17 @@ fn format_duration(seconds: f64) -> String {
 
 /// Open either a TCP (Telnet) or serial link, boxed so the caller does not
 /// need to be generic over the transport.
-fn open_transport(url: Option<&str>, port: Option<&str>, baud: u32) -> Result<Box<dyn Transport>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkKind {
+    Serial,
+    Tcp,
+}
+
+fn open_transport(
+    url: Option<&str>,
+    port: Option<&str>,
+    baud: u32,
+) -> Result<(Box<dyn Transport>, LinkKind)> {
     match (url, port) {
         (Some(_), Some(_)) => bail!("use either --url or --port, not both"),
         (Some(url), None) => {
@@ -335,13 +402,13 @@ fn open_transport(url: Option<&str>, port: Option<&str>, baud: u32) -> Result<Bo
             eprintln!("link: tcp://{host}:{port}");
             let link = TcpTransport::connect(&host, port, Duration::from_secs(5))
                 .with_context(|| format!("connecting to {host}:{port}"))?;
-            Ok(Box::new(link))
+            Ok((Box::new(link), LinkKind::Tcp))
         }
         (None, Some(port)) => {
             eprintln!("link: serial {port} at {baud} baud");
             let link = orleans_driver::open_serial(port, baud)
                 .with_context(|| format!("opening {port} at {baud} baud"))?;
-            Ok(Box::new(link))
+            Ok((Box::new(link), LinkKind::Serial))
         }
         (None, None) => {
             bail!("no connection given: pass --url tcp://HOST, --port /dev/ttyUSB0, or --mock")

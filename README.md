@@ -88,6 +88,27 @@ specific machine is `orleans-driver`. Adding Marlin only means adding a
 `GcodeOptions` variant; adding Ruida means implementing `Transport` plus a
 binary protocol streamer, with nothing above it changing.
 
+## Troubleshooting WiFi
+
+`orleans status --url tcp://IP` should print a status line such as
+`<Idle|MPos:0.000,0.000,0.000|FS:0,0>`. If the TCP connection opens but the
+controller stays silent, orleans retries the request, also sends a
+newline-terminated query (some bridges are line-buffered), then probes `$I` and
+`M115` to identify the firmware and prints everything it received.
+
+Common causes:
+
+* **The laser controller is off or asleep** while its WiFi bridge is still
+  powered. The bridge accepts TCP; the GRBL board behind it is not listening.
+* **Something else on port 23.** Check `nc -vz <ip> 23` and the router's client
+  list.
+* **Marlin/ESP3D, not GRBL.** Orleans only speaks GRBL for now; the probe will
+  say so.
+* **WebSocket-only bridge on port 81.** Not implemented yet.
+
+`orleans run` refuses to stream when no status comes back; `--force` overrides
+that.
+
 ## Design decisions
 
 **Millimetres, Y up, origin bottom-left.** Machine convention, not SVG's

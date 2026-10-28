@@ -43,6 +43,14 @@ pub enum DriverError {
     Timeout(Duration),
 }
 
+/// What a status probe found.
+#[derive(Debug, Default)]
+pub struct StatusProbe {
+    pub status: Option<String>,
+    /// Everything else received while probing: banners, `ok`, errors, echoes.
+    pub seen: Vec<String>,
+}
+
 /// Blocking GRBL connection.
 pub struct GrblClient<T: Transport> {
     transport: T,
@@ -91,18 +99,69 @@ impl<T: Transport> GrblClient<T> {
         Ok(())
     }
 
-    /// Read one status report, if the controller sends one.
+    /// Read one status report, if the controller sends one within a short
+    /// window. A single 20 ms socket timeout is not enough over WiFi.
     pub fn read_status(&mut self) -> Result<Option<String>, DriverError> {
+        Ok(self.probe_status(Duration::from_millis(750))?.status)
+    }
+
+    /// Ask for status repeatedly until `timeout`, collecting any other lines.
+    ///
+    /// Retrying matters for three reasons: WiFi latency exceeds one read
+    /// timeout, the first `?` can be sent before a bridge finishes connecting,
+    /// and some line-buffered Telnet bridges only forward a realtime byte when
+    /// a newline follows. After half the timeout the probe also sends `?\n`.
+    pub fn probe_status(&mut self, timeout: Duration) -> Result<StatusProbe, DriverError> {
+        let start = Instant::now();
+        let deadline = start + timeout;
+        let mut seen = Vec::new();
+        let mut next_request = start;
+        let mut line_mode = false;
+
         loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(StatusProbe { status: None, seen });
+            }
+
+            if now >= next_request {
+                self.transport.write_raw(b"?")?;
+                // Fallback for bridges that buffer a whole line.
+                if !line_mode && now.duration_since(start) >= timeout / 2 {
+                    self.transport.write_line("?")?;
+                    line_mode = true;
+                }
+                next_request = now + Duration::from_millis(400);
+            }
+
             match self.transport.read_line()? {
                 Some(line) => {
-                    let line = line.trim().to_owned();
                     if line.starts_with('<') {
-                        return Ok(Some(line));
+                        return Ok(StatusProbe {
+                            status: Some(line),
+                            seen,
+                        });
                     }
+                    seen.push(line);
                 }
-                None => return Ok(None),
+                None => std::thread::sleep(Duration::from_millis(5)),
             }
+        }
+    }
+
+    /// Read whatever arrives for `timeout` without sending anything.
+    pub fn collect_for(&mut self, timeout: Duration) -> Result<Vec<String>, DriverError> {
+        let deadline = Instant::now() + timeout;
+        let mut lines = Vec::new();
+        loop {
+            if let Some(line) = self.transport.read_line()? {
+                lines.push(line);
+                continue;
+            }
+            if Instant::now() >= deadline {
+                return Ok(lines);
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -249,6 +308,93 @@ mod tests {
         client.request_status().unwrap();
         let status = client.read_status().unwrap().expect("status");
         assert!(status.contains("MPos:7.000,8.000"));
+    }
+
+    /// A bridge that drops realtime bytes and only answers newline-terminated
+    /// commands, like some line-buffered Telnet servers.
+    #[derive(Default)]
+    struct LineBuffered {
+        queue: std::collections::VecDeque<String>,
+    }
+
+    impl Transport for LineBuffered {
+        fn write_line(&mut self, line: &str) -> io::Result<()> {
+            if line == "?" {
+                self.queue
+                    .push_back("<Idle|MPos:1.000,2.000,0.000>".to_owned());
+            }
+            Ok(())
+        }
+
+        fn write_raw(&mut self, _bytes: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn read_line(&mut self) -> io::Result<Option<String>> {
+            Ok(self.queue.pop_front())
+        }
+    }
+
+    #[test]
+    fn probe_falls_back_to_line_mode_on_buffered_bridges() {
+        let mut client = GrblClient::new(LineBuffered::default());
+        let probe = client
+            .probe_status(Duration::from_millis(600))
+            .expect("probe");
+        assert!(probe.status.is_some(), "seen: {:?}", probe.seen);
+    }
+
+    #[test]
+    fn probe_times_out_on_a_silent_link() {
+        struct Mute;
+        impl Transport for Mute {
+            fn write_line(&mut self, _line: &str) -> io::Result<()> {
+                Ok(())
+            }
+            fn write_raw(&mut self, _bytes: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+            fn read_line(&mut self) -> io::Result<Option<String>> {
+                Ok(None)
+            }
+        }
+
+        let mut client = GrblClient::new(Mute);
+        let probe = client
+            .probe_status(Duration::from_millis(80))
+            .expect("probe");
+        assert!(probe.status.is_none());
+    }
+
+    #[test]
+    fn probe_keeps_unexpected_lines_for_diagnostics() {
+        #[derive(Default)]
+        struct Noisy {
+            sent: bool,
+        }
+        impl Transport for Noisy {
+            fn write_line(&mut self, _line: &str) -> io::Result<()> {
+                Ok(())
+            }
+            fn write_raw(&mut self, _bytes: &[u8]) -> io::Result<()> {
+                self.sent = true;
+                Ok(())
+            }
+            fn read_line(&mut self) -> io::Result<Option<String>> {
+                if !self.sent {
+                    return Ok(None);
+                }
+                self.sent = false;
+                Ok(Some("error:20".to_owned()))
+            }
+        }
+
+        let mut client = GrblClient::new(Noisy::default());
+        let probe = client
+            .probe_status(Duration::from_millis(40))
+            .expect("probe");
+        assert!(probe.status.is_none());
+        assert!(probe.seen.iter().any(|line| line.contains("error:20")));
     }
 
     #[test]
