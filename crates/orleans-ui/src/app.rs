@@ -53,6 +53,26 @@ struct UndoSnapshot {
     transforms: ShapeTransforms,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandleCorner {
+    TopLeft,
+    TopRight,
+    BottomRight,
+    BottomLeft,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Handle {
+    Scale(HandleCorner),
+    Rotate,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ActiveHandle {
+    Scale { anchor: Point, last_distance: f64 },
+    Rotate { center: Point, last_angle: f64 },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LinkState {
     Disconnected,
@@ -84,6 +104,7 @@ pub struct OrleansApp {
     transform_dy: f64,
     transform_scale: f64,
     transform_angle: f64,
+    active_handle: Option<ActiveHandle>,
     job: Job,
     path: Option<PathBuf>,
     view: Viewport,
@@ -145,6 +166,7 @@ impl OrleansApp {
             transform_dy: 0.0,
             transform_scale: 1.0,
             transform_angle: 0.0,
+            active_handle: None,
             job: Job::default(),
             path: None,
             view: Viewport::default(),
@@ -214,6 +236,7 @@ impl OrleansApp {
                 self.shape_transforms.clear();
                 self.undo_stack.clear();
                 self.dragging_shape = false;
+                self.active_handle = None;
                 self.replan();
                 self.status = Status::ok(format!(
                     "{}: {} layers, {} shapes, {} contours",
@@ -286,6 +309,7 @@ impl OrleansApp {
                     .collect();
                 self.undo_stack.clear();
                 self.dragging_shape = false;
+                self.active_handle = None;
                 self.plan_opts.kerf = project.kerf;
                 self.plan_opts.optimize = project.optimize;
                 self.gcode_opts.laser_mode = project.laser_mode();
@@ -814,6 +838,7 @@ impl OrleansApp {
             }
         }
         self.dragging_shape = false;
+        self.active_handle = None;
         self.set_status("undid selection edit", false);
     }
 
@@ -884,9 +909,7 @@ impl OrleansApp {
             return;
         };
         let center = bounds.center();
-        let affine = Affine::translate((center.x, center.y))
-            * Affine::scale(factor)
-            * Affine::translate((-center.x, -center.y));
+        let affine = scale_about(center, factor);
         self.push_selection_undo();
         self.apply_affine_to_selection(affine);
         self.transform_scale = 1.0;
@@ -903,14 +926,94 @@ impl OrleansApp {
             return;
         };
         let center = bounds.center();
-        let affine = Affine::translate((center.x, center.y))
-            * Affine::rotate(degrees.to_radians())
-            * Affine::translate((-center.x, -center.y));
+        let affine = rotate_about(center, degrees.to_radians());
         self.push_selection_undo();
         self.apply_affine_to_selection(affine);
         self.transform_angle = 0.0;
         let count = self.selected_shapes.len();
         self.set_status(format!("rotated {count} shape(s) by {degrees:.1}°"), false);
+    }
+
+    fn selection_handle_at(&self, screen: Pos2, area: Rect) -> Option<Handle> {
+        let bounds = self.selection_bounds()?;
+        let rect = Rect::from_two_pos(
+            self.view
+                .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
+            self.view
+                .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
+        );
+        for (handle, position) in selection_handle_positions(rect) {
+            let radius = if matches!(handle, Handle::Rotate) {
+                10.0
+            } else {
+                9.0
+            };
+            if position.distance(screen) <= radius {
+                return Some(handle);
+            }
+        }
+        None
+    }
+
+    fn begin_handle_drag(&mut self, handle: Handle, world: Point) {
+        let Some(bounds) = self.selection_bounds() else {
+            return;
+        };
+        match handle {
+            Handle::Scale(corner) => {
+                let anchor = corner_point(bounds, opposite_corner(corner));
+                let distance = (world - anchor).hypot();
+                if distance < 1e-6 {
+                    return;
+                }
+                self.push_selection_undo();
+                self.active_handle = Some(ActiveHandle::Scale {
+                    anchor,
+                    last_distance: distance,
+                });
+                self.dragging_shape = false;
+            }
+            Handle::Rotate => {
+                let center = bounds.center();
+                let angle = (world.y - center.y).atan2(world.x - center.x);
+                self.push_selection_undo();
+                self.active_handle = Some(ActiveHandle::Rotate {
+                    center,
+                    last_angle: angle,
+                });
+                self.dragging_shape = false;
+            }
+        }
+    }
+
+    fn update_handle_drag(&mut self, world: Point) {
+        let Some(mut active) = self.active_handle else {
+            return;
+        };
+        match &mut active {
+            ActiveHandle::Scale {
+                anchor,
+                last_distance,
+            } => {
+                let distance = (world - *anchor).hypot();
+                if distance > 1e-6 && *last_distance > 1e-6 {
+                    let step = (distance / *last_distance).clamp(0.05, 20.0);
+                    if (step - 1.0).abs() > 1e-9 {
+                        self.apply_affine_to_selection(scale_about(*anchor, step));
+                    }
+                    *last_distance = distance;
+                }
+            }
+            ActiveHandle::Rotate { center, last_angle } => {
+                let angle = (world.y - center.y).atan2(world.x - center.x);
+                let delta = normalize_angle(angle - *last_angle);
+                if delta.abs() > 1e-9 {
+                    self.apply_affine_to_selection(rotate_about(*center, delta));
+                }
+                *last_angle = angle;
+            }
+        }
+        self.active_handle = Some(active);
     }
 
     fn pause_is_safe(&self) -> bool {
@@ -1914,7 +2017,7 @@ impl OrleansApp {
                     RichText::new(if selected_count == 0 {
                         "Click a shape · Ctrl/Shift-click for multiple · drag to move · right-drag to pan"
                     } else {
-                        "Drag any selected shape to move the selection · Ctrl+Z to undo"
+                        "Corner handles scale · top handle rotates · Ctrl+Z to undo"
                     })
                     .small()
                     .weak(),
@@ -2082,20 +2185,22 @@ impl OrleansApp {
 
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some(position) = response.interact_pointer_pos() {
-                let world = self.view.screen_to_world(area, position);
-                let hit = self.hit_test(world);
-                if let Some(hit) = hit {
-                    if additive {
-                        if !self.selected_shapes.remove(&hit) {
+                if self.selection_handle_at(position, area).is_none() {
+                    let world = self.view.screen_to_world(area, position);
+                    let hit = self.hit_test(world);
+                    if let Some(hit) = hit {
+                        if additive {
+                            if !self.selected_shapes.remove(&hit) {
+                                self.selected_shapes.insert(hit.clone());
+                            }
+                        } else {
+                            self.selected_shapes.clear();
                             self.selected_shapes.insert(hit.clone());
                         }
-                    } else {
+                        self.selected_layer = Some(hit.layer);
+                    } else if !additive {
                         self.selected_shapes.clear();
-                        self.selected_shapes.insert(hit.clone());
                     }
-                    self.selected_layer = Some(hit.layer);
-                } else if !additive {
-                    self.selected_shapes.clear();
                 }
             }
         }
@@ -2105,31 +2210,49 @@ impl OrleansApp {
                 .ctx()
                 .input(|input| input.pointer.press_origin())
                 .or_else(|| response.interact_pointer_pos());
-            let world = origin.map(|position| self.view.screen_to_world(area, position));
-            let mut drag = false;
-            if let Some(world) = world {
-                if self.press_on_selection(world) {
-                    drag = true;
-                } else if let Some(hit) = self.hit_test(world) {
-                    if additive {
-                        self.selected_shapes.insert(hit.clone());
-                    } else {
-                        self.selected_shapes.clear();
-                        self.selected_shapes.insert(hit.clone());
-                    }
-                    self.selected_layer = Some(hit.layer);
-                    drag = true;
+            let mut handle_started = false;
+            if let Some(position) = origin {
+                if let Some(handle) = self.selection_handle_at(position, area) {
+                    let world = self.view.screen_to_world(area, position);
+                    self.begin_handle_drag(handle, world);
+                    handle_started = true;
                 }
             }
-            if drag {
-                self.push_selection_undo();
-                self.dragging_shape = true;
-            } else {
-                self.dragging_shape = false;
+            if !handle_started {
+                let world = origin.map(|position| self.view.screen_to_world(area, position));
+                let mut drag = false;
+                if let Some(world) = world {
+                    if self.press_on_selection(world) {
+                        drag = true;
+                    } else if let Some(hit) = self.hit_test(world) {
+                        if additive {
+                            self.selected_shapes.insert(hit.clone());
+                        } else {
+                            self.selected_shapes.clear();
+                            self.selected_shapes.insert(hit.clone());
+                        }
+                        self.selected_layer = Some(hit.layer);
+                        drag = true;
+                    }
+                }
+                if drag {
+                    self.push_selection_undo();
+                    self.dragging_shape = true;
+                } else {
+                    self.dragging_shape = false;
+                }
             }
         }
         if response.drag_stopped() {
             self.dragging_shape = false;
+            if let Some(active) = self.active_handle.take() {
+                let count = self.selected_shapes.len();
+                let action = match active {
+                    ActiveHandle::Scale { .. } => "scaled",
+                    ActiveHandle::Rotate { .. } => "rotated",
+                };
+                self.set_status(format!("{action} {count} shape(s)"), false);
+            }
         }
 
         if response.dragged_by(egui::PointerButton::Secondary)
@@ -2137,12 +2260,32 @@ impl OrleansApp {
         {
             self.view.pan(response.drag_delta());
         } else if response.dragged_by(egui::PointerButton::Primary) {
-            if self.dragging_shape {
+            if self.active_handle.is_some() {
+                if let Some(position) = response.interact_pointer_pos() {
+                    let world = self.view.screen_to_world(area, position);
+                    self.update_handle_drag(world);
+                }
+            } else if self.dragging_shape {
                 let delta = response.drag_delta();
                 let zoom = f64::from(self.view.zoom);
                 self.translate_selection(f64::from(delta.x) / zoom, -f64::from(delta.y) / zoom);
             } else {
                 self.view.pan(response.drag_delta());
+            }
+        }
+
+        if let Some(position) = response.hover_pos() {
+            if let Some(handle) = self.selection_handle_at(position, area) {
+                let icon = match handle {
+                    Handle::Rotate => egui::CursorIcon::Crosshair,
+                    Handle::Scale(HandleCorner::TopLeft | HandleCorner::BottomRight) => {
+                        egui::CursorIcon::ResizeNwSe
+                    }
+                    Handle::Scale(HandleCorner::TopRight | HandleCorner::BottomLeft) => {
+                        egui::CursorIcon::ResizeNeSw
+                    }
+                };
+                ui.ctx().set_cursor_icon(icon);
             }
         }
 
@@ -2364,21 +2507,47 @@ impl OrleansApp {
             );
         }
 
-        if self.selected_shapes.len() > 1 {
-            if let Some(bounds) = self.selection_bounds() {
-                let rect = Rect::from_two_pos(
-                    self.view
-                        .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
-                    self.view
-                        .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
-                )
-                .expand(8.0);
-                painter.rect_stroke(
-                    rect,
-                    0.0,
-                    Stroke::new(1.0, Color32::from_rgb(255, 230, 150)),
-                    StrokeKind::Inside,
-                );
+        if let Some(bounds) = self.selection_bounds() {
+            let rect = Rect::from_two_pos(
+                self.view
+                    .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
+                self.view
+                    .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
+            );
+            painter.rect_stroke(
+                rect.expand(4.0),
+                0.0,
+                Stroke::new(1.0, Color32::from_rgb(255, 230, 150)),
+                StrokeKind::Inside,
+            );
+
+            let handles = selection_handle_positions(rect);
+            let rotate = handles[0].1;
+            painter.line_segment(
+                [Pos2::new(rect.center().x, rect.top()), rotate],
+                Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+            );
+            for (handle, position) in handles {
+                match handle {
+                    Handle::Rotate => {
+                        painter.circle_filled(position, 5.0, Color32::from_rgb(255, 225, 120));
+                        painter.circle_stroke(
+                            position,
+                            5.0,
+                            Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                        );
+                    }
+                    Handle::Scale(_) => {
+                        let square = Rect::from_center_size(position, egui::vec2(8.0, 8.0));
+                        painter.rect_filled(square, 1.0, Color32::from_rgb(255, 232, 140));
+                        painter.rect_stroke(
+                            square,
+                            1.0,
+                            Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                            StrokeKind::Inside,
+                        );
+                    }
+                }
             }
         }
     }
@@ -2392,9 +2561,63 @@ impl OrleansApp {
     }
 }
 
-/// Layer colours come from the SVG, and black is common. On a dark canvas the
-/// original colour would be invisible, so lift dark colours toward white while
-/// keeping their hue. Bright or saturated colours are left untouched.
+fn selection_handle_positions(rect: Rect) -> [(Handle, Pos2); 5] {
+    [
+        (
+            Handle::Rotate,
+            Pos2::new(rect.center().x, rect.top() - 22.0),
+        ),
+        (Handle::Scale(HandleCorner::TopLeft), rect.left_top()),
+        (Handle::Scale(HandleCorner::TopRight), rect.right_top()),
+        (
+            Handle::Scale(HandleCorner::BottomRight),
+            rect.right_bottom(),
+        ),
+        (Handle::Scale(HandleCorner::BottomLeft), rect.left_bottom()),
+    ]
+}
+
+fn opposite_corner(corner: HandleCorner) -> HandleCorner {
+    match corner {
+        HandleCorner::TopLeft => HandleCorner::BottomRight,
+        HandleCorner::TopRight => HandleCorner::BottomLeft,
+        HandleCorner::BottomRight => HandleCorner::TopLeft,
+        HandleCorner::BottomLeft => HandleCorner::TopRight,
+    }
+}
+
+fn scale_about(anchor: Point, factor: f64) -> Affine {
+    Affine::translate((anchor.x, anchor.y))
+        * Affine::scale(factor)
+        * Affine::translate((-anchor.x, -anchor.y))
+}
+
+fn rotate_about(center: Point, radians: f64) -> Affine {
+    Affine::translate((center.x, center.y))
+        * Affine::rotate(radians)
+        * Affine::translate((-center.x, -center.y))
+}
+
+fn corner_point(bounds: kurbo::Rect, corner: HandleCorner) -> Point {
+    match corner {
+        HandleCorner::TopLeft => Point::new(bounds.x0, bounds.y1),
+        HandleCorner::TopRight => Point::new(bounds.x1, bounds.y1),
+        HandleCorner::BottomRight => Point::new(bounds.x1, bounds.y0),
+        HandleCorner::BottomLeft => Point::new(bounds.x0, bounds.y0),
+    }
+}
+
+fn normalize_angle(mut angle: f64) -> f64 {
+    use std::f64::consts::{PI, TAU};
+    while angle > PI {
+        angle -= TAU;
+    }
+    while angle < -PI {
+        angle += TAU;
+    }
+    angle
+}
+
 fn distance_to_contour(contour: &crate::preview::PreviewContour, point: Point) -> f64 {
     let points = &contour.points;
     let mut best = f64::INFINITY;
@@ -2459,6 +2682,9 @@ fn state_color(state: &str) -> Color32 {
     }
 }
 
+/// Layer colours come from the SVG, and black is common. On a dark canvas the
+/// original colour would be invisible, so lift dark colours toward white while
+/// keeping their hue. Bright or saturated colours are left untouched.
 fn display_color(rgb: [u8; 3]) -> Color32 {
     let r = f32::from(rgb[0]);
     let g = f32::from(rgb[1]);
@@ -2636,6 +2862,89 @@ mod tests {
         assert!(program.contains("G1 X1.000 Y40.000"));
         assert!(program.trim_end().ends_with("G1 X1.000 Y2.000\nM5"));
         assert_eq!(program.matches("M5").count(), 2);
+    }
+
+    #[test]
+    fn handle_positions_match_the_selection_box() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 100.0), egui::vec2(80.0, 40.0));
+        assert_eq!(
+            selection_handle_positions(rect),
+            [
+                (Handle::Rotate, Pos2::new(140.0, 78.0)),
+                (
+                    Handle::Scale(HandleCorner::TopLeft),
+                    Pos2::new(100.0, 100.0)
+                ),
+                (
+                    Handle::Scale(HandleCorner::TopRight),
+                    Pos2::new(180.0, 100.0)
+                ),
+                (
+                    Handle::Scale(HandleCorner::BottomRight),
+                    Pos2::new(180.0, 140.0)
+                ),
+                (
+                    Handle::Scale(HandleCorner::BottomLeft),
+                    Pos2::new(100.0, 140.0)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn handle_corners_use_world_orientation() {
+        let bounds = kurbo::Rect::new(10.0, 20.0, 30.0, 50.0);
+        assert_eq!(
+            corner_point(bounds, HandleCorner::TopLeft),
+            Point::new(10.0, 50.0)
+        );
+        assert_eq!(
+            corner_point(bounds, HandleCorner::TopRight),
+            Point::new(30.0, 50.0)
+        );
+        assert_eq!(
+            corner_point(bounds, HandleCorner::BottomRight),
+            Point::new(30.0, 20.0)
+        );
+        assert_eq!(
+            corner_point(bounds, HandleCorner::BottomLeft),
+            Point::new(10.0, 20.0)
+        );
+        assert_eq!(
+            opposite_corner(HandleCorner::TopLeft),
+            HandleCorner::BottomRight
+        );
+        assert_eq!(
+            opposite_corner(HandleCorner::TopRight),
+            HandleCorner::BottomLeft
+        );
+    }
+
+    #[test]
+    fn anchored_transforms_keep_their_origin_fixed() {
+        let anchor = Point::new(10.0, 20.0);
+        let scaled_anchor = scale_about(anchor, 2.5) * anchor;
+        assert!((scaled_anchor - anchor).hypot() < 1e-9);
+
+        let scaled = scale_about(anchor, 2.0) * Point::new(12.0, 20.0);
+        assert!((scaled.x - 14.0).abs() < 1e-9);
+        assert!((scaled.y - 20.0).abs() < 1e-9);
+
+        let center = Point::new(5.0, 5.0);
+        let rotated_center = rotate_about(center, std::f64::consts::FRAC_PI_2) * center;
+        assert!((rotated_center - center).hypot() < 1e-9);
+
+        let rotated = rotate_about(center, std::f64::consts::FRAC_PI_2) * Point::new(7.0, 5.0);
+        assert!((rotated.x - 5.0).abs() < 1e-9);
+        assert!((rotated.y - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotation_deltas_use_the_short_turn() {
+        use std::f64::consts::{FRAC_PI_2, PI};
+        assert!((normalize_angle(3.0 * FRAC_PI_2) + FRAC_PI_2).abs() < 1e-9);
+        assert!((normalize_angle(-3.0 * FRAC_PI_2) - FRAC_PI_2).abs() < 1e-9);
+        assert!((normalize_angle(PI) - PI).abs() < 1e-9);
     }
 
     #[test]

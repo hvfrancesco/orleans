@@ -31,7 +31,7 @@ was decompiled or copied.
 | Raster engraving, dithering, fill/hatch | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
-| Canvas: selection, drag-move, numeric scale/rotate, undo | ✅ |
+| Canvas: selection, drag-move, interactive scale/rotate handles, undo | ✅ |
 | Project save/load (`.orleans`, embedded SVG + layer/job settings) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -40,11 +40,11 @@ was decompiled or copied.
 | GUI jog (X/Y) and work zero: temporary `G92` or stored `G54` | ✅ |
 | Controller settings editor (`$32`, `$30`, `$22`, raw `$$`) | ✅ |
 | GUI pause/resume (M4 + `$32=1`; framing always) | ✅ |
-| Selection, transforms, node editing | ❌ |
+| Node editing | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-74 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+79 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -136,9 +136,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   with **Bed**;
 * click a shape on the canvas to select it; Ctrl/Shift-click adds or removes
   shapes. Selected shapes are yellow with their bounds and a group box. Drag
-  any selected shape to move the whole selection, or use the **Selection**
-  panel for numeric Move, uniform Scale and Rotate around the selection
-  centre. **Undo**/`Ctrl+Z` reverses the last transform; right-drag pans;
+  any selected shape to move the whole selection. Drag a corner handle to
+  scale uniformly around the opposite corner, or drag the circular handle above
+  the box to rotate around the selection centre. The **Selection** panel still
+  offers numeric Move, uniform Scale and Rotate. **Undo**/`Ctrl+Z` reverses the
+  last transform; right-drag pans;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
   when the controller is connected, idle and the laser is off; `Ctrl+Enter`
@@ -254,9 +256,9 @@ concept of a line and some bridges emit negotiation on connect.
   index; shape transforms are matched by layer index plus shape id.
   If the SVG's colour grouping changes after saving, check that the settings
   landed on the right layers.
-* Editing transforms are numeric Move/Scale/Rotate; there are no interactive
-  transform handles, non-uniform scale or node editing yet. Undo covers shape
-  transforms only.
+* Interactive handles scale uniformly around the opposite corner and rotate
+  around the selection centre. There is no non-uniform/skewed scaling or node
+  editing yet. Undo covers shape transforms only.
 * Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
   Framing uses a fixed 3000 mm/min and the design bounds, with no margin
   setting.
@@ -268,8 +270,8 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **Finish the editor** — interactive scale/rotate handles, node editing, and
-   job history for the streaming panel.
+1. **Finish the editor** — node editing and job history for the streaming
+   panel.
 2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.

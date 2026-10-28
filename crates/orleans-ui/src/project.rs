@@ -23,7 +23,7 @@ pub struct ProjectFile {
     pub optimize: bool,
     pub laser_mode: String,
     pub max_s: u32,
-    /// Translations applied to individual shapes in the editor.
+    /// Affine edits applied to individual shapes in the editor.
     #[serde(default)]
     pub transforms: Vec<ShapeTransform>,
 }
@@ -210,6 +210,45 @@ mod tests {
         assert_eq!(back.transforms.len(), 1);
         assert_eq!(back.transforms[0].dx, 1.5);
         assert_eq!(back.transforms[0].dy, -2.0);
+    }
+
+    #[test]
+    fn json_round_trip_keeps_affine_matrix() {
+        use kurbo::{Affine, Point};
+        let affine = Affine::translate((5.0, 3.0)) * Affine::rotate(0.5) * Affine::scale(2.0);
+        let expected = [
+            affine.as_coeffs()[0],
+            affine.as_coeffs()[1],
+            affine.as_coeffs()[2],
+            affine.as_coeffs()[3],
+            affine.as_coeffs()[4],
+            affine.as_coeffs()[5],
+        ];
+        let project = ProjectFile::new(
+            "<svg/>".to_owned(),
+            None,
+            &Document::new(100.0, 100.0),
+            0.0,
+            true,
+            LaserMode::M4,
+            1000,
+            vec![ShapeTransform {
+                layer: 0,
+                shape: "shape".to_owned(),
+                matrix: Some(expected),
+                dx: 0.0,
+                dy: 0.0,
+            }],
+        );
+        let json = serde_json::to_string(&project).expect("serialise");
+        let back: ProjectFile = serde_json::from_str(&json).expect("deserialise");
+        let stored = back.transforms[0].matrix.expect("matrix");
+        for (actual, expected) in stored.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-12);
+        }
+        let restored = Affine::new(stored) * Point::new(1.0, 2.0);
+        let original = affine * Point::new(1.0, 2.0);
+        assert!((restored - original).hypot() < 1e-12);
     }
 
     #[test]
