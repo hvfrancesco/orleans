@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 kurbo.workspace = true
 thiserror.workspace = true
+clipper2.workspace = true

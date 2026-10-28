@@ -1,13 +1,12 @@
 //! Geometry helpers: flattening, area, containment and kerf offsetting.
 //!
-//! This is deliberately a small, dependency-light layer. Everything here works
-//! on polylines (millimetres, Y up) so the planner never has to think about
-//! Bézier maths. Robust boolean operations and true offsetting of concave
-//! polygons will eventually be delegated to a clipper-style library; the
-//! simple miter offset here is enough for kerf compensation on ordinary
-//! cut contours.
+//! Everything here works on polylines (millimetres, Y up) so the planner never
+//! has to think about Bézier maths. Offsetting and boolean operations are
+//! delegated to Clipper2 (integer-scaled to 0.001 mm), which handles concave
+//! contours and self-intersections that a hand-written miter offset cannot.
 
-use kurbo::{BezPath, PathEl, Point, Vec2};
+use clipper2::{EndType, FillRule, JoinType, Milli, Paths};
+use kurbo::{BezPath, PathEl, Point};
 
 /// Default flattening tolerance in millimetres. 0.02 mm is below what most
 /// laser cutters can resolve, and keeps the G-code small.
@@ -161,64 +160,88 @@ pub fn point_in_polygon(p: Point, polygon: &[Point]) -> bool {
 /// Offset a closed contour by `distance` millimetres towards its interior
 /// (positive) or exterior (negative), regardless of winding direction.
 ///
-/// This is a miter offset with a bevel fallback for sharp corners. It is exact
-/// for convex and gently concave contours; strongly concave contours can
-/// self-intersect, which is why the planner keeps the kerf small and why a
-/// proper clipper is on the roadmap.
+/// Clipper2 does the work: it is integer-scaled (0.001 mm), handles concave
+/// contours and resolves the self-intersections that a naive miter offset
+/// produces. Sharp corners are mitered up to `miter_limit` times the offset.
 pub fn offset_closed(points: &[Point], distance: f64, miter_limit: f64) -> Vec<Point> {
-    let pts = dedup(points, true);
+    let pts = ensure_ccw(dedup(points, true));
     if pts.len() < 3 || distance.abs() < EPS {
         return close(&pts);
     }
-    let area = signed_area(&pts);
-    if area.abs() < EPS {
-        return close(&pts);
-    }
-    // For a CCW polygon the left normal points inwards; for CW, outwards.
-    let sign = if area > 0.0 { 1.0 } else { -1.0 };
-    let miter_limit = miter_limit.max(1.0);
-    let n = pts.len();
-    let mut out: Vec<Point> = Vec::with_capacity(n + 2);
 
-    for i in 0..n {
-        let prev = pts[(i + n - 1) % n];
-        let cur = pts[i];
-        let next = pts[(i + 1) % n];
-        let d0 = unit(cur - prev);
-        let d1 = unit(next - cur);
-        if d0 == Vec2::ZERO || d1 == Vec2::ZERO {
-            out.push(cur);
-            continue;
-        }
-        let n0 = Vec2::new(-d0.y * sign, d0.x * sign);
-        let n1 = Vec2::new(-d1.y * sign, d1.x * sign);
-        let bis = n0 + n1;
-        let bis_len = bis.hypot();
-        if bis_len < 1e-9 {
-            // 180° reversal: bevel across the corner.
-            out.push(cur + n0 * distance);
-            out.push(cur + n1 * distance);
-            continue;
-        }
-        let bis = bis * (1.0 / bis_len);
-        let cos_half = bis.x * n0.x + bis.y * n0.y;
-        if cos_half <= EPS || 1.0 / cos_half > miter_limit {
-            out.push(cur + n0 * distance);
-            out.push(cur + n1 * distance);
-        } else {
-            out.push(cur + bis * (distance / cos_half));
-        }
-    }
-    close(&out)
+    // Clipper's sign is the opposite of ours: positive inflates.
+    let result = to_clipper(&[pts]).inflate(
+        -distance,
+        JoinType::Miter,
+        EndType::Polygon,
+        miter_limit.max(1.0),
+    );
+
+    // A self-intersecting input can yield several rings; keep the largest,
+    // which is the actual offset of the material boundary.
+    let rings = from_clipper(result);
+    rings
+        .into_iter()
+        .max_by(|a, b| signed_area(a).abs().total_cmp(&signed_area(b).abs()))
+        .map(|ring| close(&ring))
+        .unwrap_or_default()
 }
 
-fn unit(v: Vec2) -> Vec2 {
-    let len = v.hypot();
-    if len < EPS {
-        Vec2::ZERO
-    } else {
-        v * (1.0 / len)
+/// Union of a set of rings (even-odd holes are preserved by Clipper).
+pub fn union(rings: &[Vec<Point>]) -> Vec<Vec<Point>> {
+    to_clipper(rings)
+        .to_clipper_subject()
+        .add_clip(CPaths::new(Vec::new()))
+        .union(FillRule::NonZero)
+        .map(from_clipper)
+        .unwrap_or_default()
+}
+
+/// Everything covered by `subject` but not by `clip`.
+pub fn difference(subject: &[Vec<Point>], clip: &[Vec<Point>]) -> Vec<Vec<Point>> {
+    to_clipper(subject)
+        .to_clipper_subject()
+        .add_clip(to_clipper(clip))
+        .difference(FillRule::NonZero)
+        .map(from_clipper)
+        .unwrap_or_default()
+}
+
+/// The area covered by both `subject` and `clip`.
+pub fn intersection(subject: &[Vec<Point>], clip: &[Vec<Point>]) -> Vec<Vec<Point>> {
+    to_clipper(subject)
+        .to_clipper_subject()
+        .add_clip(to_clipper(clip))
+        .intersect(FillRule::NonZero)
+        .map(from_clipper)
+        .unwrap_or_default()
+}
+
+/// Clipper2 works on scaled integers; 0.001 mm resolution.
+type CPaths = Paths<Milli>;
+
+fn to_clipper(rings: &[Vec<Point>]) -> CPaths {
+    let paths: Vec<Vec<(f64, f64)>> = rings
+        .iter()
+        .map(|ring| ring.iter().map(|p| (p.x, p.y)).collect())
+        .collect();
+    paths.into()
+}
+
+fn from_clipper(paths: CPaths) -> Vec<Vec<Point>> {
+    let paths: Vec<Vec<(f64, f64)>> = paths.into();
+    paths
+        .into_iter()
+        .filter(|ring| ring.len() >= 3)
+        .map(|ring| ring.into_iter().map(|(x, y)| Point::new(x, y)).collect())
+        .collect()
+}
+
+fn ensure_ccw(mut points: Vec<Point>) -> Vec<Point> {
+    if signed_area(&points) < 0.0 {
+        points.reverse();
     }
+    points
 }
 
 fn close(points: &[Point]) -> Vec<Point> {
@@ -320,6 +343,59 @@ mod tests {
         assert!(contours.iter().all(|c| c.closed));
         assert_eq!(contours[0].points.len(), 3);
         assert!((contours[0].signed_area() - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn boolean_union_of_overlapping_squares() {
+        let a = vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+            Point::new(0.0, 10.0),
+        ];
+        let b = vec![
+            Point::new(5.0, 0.0),
+            Point::new(15.0, 0.0),
+            Point::new(15.0, 10.0),
+            Point::new(5.0, 10.0),
+        ];
+        let out = union(&[a, b]);
+        let area: f64 = out.iter().map(|r| signed_area(r).abs()).sum();
+        assert!((area - 150.0).abs() < 1e-3, "area {area}");
+    }
+
+    #[test]
+    fn boolean_difference_cuts_a_hole() {
+        let outer = square(10.0);
+        let hole = vec![
+            Point::new(4.0, 4.0),
+            Point::new(6.0, 4.0),
+            Point::new(6.0, 6.0),
+            Point::new(4.0, 6.0),
+        ];
+        let out = difference(&[outer], &[hole]);
+        assert_eq!(out.len(), 2, "outer boundary plus hole");
+        let area: f64 = out.iter().map(|r| signed_area(r).abs()).sum();
+        // Ring areas are unsigned here: 100 + 4.
+        assert!((area - 104.0).abs() < 1e-3, "area {area}");
+    }
+
+    #[test]
+    fn offset_of_concave_polygon_does_not_explode() {
+        let l_shape = vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 5.0),
+            Point::new(5.0, 5.0),
+            Point::new(5.0, 10.0),
+            Point::new(0.0, 10.0),
+        ];
+        let out = offset_closed(&l_shape, 1.0, 4.0);
+        assert!(out.len() >= 6);
+        // Eroding the L by 1 mm leaves 8x8 minus the enlarged 5x5 notch.
+        let area = signed_area(&out).abs();
+        assert!((area - 39.0).abs() < 0.01, "area {area}");
+        assert!(out.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
     }
 
     #[test]

@@ -4,8 +4,8 @@ An open, clean-room CAM stack for laser cutters, written in Rust.
 
 This is **not** a fork of LightBurn and contains no LightBurn code, assets or
 proprietary file formats. It reimplements the same workflow — vector design in,
-G-code out, streamed to a controller — from public specifications: SVG, G-code
-and the GRBL protocol.
+G-code out, streamed to a controller over USB or WiFi — from public
+specifications: SVG, G-code and the GRBL protocol.
 
 The commercial binary in `../LightBurn` was only used to inventory which device
 families exist (GRBL, Marlin, Smoothieware, Ruida, TopWisdom, galvo). Nothing
@@ -19,11 +19,13 @@ was decompiled or copied.
 |---|---|
 | SVG import (shapes→paths, transforms, CSS, physical units) | ✅ |
 | Colours → layers, per-layer speed/power/passes | ✅ |
-| Kerf compensation (outer shrinks, holes grow) | ✅ |
+| Kerf compensation via Clipper2 (outer shrinks, holes grow) | ✅ |
+| Boolean ops (union / difference / intersection) | ✅ |
 | Inside-out ordering + nearest-neighbour travel optimisation | ✅ |
 | Multi-pass cutting | ✅ |
 | G-code for GRBL / GrblHAL / FluidNC / Marlin-laser (`M3`, `M4`) | ✅ |
 | GRBL streaming: character-counting flow control, `ok`/`error`, status, feed hold, resume, soft reset | ✅ |
+| USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
 | Hardware-free GRBL simulator | ✅ |
 | DXF / PDF / AI import | ❌ |
 | Raster engraving, dithering, fill/hatch | ❌ |
@@ -31,10 +33,13 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-31 unit and integration tests, including a full SVG → toolpath → G-code →
-simulated controller run.
+38 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+controller run against a local GRBL server.
 
 ## Quick start
+
+Requires a recent stable Rust toolchain and a C++ compiler (Clipper2 is built
+from source).
 
 ```bash
 cargo build --release
@@ -49,26 +54,32 @@ cargo run -q -- gcode examples/coaster.svg -o coaster.gcode \
 # Dry-run the whole pipeline against the built-in simulator
 cargo run -q -- run examples/coaster.svg --mock
 
-# Cut for real (GRBL defaults to 115200 baud)
+# Cut for real over USB (GRBL defaults to 115200 baud)
 cargo run -q -- run examples/coaster.svg --port /dev/ttyUSB0 \
     --speed 1200 --power 35
 
-# Query a connected controller
+# Cut over WiFi (Telnet on port 23 is the default)
+cargo run -q -- run examples/coaster.svg --url tcp://192.168.1.50 \
+    --speed 1200 --power 35
+
+# Query a controller over either link
 cargo run -q -- status --port /dev/ttyUSB0
+cargo run -q -- status --url tcp://192.168.1.50
 ```
 
 Installed as a binary, the commands are `orleans info`, `orleans gcode`, `orleans run`,
-`orleans status`.
+`orleans status`. `--url` accepts `tcp://host[:port]`, `telnet://host[:port]` or a
+bare `host[:port]`.
 
 ## Architecture
 
 ```
 crates/
   orleans-core/      document model: Document → Layer → Shape, CutParams, Job
-  orleans-geom/      flattening, area, containment, kerf/miter offset
+  orleans-geom/      flattening, area, containment, Clipper2 offsets/booleans
   orleans-import/    SVG → Document (via usvg)
   orleans-toolpath/  Document → Job: nesting, ordering, passes, time estimate
-  orleans-driver/    Job → G-code, Transport trait, GRBL client, simulator
+  orleans-driver/    Job → G-code, Transport trait, serial/TCP, GRBL client, simulator
   orleans-cli/       the `orleans` binary
 ```
 
@@ -98,11 +109,15 @@ of dropping commands.
 handled by the controller even while its buffer is full. `feed_hold`, `resume`
 and `soft_reset` therefore do not go through the line queue.
 
+**WiFi is Telnet, not HTTP.** Grbl_ESP32, FluidNC and ESP3D expose the raw GRBL
+stream on TCP port 23. `TcpTransport` keeps its own line buffer, handles partial
+reads and strips Telnet IAC negotiation bytes, because a socket read has no
+concept of a line and some bridges emit negotiation on connect.
+
 ## Known limitations
 
-* The kerf offset is a miter offset. Strongly concave contours can
-  self-intersect. Replace with a clipper-style offset before doing production
-  work on organic shapes.
+* WiFi support is Telnet only: no WebSocket/HTTP transport, TLS or mDNS
+  discovery yet.
 * Ordering is per layer. If the outer contour is on a different layer from its
   holes, layers are cut in list order — reorder layers, as in LightBurn.
 * Curves are flattened at import/plan time (default 0.02 mm), so G-code grows
@@ -115,7 +130,7 @@ and `soft_reset` therefore do not go through the line queue.
 ## Roadmap
 
 1. **Editing canvas** — `egui`/`wgpu`, selection, transforms, node editing, undo.
-2. **Robust geometry** — `clipper2` for offsets/booleans, hatch fills, tabs.
+2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.

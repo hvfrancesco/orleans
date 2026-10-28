@@ -20,6 +20,20 @@ pub trait Transport {
     fn read_line(&mut self) -> io::Result<Option<String>>;
 }
 
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        (**self).write_line(line)
+    }
+
+    fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        (**self).write_raw(bytes)
+    }
+
+    fn read_line(&mut self) -> io::Result<Option<String>> {
+        (**self).read_line()
+    }
+}
+
 impl<T: Transport + ?Sized> Transport for &mut T {
     fn write_line(&mut self, line: &str) -> io::Result<()> {
         (**self).write_line(line)

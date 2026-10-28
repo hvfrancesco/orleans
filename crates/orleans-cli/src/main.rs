@@ -5,10 +5,12 @@
 //! ```text
 //! orleans info  design.svg
 //! orleans gcode design.svg -o design.gcode
-//! orleans run   design.svg --port /dev/ttyUSB0      # or --mock
+//! orleans run   design.svg --url tcp://192.168.1.50   # WiFi / Telnet
+//! orleans run   design.svg --port /dev/ttyUSB0        # USB serial
+//! orleans run   design.svg --mock                     # simulator
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -16,7 +18,8 @@ use clap::{Args, Parser, Subcommand};
 use kurbo::Point;
 use orleans_core::Document;
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
-use orleans_driver::{GrblClient, GrblConfig, SimulatedGrbl};
+use orleans_driver::net::{TcpTransport, TELNET_PORT};
+use orleans_driver::{GrblClient, GrblConfig, SimulatedGrbl, Transport};
 use orleans_import::{import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
@@ -24,7 +27,7 @@ use orleans_toolpath::{plan, PlanOptions};
 #[command(
     name = "orleans",
     version,
-    about = "Open CAM for laser cutters: SVG in, G-code out, GRBL over serial"
+    about = "Open CAM for laser cutters: SVG in, G-code out, GRBL over USB or WiFi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -53,7 +56,10 @@ enum Command {
         /// Serial port, e.g. /dev/ttyUSB0 or COM3.
         #[arg(long)]
         port: Option<String>,
-        /// Baud rate.
+        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet, port 23).
+        #[arg(long)]
+        url: Option<String>,
+        /// Baud rate for serial connections.
         #[arg(long, default_value_t = 115200)]
         baud: u32,
         /// Run against the built-in simulator instead of hardware.
@@ -62,8 +68,12 @@ enum Command {
     },
     /// Ask a connected controller for its status.
     Status {
+        /// Serial port, e.g. /dev/ttyUSB0 or COM3.
         #[arg(long)]
-        port: String,
+        port: Option<String>,
+        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet, port 23).
+        #[arg(long)]
+        url: Option<String>,
         #[arg(long, default_value_t = 115200)]
         baud: u32,
     },
@@ -160,10 +170,11 @@ fn main() -> Result<()> {
         Command::Run {
             common,
             port,
+            url,
             baud,
             mock,
-        } => run(&common, port, baud, mock),
-        Command::Status { port, baud } => status(&port, baud),
+        } => run(&common, port, url, baud, mock),
+        Command::Status { port, url, baud } => status(port, url, baud),
     }
 }
 
@@ -230,7 +241,13 @@ fn gcode_cmd(cmd: &Common, output: Option<PathBuf>, stdout: bool) -> Result<()> 
     Ok(())
 }
 
-fn run(cmd: &Common, port: Option<String>, baud: u32, mock: bool) -> Result<()> {
+fn run(
+    cmd: &Common,
+    port: Option<String>,
+    url: Option<String>,
+    baud: u32,
+    mock: bool,
+) -> Result<()> {
     let doc = cmd.import()?;
     let job = cmd.plan(&doc);
     let program = gcode::write(&job, &cmd.gcode_options());
@@ -269,12 +286,7 @@ fn run(cmd: &Common, port: Option<String>, baud: u32, mock: bool) -> Result<()> 
         return Ok(());
     }
 
-    let port = port.ok_or_else(|| {
-        anyhow::anyhow!("no port given: pass --port /dev/ttyUSB0, or --mock to simulate")
-    })?;
-    let link = orleans_driver::open_serial(&port, baud)
-        .with_context(|| format!("opening {port} at {baud} baud"))?;
-    let mut client = GrblClient::new(link);
+    let mut client = GrblClient::new(open_transport(url.as_deref(), port.as_deref(), baud)?);
 
     client.wake()?;
     client.request_status()?;
@@ -287,10 +299,8 @@ fn run(cmd: &Common, port: Option<String>, baud: u32, mock: bool) -> Result<()> 
     Ok(())
 }
 
-fn status(port: &str, baud: u32) -> Result<()> {
-    let link = orleans_driver::open_serial(port, baud)
-        .with_context(|| format!("opening {port} at {baud} baud"))?;
-    let mut client = GrblClient::new(link);
+fn status(port: Option<String>, url: Option<String>, baud: u32) -> Result<()> {
+    let mut client = GrblClient::new(open_transport(url.as_deref(), port.as_deref(), baud)?);
     client.wake()?;
     std::thread::sleep(Duration::from_millis(100));
     // Drain the banner before asking for a status report.
@@ -315,5 +325,73 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
-#[allow(dead_code)]
-fn _unused(_: &Path) {}
+/// Open either a TCP (Telnet) or serial link, boxed so the caller does not
+/// need to be generic over the transport.
+fn open_transport(url: Option<&str>, port: Option<&str>, baud: u32) -> Result<Box<dyn Transport>> {
+    match (url, port) {
+        (Some(_), Some(_)) => bail!("use either --url or --port, not both"),
+        (Some(url), None) => {
+            let (host, port) = parse_tcp_url(url)?;
+            eprintln!("link: tcp://{host}:{port}");
+            let link = TcpTransport::connect(&host, port, Duration::from_secs(5))
+                .with_context(|| format!("connecting to {host}:{port}"))?;
+            Ok(Box::new(link))
+        }
+        (None, Some(port)) => {
+            eprintln!("link: serial {port} at {baud} baud");
+            let link = orleans_driver::open_serial(port, baud)
+                .with_context(|| format!("opening {port} at {baud} baud"))?;
+            Ok(Box::new(link))
+        }
+        (None, None) => {
+            bail!("no connection given: pass --url tcp://HOST, --port /dev/ttyUSB0, or --mock")
+        }
+    }
+}
+
+/// Parse `tcp://host[:port]`, `telnet://host[:port]`, or a bare `host[:port]`.
+/// Telnet's port 23 is the default.
+fn parse_tcp_url(input: &str) -> Result<(String, u16)> {
+    let raw = input.trim();
+    let raw = raw
+        .strip_prefix("tcp://")
+        .or_else(|| raw.strip_prefix("telnet://"))
+        .unwrap_or(raw)
+        .trim_end_matches('/');
+    if raw.is_empty() {
+        bail!("empty network address");
+    }
+    if let Some((host, port)) = raw.rsplit_once(':') {
+        let port: u16 = port
+            .parse()
+            .with_context(|| format!("invalid port in {input:?}"))?;
+        if host.is_empty() {
+            bail!("missing host in {input:?}");
+        }
+        return Ok((host.to_owned(), port));
+    }
+    Ok((raw.to_owned(), TELNET_PORT))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tcp_urls() {
+        assert_eq!(
+            parse_tcp_url("tcp://192.168.1.50:23").unwrap(),
+            ("192.168.1.50".to_owned(), 23)
+        );
+        assert_eq!(
+            parse_tcp_url("192.168.1.50").unwrap(),
+            ("192.168.1.50".to_owned(), TELNET_PORT)
+        );
+        assert_eq!(
+            parse_tcp_url("telnet://laser.local:2323/").unwrap(),
+            ("laser.local".to_owned(), 2323)
+        );
+        assert!(parse_tcp_url("tcp://host:not-a-port").is_err());
+        assert!(parse_tcp_url("tcp://:23").is_err());
+    }
+}
