@@ -93,6 +93,17 @@ enum Command {
         #[arg(long, default_value_t = 115200)]
         baud: u32,
     },
+    /// Clear a GRBL alarm with `$X`.
+    Unlock {
+        /// Serial port, e.g. /dev/ttyUSB0 or COM3.
+        #[arg(long)]
+        port: Option<String>,
+        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet, port 23).
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long, default_value_t = 115200)]
+        baud: u32,
+    },
     /// Ask a connected controller for its status.
     Status {
         /// Serial port, e.g. /dev/ttyUSB0 or COM3.
@@ -206,6 +217,7 @@ fn main() -> Result<()> {
             timeout,
         } => run(&common, port, url, baud, mock, force, timeout),
         Command::Stop { port, url, baud } => stop_machine(port, url, baud),
+        Command::Unlock { port, url, baud } => unlock(port, url, baud),
         Command::Status { port, url, baud } => status(port, url, baud),
     }
 }
@@ -368,6 +380,17 @@ fn stop_machine(port: Option<String>, url: Option<String>, baud: u32) -> Result<
     let mut client = GrblClient::new(transport);
     client.stop().context("stopping the controller")?;
     println!("controller stopped and reset; laser off");
+    Ok(())
+}
+
+fn unlock(port: Option<String>, url: Option<String>, baud: u32) -> Result<()> {
+    let (transport, kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
+    let mut client = GrblClient::new(transport);
+    if kind == LinkKind::Serial {
+        client.wake()?;
+    }
+    client.send("$X").context("clearing the alarm")?;
+    println!("alarm cleared ($X)");
     Ok(())
 }
 

@@ -72,10 +72,14 @@ cargo run -q -- status --url tcp://192.168.1.50
 
 # Emergency stop: feed hold + soft reset, laser off
 cargo run -q -- stop --url tcp://192.168.1.50
+
+# Clear a GRBL alarm after a failed job
+cargo run -q -- unlock --url tcp://192.168.1.50
 ```
 
 Installed as a binary, the commands are `orleans gui`, `orleans info`,
-`orleans gcode`, `orleans run`, `orleans status` and `orleans stop`. `--url` accepts
+`orleans gcode`, `orleans run`, `orleans status`, `orleans stop` and
+`orleans unlock`. `--url` accepts
 `tcp://host[:port]`, `telnet://host[:port]` or a bare `host[:port]`.
 
 The GUI is behind the `gui` Cargo feature, which is on by default. Build with
