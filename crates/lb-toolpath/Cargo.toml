@@ -1,0 +1,10 @@
+[package]
+name = "lb-toolpath"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kurbo.workspace = true
+thiserror.workspace = true
+lb-core = { path = "../lb-core" }
+lb-geom = { path = "../lb-geom" }
