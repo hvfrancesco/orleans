@@ -12,7 +12,7 @@ mod viewport;
 
 pub use app::OrleansApp;
 pub use machine::Status as MachineStatus;
-pub use preview::{LayerPreview, Preview, PreviewContour};
+pub use preview::{LayerPreview, Preview, PreviewContour, ShapePreview};
 pub use viewport::Viewport;
 
 use std::path::PathBuf;

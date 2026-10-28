@@ -1,4 +1,4 @@
-//! Flattened geometry used for drawing.
+//! Flattened geometry used for drawing and hit-testing.
 //!
 //! Flattening every frame would be wasteful, so the curves are converted to
 //! polylines once per import. Zooming and panning then only transform points.
@@ -13,11 +13,17 @@ pub struct PreviewContour {
     pub closed: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct ShapePreview {
+    pub id: String,
+    pub contours: Vec<PreviewContour>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LayerPreview {
     /// The stable `Layer::index` this preview belongs to.
     pub index: usize,
-    pub contours: Vec<PreviewContour>,
+    pub shapes: Vec<ShapePreview>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -33,14 +39,19 @@ impl Preview {
             .iter()
             .map(|layer| LayerPreview {
                 index: layer.index,
-                contours: layer
+                shapes: layer
                     .shapes
                     .iter()
-                    .flat_map(|shape| flatten_path(&shape.path, tolerance))
-                    .filter(|c| c.points.len() >= 2)
-                    .map(|c| PreviewContour {
-                        points: c.points,
-                        closed: c.closed,
+                    .map(|shape| ShapePreview {
+                        id: shape.id.clone(),
+                        contours: flatten_path(&shape.path, tolerance)
+                            .into_iter()
+                            .filter(|contour| contour.points.len() >= 2)
+                            .map(|contour| PreviewContour {
+                                points: contour.points,
+                                closed: contour.closed,
+                            })
+                            .collect(),
                     })
                     .collect(),
             })
@@ -49,11 +60,31 @@ impl Preview {
     }
 
     pub fn contour_count(&self) -> usize {
-        self.layers.iter().map(|l| l.contours.len()).sum()
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.shapes.iter())
+            .map(|shape| shape.contours.len())
+            .sum()
     }
 
     pub fn layer(&self, index: usize) -> Option<&LayerPreview> {
         self.layers.iter().find(|layer| layer.index == index)
+    }
+
+    pub fn shape(&self, layer: usize, id: &str) -> Option<&ShapePreview> {
+        self.layer(layer)?
+            .shapes
+            .iter()
+            .find(|shape| shape.id == id)
+    }
+
+    pub fn shape_mut(&mut self, layer: usize, id: &str) -> Option<&mut ShapePreview> {
+        self.layers
+            .iter_mut()
+            .find(|entry| entry.index == layer)?
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id == id)
     }
 }
 
@@ -75,6 +106,10 @@ mod tests {
         assert_eq!(preview.layers.len(), 1);
         assert_eq!(preview.contour_count(), 1);
         assert_eq!(preview.layers[0].index, 0);
-        assert_eq!(preview.layers[0].contours[0].points.len(), 2);
+        assert!(preview.shape(0, "line").is_some());
+        assert_eq!(
+            preview.shape(0, "line").unwrap().contours[0].points.len(),
+            2
+        );
     }
 }

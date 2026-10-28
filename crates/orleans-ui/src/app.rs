@@ -1,18 +1,20 @@
 //! The main application window: toolbar, layer panel, canvas, status bar.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
-use kurbo::Point;
+use kurbo::{Affine, Point};
 use orleans_core::{Document, Job, Op};
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
+use orleans_geom::point_in_polygon;
 use orleans_import::{import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::preview::Preview;
-use crate::project::{ProjectFile, FORMAT};
+use crate::project::{ProjectFile, ShapeTransform, FORMAT};
 use crate::viewport::Viewport;
 
 const DISPLAY_TOLERANCE: f64 = 0.05;
@@ -38,6 +40,21 @@ impl Status {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShapeRef {
+    layer: usize,
+    shape: String,
+}
+
+type ShapeTranslations = BTreeMap<(usize, String), (f64, f64)>;
+
+struct UndoSnapshot {
+    layer: usize,
+    shape: String,
+    path: kurbo::BezPath,
+    transforms: ShapeTranslations,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LinkState {
     Disconnected,
@@ -54,12 +71,17 @@ enum Action {
     Fit,
     Send,
     SaveProject,
+    Undo,
 }
 
 pub struct OrleansApp {
     doc: Document,
     preview: Preview,
     selected_layer: Option<usize>,
+    selected_shape: Option<ShapeRef>,
+    shape_transforms: ShapeTranslations,
+    undo_stack: Vec<UndoSnapshot>,
+    dragging_shape: bool,
     job: Job,
     path: Option<PathBuf>,
     view: Viewport,
@@ -113,6 +135,10 @@ impl OrleansApp {
             doc: Document::new(100.0, 100.0),
             preview: Preview::default(),
             selected_layer: None,
+            selected_shape: None,
+            shape_transforms: ShapeTranslations::new(),
+            undo_stack: Vec::new(),
+            dragging_shape: false,
             job: Job::default(),
             path: None,
             view: Viewport::default(),
@@ -178,6 +204,10 @@ impl OrleansApp {
                 self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
                 self.doc = doc;
                 self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+                self.selected_shape = None;
+                self.shape_transforms.clear();
+                self.undo_stack.clear();
+                self.dragging_shape = false;
                 self.replan();
                 self.status = Status::ok(format!(
                     "{}: {} layers, {} shapes, {} contours",
@@ -236,6 +266,19 @@ impl OrleansApp {
                 self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
                 self.doc = doc;
                 self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+                self.selected_shape = None;
+                self.shape_transforms = project
+                    .transforms
+                    .iter()
+                    .map(|transform| {
+                        (
+                            (transform.layer, transform.shape.clone()),
+                            (transform.dx, transform.dy),
+                        )
+                    })
+                    .collect();
+                self.undo_stack.clear();
+                self.dragging_shape = false;
                 self.plan_opts.kerf = project.kerf;
                 self.plan_opts.optimize = project.optimize;
                 self.gcode_opts.laser_mode = project.laser_mode();
@@ -279,6 +322,16 @@ impl OrleansApp {
             return;
         };
         let source = self.path.as_ref().map(|path| path.display().to_string());
+        let transforms = self
+            .shape_transforms
+            .iter()
+            .map(|((layer, shape), (dx, dy))| ShapeTransform {
+                layer: *layer,
+                shape: shape.clone(),
+                dx: *dx,
+                dy: *dy,
+            })
+            .collect();
         let project = ProjectFile::new(
             svg,
             source,
@@ -287,6 +340,7 @@ impl OrleansApp {
             self.plan_opts.optimize,
             self.gcode_opts.laser_mode,
             self.gcode_opts.max_s,
+            transforms,
         );
         let json = match serde_json::to_string_pretty(&project) {
             Ok(json) => json,
@@ -615,6 +669,171 @@ impl OrleansApp {
             .and_then(|status| status.work_offset())
             .unwrap_or([0.0, 0.0, 0.0]);
         Some(kurbo::Rect::new(-ox, -oy, width - ox, height - oy))
+    }
+
+    fn push_shape_undo(&mut self, selected: &ShapeRef) {
+        let Some(layer) = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == selected.layer)
+        else {
+            return;
+        };
+        let Some(shape) = layer.shapes.iter().find(|shape| shape.id == selected.shape) else {
+            return;
+        };
+        self.undo_stack.push(UndoSnapshot {
+            layer: selected.layer,
+            shape: selected.shape.clone(),
+            path: shape.path.clone(),
+            transforms: self.shape_transforms.clone(),
+        });
+        if self.undo_stack.len() > 30 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn undo_shape_move(&mut self) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            self.set_status("nothing to undo", false);
+            return;
+        };
+        if let Some(layer) = self
+            .doc
+            .layers
+            .iter_mut()
+            .find(|layer| layer.index == snapshot.layer)
+        {
+            if let Some(shape) = layer
+                .shapes
+                .iter_mut()
+                .find(|shape| shape.id == snapshot.shape)
+            {
+                shape.path = snapshot.path;
+            }
+        }
+        self.shape_transforms = snapshot.transforms;
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.replan();
+        self.dirty = false;
+
+        let exists = self.selected_shape.as_ref().is_some_and(|selected| {
+            self.doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == selected.layer)
+                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == selected.shape))
+                .is_some()
+        });
+        if !exists {
+            self.selected_shape = None;
+        }
+        if let Some(index) = self.selected_layer {
+            if !self.doc.layers.iter().any(|layer| layer.index == index) {
+                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+            }
+        }
+        self.dragging_shape = false;
+        self.set_status("undid shape move", false);
+    }
+
+    fn hit_test(&self, p: Point) -> Option<ShapeRef> {
+        let tolerance = (6.0 / f64::from(self.view.zoom)).max(0.25);
+        for layer in self.doc.layers.iter().rev() {
+            if !layer.visible {
+                continue;
+            }
+            let Some(preview) = self.preview.layer(layer.index) else {
+                continue;
+            };
+            for shape in preview.shapes.iter().rev() {
+                let filled = layer
+                    .shapes
+                    .iter()
+                    .find(|core| core.id == shape.id)
+                    .map(|core| core.is_fill)
+                    .unwrap_or(false);
+                for contour in &shape.contours {
+                    if filled && contour.closed && point_in_polygon(p, &contour.points) {
+                        return Some(ShapeRef {
+                            layer: layer.index,
+                            shape: shape.id.clone(),
+                        });
+                    }
+                    if distance_to_contour(contour, p) <= tolerance {
+                        return Some(ShapeRef {
+                            layer: layer.index,
+                            shape: shape.id.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Prefer the current selection's bounding box for dragging: after the
+    /// outline has been clicked, the user can grab anywhere inside the object.
+    fn drag_target(&self, point: Point) -> Option<ShapeRef> {
+        if let Some(selected) = &self.selected_shape {
+            if let Some(layer) = self
+                .doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == selected.layer)
+            {
+                if layer.visible {
+                    if let Some(shape) =
+                        layer.shapes.iter().find(|shape| shape.id == selected.shape)
+                    {
+                        if shape.bounds().contains(point) {
+                            return Some(selected.clone());
+                        }
+                    }
+                }
+            }
+        }
+        self.hit_test(point)
+    }
+
+    fn translate_selected_shape(&mut self, dx: f64, dy: f64) {
+        let Some(selected) = self.selected_shape.clone() else {
+            return;
+        };
+        {
+            let Some(layer) = self
+                .doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == selected.layer)
+            else {
+                return;
+            };
+            let Some(shape) = layer
+                .shapes
+                .iter_mut()
+                .find(|shape| shape.id == selected.shape)
+            else {
+                return;
+            };
+            shape.path.apply_affine(Affine::translate((dx, dy)));
+        }
+        let entry = self
+            .shape_transforms
+            .entry((selected.layer, selected.shape.clone()))
+            .or_insert((0.0, 0.0));
+        entry.0 += dx;
+        entry.1 += dy;
+        if let Some(preview) = self.preview.shape_mut(selected.layer, &selected.shape) {
+            for contour in &mut preview.contours {
+                for point in &mut contour.points {
+                    point.x += dx;
+                    point.y += dy;
+                }
+            }
+        }
+        self.dirty = true;
     }
 
     fn pause_is_safe(&self) -> bool {
@@ -1344,6 +1563,13 @@ impl OrleansApp {
                 if ui.button("Fit").clicked() {
                     *action = Some(Action::Fit);
                 }
+                if ui
+                    .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("Undo"))
+                    .on_hover_text("Undo shape move (Ctrl+Z)")
+                    .clicked()
+                {
+                    *action = Some(Action::Undo);
+                }
                 ui.separator();
                 ui.checkbox(&mut self.show_grid, "Grid");
                 ui.checkbox(&mut self.show_travel, "Travel");
@@ -1478,6 +1704,9 @@ impl OrleansApp {
                             }
                         });
                     if let Some(index) = pick {
+                        if self.selected_shape.as_ref().map(|shape| shape.layer) != Some(index) {
+                            self.selected_shape = None;
+                        }
                         self.selected_layer = Some(index);
                     }
                     changed |= output_changed;
@@ -1593,6 +1822,16 @@ impl OrleansApp {
                     ui.label(RichText::new("Select a layer to edit it.").weak());
                 }
 
+                ui.label(
+                    RichText::new(if self.selected_shape.is_some() {
+                        "Shape selected — drag to move · Ctrl+Z to undo"
+                    } else {
+                        "Click a shape to select · drag to move · right-drag to pan"
+                    })
+                    .small()
+                    .weak(),
+                );
+
                 ui.separator();
                 ui.heading("Job");
                 egui::Grid::new("job-settings")
@@ -1704,12 +1943,56 @@ impl OrleansApp {
             self.draw_travel(&painter, area);
         }
         self.draw_layers(&painter, area);
+        self.draw_selected_shape(&painter, area);
         self.draw_origin(&painter, area);
 
-        // Pan with any mouse button; zoom with the wheel around the cursor.
-        if response.dragged() {
-            self.view.pan(response.drag_delta());
+        if response.clicked_by(egui::PointerButton::Primary) {
+            if let Some(position) = response.interact_pointer_pos() {
+                let world = self.view.screen_to_world(area, position);
+                self.selected_shape = self.hit_test(world);
+                if let Some(selected) = &self.selected_shape {
+                    self.selected_layer = Some(selected.layer);
+                }
+            }
         }
+
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let origin = ui
+                .ctx()
+                .input(|input| input.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos());
+            let hit = origin
+                .and_then(|position| self.drag_target(self.view.screen_to_world(area, position)));
+            if let Some(selected) = hit {
+                self.push_shape_undo(&selected);
+                self.selected_layer = Some(selected.layer);
+                self.selected_shape = Some(selected);
+                self.dragging_shape = true;
+            } else {
+                self.dragging_shape = false;
+            }
+        }
+        if response.drag_stopped() {
+            self.dragging_shape = false;
+        }
+
+        if response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle)
+        {
+            self.view.pan(response.drag_delta());
+        } else if response.dragged_by(egui::PointerButton::Primary) {
+            if self.dragging_shape {
+                let delta = response.drag_delta();
+                let zoom = f64::from(self.view.zoom);
+                self.translate_selected_shape(
+                    f64::from(delta.x) / zoom,
+                    -f64::from(delta.y) / zoom,
+                );
+            } else {
+                self.view.pan(response.drag_delta());
+            }
+        }
+
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta().y);
             if scroll.abs() > 0.5 {
@@ -1859,20 +2142,75 @@ impl OrleansApp {
                 1.4
             };
             let stroke = Stroke::new(width, color);
-            for contour in &preview.contours {
-                let mut points: Vec<Pos2> = contour
-                    .points
-                    .iter()
-                    .map(|p| self.view.world_to_screen(area, *p))
-                    .collect();
-                if contour.closed && points.len() > 1 {
-                    points.push(points[0]);
-                }
-                if points.len() >= 2 {
-                    painter.add(egui::Shape::line(points, stroke));
+            for shape in &preview.shapes {
+                for contour in &shape.contours {
+                    let mut points: Vec<Pos2> = contour
+                        .points
+                        .iter()
+                        .map(|p| self.view.world_to_screen(area, *p))
+                        .collect();
+                    if contour.closed && points.len() > 1 {
+                        points.push(points[0]);
+                    }
+                    if points.len() >= 2 {
+                        painter.add(egui::Shape::line(points, stroke));
+                    }
                 }
             }
         }
+    }
+
+    fn draw_selected_shape(&self, painter: &egui::Painter, area: Rect) {
+        let Some(selected) = &self.selected_shape else {
+            return;
+        };
+        let Some(layer) = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == selected.layer)
+        else {
+            return;
+        };
+        if !layer.visible {
+            return;
+        }
+        let Some(shape) = layer.shapes.iter().find(|shape| shape.id == selected.shape) else {
+            return;
+        };
+        let Some(preview) = self.preview.shape(selected.layer, &selected.shape) else {
+            return;
+        };
+
+        let stroke = Stroke::new(2.4, Color32::from_rgb(255, 214, 90));
+        for contour in &preview.contours {
+            let mut points: Vec<Pos2> = contour
+                .points
+                .iter()
+                .map(|point| self.view.world_to_screen(area, *point))
+                .collect();
+            if contour.closed && points.len() > 1 {
+                points.push(points[0]);
+            }
+            if points.len() >= 2 {
+                painter.add(egui::Shape::line(points, stroke));
+            }
+        }
+
+        let bounds = shape.bounds();
+        let rect = Rect::from_two_pos(
+            self.view
+                .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
+            self.view
+                .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
+        )
+        .expand(4.0);
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+            StrokeKind::Inside,
+        );
     }
 
     fn draw_origin(&self, painter: &egui::Painter, area: Rect) {
@@ -1887,6 +2225,34 @@ impl OrleansApp {
 /// Layer colours come from the SVG, and black is common. On a dark canvas the
 /// original colour would be invisible, so lift dark colours toward white while
 /// keeping their hue. Bright or saturated colours are left untouched.
+fn distance_to_contour(contour: &crate::preview::PreviewContour, point: Point) -> f64 {
+    let points = &contour.points;
+    let mut best = f64::INFINITY;
+    for window in points.windows(2) {
+        best = best.min(distance_to_segment(point, window[0], window[1]));
+    }
+    if contour.closed && points.len() > 1 {
+        best = best.min(distance_to_segment(
+            point,
+            points[points.len() - 1],
+            points[0],
+        ));
+    }
+    best
+}
+
+fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
+    let ab = b - a;
+    let ap = point - a;
+    let length_squared = ab.x * ab.x + ab.y * ab.y;
+    if length_squared <= 1e-12 {
+        return ap.hypot();
+    }
+    let t = ((ap.x * ab.x + ap.y * ab.y) / length_squared).clamp(0.0, 1.0);
+    let projected = Point::new(a.x + t * ab.x, a.y + t * ab.y);
+    (point - projected).hypot()
+}
+
 fn is_project_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -1987,6 +2353,9 @@ impl eframe::App for OrleansApp {
             if i.modifiers.command && i.key_pressed(egui::Key::S) {
                 action = Some(Action::SaveProject);
             }
+            if i.modifiers.command && i.key_pressed(egui::Key::Z) {
+                action = Some(Action::Undo);
+            }
             if !i.modifiers.command && i.key_pressed(egui::Key::F) {
                 action = Some(Action::Fit);
             }
@@ -2014,6 +2383,7 @@ impl eframe::App for OrleansApp {
             }
             Some(Action::Export) => self.export(),
             Some(Action::SaveProject) => self.save_project(),
+            Some(Action::Undo) => self.undo_shape_move(),
             Some(Action::Reload) => {
                 if let Some(path) = self.project_path.clone() {
                     self.load_project(path);

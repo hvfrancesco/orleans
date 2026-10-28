@@ -23,6 +23,17 @@ pub struct ProjectFile {
     pub optimize: bool,
     pub laser_mode: String,
     pub max_s: u32,
+    /// Translations applied to individual shapes in the editor.
+    #[serde(default)]
+    pub transforms: Vec<ShapeTransform>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShapeTransform {
+    pub layer: usize,
+    pub shape: String,
+    pub dx: f64,
+    pub dy: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,6 +65,7 @@ impl ProjectFile {
         optimize: bool,
         laser_mode: LaserMode,
         max_s: u32,
+        transforms: Vec<ShapeTransform>,
     ) -> Self {
         Self {
             format: FORMAT,
@@ -82,6 +94,7 @@ impl ProjectFile {
             }
             .to_owned(),
             max_s,
+            transforms,
         }
     }
 
@@ -120,6 +133,24 @@ impl ProjectFile {
                 );
             }
         }
+
+        for transform in &self.transforms {
+            if let Some(layer) = doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == transform.layer)
+            {
+                if let Some(shape) = layer
+                    .shapes
+                    .iter_mut()
+                    .find(|shape| shape.id == transform.shape)
+                {
+                    shape
+                        .path
+                        .apply_affine(kurbo::Affine::translate((transform.dx, transform.dy)));
+                }
+            }
+        }
     }
 
     pub fn laser_mode(&self) -> LaserMode {
@@ -134,7 +165,7 @@ impl ProjectFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orleans_core::Layer;
+    use orleans_core::{Layer, Shape};
 
     #[test]
     fn json_round_trip_keeps_layer_settings() {
@@ -151,6 +182,12 @@ mod tests {
             true,
             LaserMode::M4,
             1000,
+            vec![ShapeTransform {
+                layer: 0,
+                shape: "line".to_owned(),
+                dx: 1.5,
+                dy: -2.0,
+            }],
         );
         let json = serde_json::to_string(&project).expect("serialise");
         let back: ProjectFile = serde_json::from_str(&json).expect("deserialise");
@@ -161,6 +198,43 @@ mod tests {
         assert_eq!(back.layers[0].speed, 1200.0);
         assert_eq!(back.layers[0].power, 35.0);
         assert_eq!(back.layers[0].passes, 2);
+        assert_eq!(back.transforms.len(), 1);
+        assert_eq!(back.transforms[0].dx, 1.5);
+        assert_eq!(back.transforms[0].dy, -2.0);
+    }
+
+    #[test]
+    fn apply_translates_shapes() {
+        use kurbo::{Line, Shape as _};
+        let mut doc = Document::new(100.0, 100.0);
+        let mut layer = Layer::new(0, "C00", [0, 0, 0], CutParams::default());
+        layer.shapes.push(Shape::new(
+            "line",
+            Line::new((0.0, 0.0), (10.0, 0.0)).into_path(0.01),
+            false,
+        ));
+        doc.layers.push(layer);
+        let project = ProjectFile {
+            format: FORMAT,
+            svg: "<svg/>".to_owned(),
+            source: None,
+            layers: Vec::new(),
+            kerf: 0.0,
+            optimize: true,
+            laser_mode: "M4".to_owned(),
+            max_s: 1000,
+            transforms: vec![ShapeTransform {
+                layer: 0,
+                shape: "line".to_owned(),
+                dx: 5.0,
+                dy: 2.0,
+            }],
+        };
+        project.apply(&mut doc);
+        let bounds = doc.layers[0].shapes[0].path.bounding_box();
+        assert!((bounds.x0 - 5.0).abs() < 1e-6);
+        assert!((bounds.y0 - 2.0).abs() < 1e-6);
+        assert!((bounds.x1 - 15.0).abs() < 1e-6);
     }
 
     #[test]
@@ -190,6 +264,7 @@ mod tests {
             optimize: true,
             laser_mode: "M4".to_owned(),
             max_s: 1000,
+            transforms: Vec::new(),
         };
         project.apply(&mut doc);
         assert_eq!(
@@ -225,6 +300,7 @@ mod tests {
             optimize: false,
             laser_mode: "M3".to_owned(),
             max_s: 500,
+            transforms: Vec::new(),
         };
         project.apply(&mut doc);
         let layer = &doc.layers[0];

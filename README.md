@@ -31,6 +31,7 @@ was decompiled or copied.
 | Raster engraving, dithering, fill/hatch | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
+| Canvas: shape selection, drag-to-move, undo | ✅ |
 | Project save/load (`.orleans`, embedded SVG + layer/job settings) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -43,7 +44,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-72 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+73 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -124,14 +125,18 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   jobs select G54. The position readout shows `WPos` when the controller
   reports it, otherwise `MPos`;
 * **Save project…** (`Ctrl+S`) writes a self-contained `.orleans` JSON file
-  with the SVG, layer parameters and job settings. **Open…** accepts both SVG
-  and `.orleans`; **Reload** reloads whichever is current;
+  with the SVG, layer parameters, job settings and shape translations.
+  **Open…** accepts both SVG and `.orleans`; **Reload** reloads whichever is
+  current;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
   homing `$22`, and the raw `$$` list. **Apply** writes the changed settings
   to EEPROM; editing is blocked while cutting or homing;
 * the bed/travel area from `$130`/`$131` is drawn on the canvas, offset by
   `WCO` when the controller reports it, and included in **Fit**. Toggle it
   with **Bed**;
+* click a shape on the canvas to select it; drag anywhere inside its
+  bounding box to translate it. The selected shape is drawn in yellow with
+  its bounds. **Undo**/`Ctrl+Z` restores the last shape move; right-drag pans;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
   when the controller is connected, idle and the laser is off; `Ctrl+Enter`
@@ -244,12 +249,14 @@ concept of a line and some bridges emit negotiation on connect.
 * The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
   assumes work zero coincides with machine zero.
 * Project layer settings, Show/Cut state and cut order are matched by layer
-  index.
+  index; shape translations are matched by layer index plus shape id.
   If the SVG's colour grouping changes after saving, check that the settings
   landed on the right layers.
-* The GUI has no selection, transforms or node editing. Pause is restricted to
-  M4 jobs with `$32=1`; M3 jobs can only be stopped. Framing uses a fixed
-  3000 mm/min and the design bounds, with no margin setting.
+* Editing transforms are translation-only: no scale, rotate, multi-selection or
+  node editing yet, and Undo currently covers shape moves only.
+* Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
+  Framing uses a fixed 3000 mm/min and the design bounds, with no margin
+  setting.
 * **Set zero (G92)** is temporary: a soft reset, Stop or controller reconnect
   after a reset clears it. **Save zero (G54)** writes `G10 L20 P1`; whether the
   offset survives a reset depends on the controller. Generated jobs select G54.
@@ -258,8 +265,8 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **Finish the editor** — selection, transforms, node editing, undo, and job
-   history for the streaming panel.
+1. **Finish the editor** — multi-selection, scale/rotate, node editing, and
+   job history for the streaming panel.
 2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.
