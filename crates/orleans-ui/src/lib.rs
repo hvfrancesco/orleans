@@ -7,6 +7,7 @@
 mod app;
 mod machine;
 mod preview;
+mod project;
 mod viewport;
 
 pub use app::OrleansApp;

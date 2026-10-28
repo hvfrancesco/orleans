@@ -1,0 +1,170 @@
+//! Orleans project files: the embedded SVG plus layer and job settings.
+//!
+//! This is a clean-room format; it does not read or write LightBurn files.
+//! Geometry comes from the SVG, while the project stores the per-layer cutting
+//! parameters and the job-level options.
+
+use orleans_core::{CutParams, Document, LayerMode};
+use orleans_driver::gcode::LaserMode;
+use serde::{Deserialize, Serialize};
+
+pub const FORMAT: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectFile {
+    pub format: u32,
+    /// The original SVG document, embedded so the project is self-contained.
+    pub svg: String,
+    /// Where the SVG came from, for display only.
+    #[serde(default)]
+    pub source: Option<String>,
+    pub layers: Vec<LayerSettings>,
+    pub kerf: f64,
+    pub optimize: bool,
+    pub laser_mode: String,
+    pub max_s: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerSettings {
+    pub index: usize,
+    pub name: String,
+    pub color: [u8; 3],
+    pub mode: String,
+    pub speed: f64,
+    pub power: f64,
+    pub passes: u32,
+}
+
+impl ProjectFile {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        svg: String,
+        source: Option<String>,
+        doc: &Document,
+        kerf: f64,
+        optimize: bool,
+        laser_mode: LaserMode,
+        max_s: u32,
+    ) -> Self {
+        Self {
+            format: FORMAT,
+            svg,
+            source,
+            layers: doc
+                .layers
+                .iter()
+                .map(|layer| LayerSettings {
+                    index: layer.index,
+                    name: layer.name.clone(),
+                    color: layer.color,
+                    mode: format!("{:?}", layer.mode),
+                    speed: layer.cut.speed,
+                    power: layer.cut.power,
+                    passes: layer.cut.passes,
+                })
+                .collect(),
+            kerf,
+            optimize,
+            laser_mode: match laser_mode {
+                LaserMode::M3 => "M3",
+                LaserMode::M4 => "M4",
+            }
+            .to_owned(),
+            max_s,
+        }
+    }
+
+    /// Apply the stored per-layer settings to a freshly imported document.
+    pub fn apply(&self, doc: &mut Document) {
+        for layer in &mut doc.layers {
+            if let Some(saved) = self.layers.iter().find(|saved| saved.index == layer.index) {
+                layer.name = saved.name.clone();
+                layer.color = saved.color;
+                layer.mode = if saved.mode.eq_ignore_ascii_case("fill") {
+                    LayerMode::Fill
+                } else {
+                    LayerMode::Line
+                };
+                layer.cut = CutParams::new(
+                    saved.speed.max(0.0),
+                    saved.power.clamp(0.0, 100.0),
+                    saved.passes,
+                );
+            }
+        }
+    }
+
+    pub fn laser_mode(&self) -> LaserMode {
+        if self.laser_mode.eq_ignore_ascii_case("M4") {
+            LaserMode::M4
+        } else {
+            LaserMode::M3
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orleans_core::Layer;
+
+    #[test]
+    fn json_round_trip_keeps_layer_settings() {
+        let mut doc = Document::new(100.0, 80.0);
+        let mut layer = Layer::new(0, "C00", [10, 20, 30], CutParams::new(1200.0, 35.0, 2));
+        layer.mode = LayerMode::Line;
+        doc.layers.push(layer);
+
+        let project = ProjectFile::new(
+            "<svg/>".to_owned(),
+            Some("/tmp/design.svg".to_owned()),
+            &doc,
+            0.15,
+            true,
+            LaserMode::M4,
+            1000,
+        );
+        let json = serde_json::to_string(&project).expect("serialise");
+        let back: ProjectFile = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back.format, FORMAT);
+        assert_eq!(back.kerf, 0.15);
+        assert_eq!(back.laser_mode(), LaserMode::M4);
+        assert_eq!(back.layers.len(), 1);
+        assert_eq!(back.layers[0].speed, 1200.0);
+        assert_eq!(back.layers[0].power, 35.0);
+        assert_eq!(back.layers[0].passes, 2);
+    }
+
+    #[test]
+    fn apply_overrides_imported_defaults() {
+        let mut doc = Document::new(100.0, 80.0);
+        doc.layers
+            .push(Layer::new(0, "C00", [0, 0, 0], CutParams::default()));
+        let project = ProjectFile {
+            format: FORMAT,
+            svg: "<svg/>".to_owned(),
+            source: None,
+            layers: vec![LayerSettings {
+                index: 0,
+                name: "holes".to_owned(),
+                color: [255, 0, 0],
+                mode: "Line".to_owned(),
+                speed: 800.0,
+                power: 12.5,
+                passes: 3,
+            }],
+            kerf: 0.1,
+            optimize: false,
+            laser_mode: "M3".to_owned(),
+            max_s: 500,
+        };
+        project.apply(&mut doc);
+        let layer = &doc.layers[0];
+        assert_eq!(layer.name, "holes");
+        assert_eq!(layer.color, [255, 0, 0]);
+        assert_eq!(layer.cut.speed, 800.0);
+        assert_eq!(layer.cut.power, 12.5);
+        assert_eq!(layer.cut.passes, 3);
+    }
+}

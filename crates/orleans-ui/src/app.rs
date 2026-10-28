@@ -12,6 +12,7 @@ use orleans_toolpath::{plan, PlanOptions};
 
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::preview::Preview;
+use crate::project::{ProjectFile, FORMAT};
 use crate::viewport::Viewport;
 
 const DISPLAY_TOLERANCE: f64 = 0.05;
@@ -52,6 +53,7 @@ enum Action {
     Reload,
     Fit,
     Send,
+    SaveProject,
 }
 
 pub struct OrleansApp {
@@ -68,6 +70,7 @@ pub struct OrleansApp {
     fit_pending: bool,
     show_grid: bool,
     show_travel: bool,
+    show_bed: bool,
 
     endpoint: String,
     machine: Machine,
@@ -90,6 +93,8 @@ pub struct OrleansApp {
     job_paused: bool,
     job_uses_m4: bool,
     settings: Option<Settings>,
+    source_svg: Option<String>,
+    project_path: Option<PathBuf>,
     settings_open: bool,
     setting_laser: bool,
     setting_max_s: u32,
@@ -121,6 +126,7 @@ impl OrleansApp {
             fit_pending: true,
             show_grid: true,
             show_travel: false,
+            show_bed: true,
             endpoint: endpoint.unwrap_or_default(),
             machine: Machine::spawn(),
             link: LinkState::Disconnected,
@@ -141,18 +147,20 @@ impl OrleansApp {
             job_paused: false,
             job_uses_m4: false,
             settings: None,
+            source_svg: None,
+            project_path: None,
             settings_open: false,
             setting_laser: true,
             setting_max_s: 1000,
             setting_homing: false,
         };
         if let Some(path) = initial {
-            app.load(path);
+            app.open_path(path);
         }
         app
     }
 
-    fn load(&mut self, path: PathBuf) {
+    fn load_svg(&mut self, path: PathBuf) {
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -178,6 +186,8 @@ impl OrleansApp {
                     self.preview.contour_count()
                 ));
                 self.path = Some(path);
+                self.project_path = None;
+                self.source_svg = Some(String::from_utf8_lossy(&bytes).into_owned());
                 self.fit_pending = true;
                 self.dirty = false;
             }
@@ -185,6 +195,118 @@ impl OrleansApp {
                 self.status = Status::error(format!("importing {}: {err}", path.display()));
             }
         }
+    }
+
+    fn open_path(&mut self, path: PathBuf) {
+        if is_project_path(&path) {
+            self.load_project(path);
+        } else {
+            self.load_svg(path);
+        }
+    }
+
+    fn load_project(&mut self, path: PathBuf) {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                self.set_status(format!("reading {}: {err}", path.display()), true);
+                return;
+            }
+        };
+        let project: ProjectFile = match serde_json::from_str(&text) {
+            Ok(project) => project,
+            Err(err) => {
+                self.set_status(format!("parsing {}: {err}", path.display()), true);
+                return;
+            }
+        };
+        if project.format != FORMAT {
+            self.set_status(
+                format!("project format {} is not supported", project.format),
+                true,
+            );
+            return;
+        }
+        match import_svg(project.svg.as_bytes(), &ImportOptions::default()) {
+            Ok(mut doc) if !doc.is_empty() => {
+                project.apply(&mut doc);
+                self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
+                self.doc = doc;
+                self.plan_opts.kerf = project.kerf;
+                self.plan_opts.optimize = project.optimize;
+                self.gcode_opts.laser_mode = project.laser_mode();
+                self.gcode_opts.max_s = project.max_s;
+                self.source_svg = Some(project.svg.clone());
+                self.project_path = Some(path.clone());
+                self.path = project
+                    .source
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .filter(|source| source.exists());
+                self.replan();
+                self.fit_pending = true;
+                self.dirty = false;
+                self.set_status(format!("project: {}", path.display()), false);
+            }
+            Ok(_) => {
+                self.set_status(format!("{} contains no paths", path.display()), true);
+            }
+            Err(err) => {
+                self.set_status(format!("importing project SVG: {err}"), true);
+            }
+        }
+    }
+
+    fn save_project(&mut self) {
+        let Some(svg) = self.source_svg.clone() else {
+            self.set_status("open an SVG before saving a project", true);
+            return;
+        };
+        let default_name = self
+            .display_path()
+            .and_then(|path| path.file_stem())
+            .map(|stem| format!("{}.orleans", stem.to_string_lossy()))
+            .unwrap_or_else(|| "design.orleans".to_owned());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Orleans project", &["orleans"])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let source = self.path.as_ref().map(|path| path.display().to_string());
+        let project = ProjectFile::new(
+            svg,
+            source,
+            &self.doc,
+            self.plan_opts.kerf,
+            self.plan_opts.optimize,
+            self.gcode_opts.laser_mode,
+            self.gcode_opts.max_s,
+        );
+        let json = match serde_json::to_string_pretty(&project) {
+            Ok(json) => json,
+            Err(err) => {
+                self.set_status(format!("serialising project: {err}"), true);
+                return;
+            }
+        };
+        match std::fs::write(&path, json) {
+            Ok(()) => {
+                self.project_path = Some(path.clone());
+                self.set_status(format!("project saved: {}", path.display()), false);
+            }
+            Err(err) => {
+                self.set_status(format!("writing {}: {err}", path.display()), true);
+            }
+        }
+    }
+
+    fn display_path(&self) -> Option<&std::path::Path> {
+        self.project_path
+            .as_ref()
+            .or(self.path.as_ref())
+            .map(PathBuf::as_path)
     }
 
     fn replan(&mut self) {
@@ -264,6 +386,11 @@ impl OrleansApp {
                     }
                 }
                 MachineEvent::Settings(settings) => {
+                    let had_bed = self
+                        .settings
+                        .as_ref()
+                        .and_then(|settings| settings.bed)
+                        .is_some();
                     if let Some(laser) = settings.laser_mode {
                         self.setting_laser = laser;
                     }
@@ -272,6 +399,9 @@ impl OrleansApp {
                     }
                     if let Some(homing) = settings.homing {
                         self.setting_homing = homing;
+                    }
+                    if !had_bed && settings.bed.is_some() && self.show_bed {
+                        self.fit_pending = true;
                     }
                     self.settings = Some(settings);
                 }
@@ -472,6 +602,16 @@ impl OrleansApp {
         }
     }
 
+    fn bed_rect(&self) -> Option<kurbo::Rect> {
+        let [width, height] = self.settings.as_ref()?.bed?;
+        let [ox, oy, _] = self
+            .machine_status
+            .as_ref()
+            .and_then(|status| status.work_offset())
+            .unwrap_or([0.0, 0.0, 0.0]);
+        Some(kurbo::Rect::new(-ox, -oy, width - ox, height - oy))
+    }
+
     fn pause_is_safe(&self) -> bool {
         self.job_uses_m4
             && self
@@ -489,6 +629,117 @@ impl OrleansApp {
         self.settings = None;
         self.job_paused = false;
         self.set_status("disconnected", false);
+    }
+
+    fn status_contents(&mut self, ui: &mut egui::Ui) {
+        match &self.machine_status {
+            Some(status) => {
+                ui.horizontal(|ui| {
+                    ui.label("State");
+                    if self.job_running {
+                        let (label, color) = if self.job_paused {
+                            ("Paused", Color32::from_rgb(120, 170, 240))
+                        } else if self.frame_job {
+                            ("Framing", Color32::from_rgb(230, 190, 90))
+                        } else {
+                            ("Streaming", Color32::from_rgb(230, 190, 90))
+                        };
+                        ui.colored_label(color, RichText::new(label).strong());
+                    } else {
+                        ui.colored_label(
+                            state_color(&status.state),
+                            RichText::new(&status.state).strong(),
+                        );
+                    }
+                });
+                if self.job_running {
+                    let note = if self.job_paused {
+                        "feed hold active — press Resume"
+                    } else if self.frame_job {
+                        "live status paused while framing"
+                    } else {
+                        "live status paused while sending"
+                    };
+                    ui.label(RichText::new(note).small().weak());
+                }
+                if let Some([x, y, z]) = status.work_position().or(status.mpos) {
+                    let label = if status.work_position().is_some() {
+                        "WPos"
+                    } else {
+                        "MPos"
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        ui.monospace(format!("X {x:.2}  Y {y:.2}  Z {z:.2}"));
+                    });
+                }
+                if status.feed.is_some() || status.spindle.is_some() {
+                    ui.label(format!(
+                        "F {} mm/min   S {}",
+                        status.feed.unwrap_or(0),
+                        status.spindle.unwrap_or(0)
+                    ));
+                }
+                ui.add_space(2.0);
+                let raw = ui.add(
+                    egui::Label::new(RichText::new(&status.raw).small().weak().monospace())
+                        .truncate(),
+                );
+                raw.on_hover_text(&status.raw);
+            }
+            None => {
+                let text = match self.link {
+                    LinkState::Connecting => "waiting for status…",
+                    LinkState::Reconnecting => "waiting for the link…",
+                    _ => "not connected",
+                };
+                ui.label(RichText::new(text).weak());
+            }
+        }
+
+        if let Some(settings) = &self.settings {
+            let mut parts = Vec::new();
+            if let Some(laser) = settings.laser_mode {
+                parts.push(format!("$32={}", if laser { "1" } else { "0" }));
+            }
+            if let Some(max_s) = settings.max_s {
+                parts.push(format!("$30={max_s}"));
+            }
+            if let Some(homing) = settings.homing {
+                parts.push(format!("$22={}", if homing { "1" } else { "0" }));
+            }
+            if parts.is_empty() {
+                ui.label(
+                    RichText::new("controller settings unavailable ($$)")
+                        .small()
+                        .weak(),
+                );
+            } else {
+                ui.add(
+                    egui::Label::new(RichText::new(parts.join(" · ")).small().weak()).truncate(),
+                );
+            }
+            if settings.laser_mode == Some(false) {
+                ui.colored_label(
+                    Color32::from_rgb(235, 120, 110),
+                    "laser mode is off ($32=0)",
+                );
+            }
+            if let Some(max_s) = settings.max_s {
+                if max_s != self.gcode_opts.max_s {
+                    ui.colored_label(
+                        Color32::from_rgb(230, 190, 90),
+                        format!("Max S {} differs from $30={max_s}", self.gcode_opts.max_s),
+                    );
+                }
+            }
+        } else if self.link == LinkState::Connected {
+            ui.label(
+                RichText::new("controller settings unavailable ($$)")
+                    .small()
+                    .weak(),
+            );
+        }
     }
 
     fn machine_panel(&mut self, ui: &mut egui::Ui) {
@@ -558,109 +809,16 @@ impl OrleansApp {
 
                 ui.separator();
                 ui.heading("Status");
-                match &self.machine_status {
-                    Some(status) => {
-                        ui.horizontal(|ui| {
-                            ui.label("State");
-                            if self.job_running {
-                                let (label, color) = if self.job_paused {
-                                    ("Paused", Color32::from_rgb(120, 170, 240))
-                                } else if self.frame_job {
-                                    ("Framing", Color32::from_rgb(230, 190, 90))
-                                } else {
-                                    ("Streaming", Color32::from_rgb(230, 190, 90))
-                                };
-                                ui.colored_label(color, RichText::new(label).strong());
-                            } else {
-                                ui.colored_label(
-                                    state_color(&status.state),
-                                    RichText::new(&status.state).strong(),
-                                );
-                            }
-                        });
-                        if self.job_running {
-                            let note = if self.job_paused {
-                                "feed hold active — press Resume"
-                            } else if self.frame_job {
-                                "live status paused while framing"
-                            } else {
-                                "live status paused while sending"
-                            };
-                            ui.label(RichText::new(note).small().weak());
-                        }
-                        if let Some([x, y, z]) = status.work_position().or(status.mpos) {
-                            let label = if status.work_position().is_some() {
-                                "WPos"
-                            } else {
-                                "MPos"
-                            };
-                            ui.horizontal(|ui| {
-                                ui.label(label);
-                                ui.monospace(format!("X {x:.2}  Y {y:.2}  Z {z:.2}"));
-                            });
-                        }
-                        if status.feed.is_some() || status.spindle.is_some() {
-                            ui.label(format!(
-                                "F {} mm/min   S {}",
-                                status.feed.unwrap_or(0),
-                                status.spindle.unwrap_or(0)
-                            ));
-                        }
-                        ui.add_space(2.0);
-                        ui.label(RichText::new(&status.raw).small().weak().monospace());
-                    }
-                    None => {
-                        let text = match self.link {
-                            LinkState::Connecting => "waiting for status…",
-                            LinkState::Reconnecting => "waiting for the link…",
-                            _ => "not connected",
-                        };
-                        ui.label(RichText::new(text).weak());
-                    }
-                }
-
-                if let Some(settings) = &self.settings {
-                    let mut parts = Vec::new();
-                    if let Some(laser) = settings.laser_mode {
-                        parts.push(format!("$32={}", if laser { "1" } else { "0" }));
-                    }
-                    if let Some(max_s) = settings.max_s {
-                        parts.push(format!("$30={max_s}"));
-                    }
-                    if let Some(homing) = settings.homing {
-                        parts.push(format!("$22={}", if homing { "1" } else { "0" }));
-                    }
-                    if parts.is_empty() {
-                        ui.label(
-                            RichText::new("controller settings unavailable ($$)")
-                                .small()
-                                .weak(),
-                        );
-                    } else {
-                        ui.label(RichText::new(parts.join(" · ")).small().weak());
-                    }
-                    if settings.laser_mode == Some(false) {
-                        ui.colored_label(
-                            Color32::from_rgb(235, 120, 110),
-                            "laser mode is off ($32=0)",
-                        );
-                    }
-                    if let Some(max_s) = settings.max_s {
-                        if max_s != self.gcode_opts.max_s {
-                            ui.colored_label(
-                                Color32::from_rgb(230, 190, 90),
-                                format!("Max S {} differs from $30={max_s}", self.gcode_opts.max_s),
-                            );
-                        }
-                    }
-                } else if self.link == LinkState::Connected {
-                    ui.label(
-                        RichText::new("controller settings unavailable ($$)")
-                            .small()
-                            .weak(),
-                    );
-                }
-
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 160.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("machine-status-scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.status_contents(ui));
+                    },
+                );
                 let connected = self.link == LinkState::Connected;
                 let pending = self.homing
                     || self
@@ -1034,6 +1192,9 @@ impl OrleansApp {
                     ui.label(RichText::new("settings unavailable; press Refresh").weak());
                 }
                 if let Some(settings) = &self.settings {
+                    if let Some([w, h]) = settings.bed {
+                        ui.label(format!("Bed / max travel: {w:.1} × {h:.1} mm"));
+                    }
                     if settings.laser_mode == Some(false) {
                         ui.colored_label(
                             Color32::from_rgb(235, 120, 110),
@@ -1120,9 +1281,8 @@ impl OrleansApp {
         }
 
         let default_name = self
-            .path
-            .as_ref()
-            .and_then(|p| p.file_stem())
+            .display_path()
+            .and_then(|path| path.file_stem())
             .map(|stem| format!("{}.gcode", stem.to_string_lossy()))
             .unwrap_or_else(|| "orleans.gcode".to_owned());
         let Some(path) = rfd::FileDialog::new()
@@ -1154,7 +1314,7 @@ impl OrleansApp {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("Open SVG…").clicked() {
+                if ui.button("Open…").clicked() {
                     *action = Some(Action::Open);
                 }
                 let has_doc = !self.doc.is_empty();
@@ -1163,6 +1323,12 @@ impl OrleansApp {
                     .clicked()
                 {
                     *action = Some(Action::Export);
+                }
+                if ui
+                    .add_enabled(has_doc, egui::Button::new("Save project…"))
+                    .clicked()
+                {
+                    *action = Some(Action::SaveProject);
                 }
                 if ui
                     .add_enabled(has_doc, egui::Button::new("Reload"))
@@ -1176,11 +1342,11 @@ impl OrleansApp {
                 ui.separator();
                 ui.checkbox(&mut self.show_grid, "Grid");
                 ui.checkbox(&mut self.show_travel, "Travel");
+                ui.checkbox(&mut self.show_bed, "Bed");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let name = self
-                        .path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
+                        .display_path()
+                        .map(|path| path.display().to_string())
                         .unwrap_or_else(|| "no file".to_owned());
                     ui.label(RichText::new(name).weak());
                 });
@@ -1359,13 +1525,21 @@ impl OrleansApp {
         painter.rect_filled(area, 0.0, Color32::from_gray(16));
 
         if self.fit_pending {
-            let bounds = self.doc.bounds().unwrap_or_else(|| {
+            let mut bounds = self.doc.bounds().unwrap_or_else(|| {
                 kurbo::Rect::new(0.0, 0.0, self.doc.width.max(1.0), self.doc.height.max(1.0))
             });
+            if self.show_bed {
+                if let Some(bed) = self.bed_rect() {
+                    bounds = bounds.union(bed);
+                }
+            }
             self.view.fit(bounds, area, 48.0);
             self.fit_pending = false;
         }
 
+        if self.show_bed {
+            self.draw_bed(&painter, area);
+        }
         if self.show_grid {
             self.draw_grid(&painter, area);
         }
@@ -1445,6 +1619,30 @@ impl OrleansApp {
         }
     }
 
+    fn draw_bed(&self, painter: &egui::Painter, area: Rect) {
+        let Some(bed) = self.bed_rect() else {
+            return;
+        };
+        let rect = Rect::from_two_pos(
+            self.view.world_to_screen(area, Point::new(bed.x0, bed.y0)),
+            self.view.world_to_screen(area, Point::new(bed.x1, bed.y1)),
+        );
+        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(60, 100, 160, 18));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, Color32::from_rgb(75, 110, 160)),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            rect.left_top() + egui::vec2(4.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            format!("bed {:.0}×{:.0} mm", bed.width(), bed.height()),
+            egui::FontId::proportional(10.0),
+            Color32::from_rgb(110, 140, 180),
+        );
+    }
+
     fn draw_page(&self, painter: &egui::Painter, area: Rect) {
         if self.doc.width <= 0.0 || self.doc.height <= 0.0 {
             return;
@@ -1518,6 +1716,13 @@ impl OrleansApp {
 /// Layer colours come from the SVG, and black is common. On a dark canvas the
 /// original colour would be invisible, so lift dark colours toward white while
 /// keeping their hue. Bright or saturated colours are left untouched.
+fn is_project_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("orleans"))
+        .unwrap_or(false)
+}
+
 const FRAME_FEED: f64 = 3000.0;
 
 /// A short absolute program that traces the job bounds with the laser off.
@@ -1608,6 +1813,9 @@ impl eframe::App for OrleansApp {
             if i.modifiers.command && i.key_pressed(egui::Key::E) {
                 action = Some(Action::Export);
             }
+            if i.modifiers.command && i.key_pressed(egui::Key::S) {
+                action = Some(Action::SaveProject);
+            }
             if !i.modifiers.command && i.key_pressed(egui::Key::F) {
                 action = Some(Action::Fit);
             }
@@ -1626,16 +1834,20 @@ impl eframe::App for OrleansApp {
             Some(Action::Open) => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("SVG", &["svg"])
-                    .set_title("Open SVG")
+                    .add_filter("Orleans project", &["orleans"])
+                    .set_title("Open design or project")
                     .pick_file()
                 {
-                    self.load(path);
+                    self.open_path(path);
                 }
             }
             Some(Action::Export) => self.export(),
+            Some(Action::SaveProject) => self.save_project(),
             Some(Action::Reload) => {
-                if let Some(path) = self.path.clone() {
-                    self.load(path);
+                if let Some(path) = self.project_path.clone() {
+                    self.load_project(path);
+                } else if let Some(path) = self.path.clone() {
+                    self.load_svg(path);
                 } else {
                     self.status = Status::error("nothing to reload");
                 }
@@ -1662,7 +1874,7 @@ impl eframe::App for OrleansApp {
                 .collect()
         });
         if let Some(path) = dropped.into_iter().next() {
-            self.load(path);
+            self.open_path(path);
         }
 
         self.home_dialog(&ctx);

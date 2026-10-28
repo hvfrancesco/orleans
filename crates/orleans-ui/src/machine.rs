@@ -538,6 +538,8 @@ pub struct Settings {
     pub max_s: Option<u32>,
     /// `$22=1`: homing enabled.
     pub homing: Option<bool>,
+    /// `$130`/`$131`: X/Y maximum travel, used as the machine bed size.
+    pub bed: Option<[f64; 2]>,
     /// Every `$n=value` returned by `$$`, for the raw list.
     pub all: BTreeMap<u32, String>,
 }
@@ -579,6 +581,19 @@ fn parse_setting(line: &str, settings: &mut Settings) {
     } else if let Some(value) = line.strip_prefix("$22=") {
         settings.homing = value.parse::<u8>().ok().map(|value| value != 0);
     }
+    settings.bed = match (
+        settings
+            .all
+            .get(&130)
+            .and_then(|value| value.parse::<f64>().ok()),
+        settings
+            .all
+            .get(&131)
+            .and_then(|value| value.parse::<f64>().ok()),
+    ) {
+        (Some(x), Some(y)) if x > 0.0 && y > 0.0 => Some([x, y]),
+        _ => None,
+    };
 }
 
 fn message(events: &Sender<Event>, text: impl Into<String>, error: bool) {
@@ -647,6 +662,19 @@ impl Status {
             feed,
             spindle,
         })
+    }
+
+    /// Work offset: reported directly as `WCO`, or derived from `MPos-WPos`.
+    pub fn work_offset(&self) -> Option<[f64; 3]> {
+        if let Some(wco) = self.wco {
+            return Some(wco);
+        }
+        match (self.mpos, self.wpos) {
+            (Some(mpos), Some(wpos)) => {
+                Some([mpos[0] - wpos[0], mpos[1] - wpos[1], mpos[2] - wpos[2]])
+            }
+            _ => None,
+        }
     }
 
     /// Work position: reported directly as `WPos`, or derived from `MPos` and
@@ -919,9 +947,12 @@ mod tests {
     #[test]
     fn parses_controller_settings() {
         let mut settings = Settings::default();
+        parse_setting("$130=400", &mut settings);
+        parse_setting("$131=300", &mut settings);
         parse_setting("$30=1000", &mut settings);
         parse_setting("$32=1", &mut settings);
         parse_setting("$22=0", &mut settings);
+        assert_eq!(settings.bed, Some([400.0, 300.0]));
         assert_eq!(settings.max_s, Some(1000));
         assert_eq!(settings.laser_mode, Some(true));
         assert_eq!(settings.homing, Some(false));

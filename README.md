@@ -30,6 +30,8 @@ was decompiled or copied.
 | DXF / PDF / AI import | ❌ |
 | Raster engraving, dithering, fill/hatch | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
+| Project save/load (`.orleans`, embedded SVG + layer/job settings) | ✅ |
+| Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
 | GUI laser-off framing pass | ✅ |
@@ -40,7 +42,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-65 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+67 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -93,7 +95,7 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 
 ## GUI
 
-`orleans gui [design.svg]` opens the editor:
+`orleans gui [design.svg|design.orleans]` opens the editor:
 
 * wheel to zoom at the cursor, drag to pan, `F` or double-click to fit;
 * every SVG colour becomes a layer; edit speed, power and passes in the left
@@ -116,9 +118,15 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   stores it with `G10 L20 P1 X0 Y0`. Jogging needs GRBL 1.1 (`$J=`); generated
   jobs select G54. The position readout shows `WPos` when the controller
   reports it, otherwise `MPos`;
+* **Save project…** (`Ctrl+S`) writes a self-contained `.orleans` JSON file
+  with the SVG, layer parameters and job settings. **Open…** accepts both SVG
+  and `.orleans`; **Reload** reloads whichever is current;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
   homing `$22`, and the raw `$$` list. **Apply** writes the changed settings
   to EEPROM; editing is blocked while cutting or homing;
+* the bed/travel area from `$130`/`$131` is drawn on the canvas, offset by
+  `WCO` when the controller reports it, and included in **Fit**. Toggle it
+  with **Bed**;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
   when the controller is connected, idle and the laser is off; `Ctrl+Enter`
@@ -228,6 +236,11 @@ concept of a line and some bridges emit negotiation on connect.
 * Text in SVG needs a font database wired into `usvg::Options`; without it,
   text elements are dropped.
 * The simulator is protocol-level, not a motion model.
+* The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
+  assumes work zero coincides with machine zero.
+* Project layer settings are matched by layer index. If the SVG's colour
+  grouping changes after saving, check that the settings landed on the right
+  layers.
 * The GUI has no selection, transforms or node editing. Pause is restricted to
   M4 jobs with `$32=1`; M3 jobs can only be stopped. Framing uses a fixed
   3000 mm/min and the design bounds, with no margin setting.
