@@ -15,7 +15,7 @@ use orleans_toolpath::{plan, PlanOptions};
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
-use crate::project::{EditedPath, ProjectFile, ShapeTransform, FORMAT};
+use crate::project::{EditedPath, GroupMember, GroupSettings, ProjectFile, ShapeTransform, FORMAT};
 use crate::viewport::Viewport;
 
 const DISPLAY_TOLERANCE: f64 = 0.05;
@@ -49,10 +49,40 @@ struct ShapeRef {
 
 type ShapeTransforms = BTreeMap<(usize, String), Affine>;
 
+/// A set of shapes selected and transformed together by the editor. Groups are
+/// editor metadata: every member still cuts with its own layer settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShapeGroup {
+    id: u64,
+    name: String,
+    members: BTreeSet<ShapeRef>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlignAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlignEdge {
+    Start,
+    Center,
+    End,
+}
+
+/// One alignment/distribution target: an ungrouped shape, or all members of a
+/// selected group.
+#[derive(Clone, Debug)]
+struct SelectionUnit {
+    members: Vec<ShapeRef>,
+    bounds: kurbo::Rect,
+}
+
 const UNDO_LIMIT: usize = 30;
 
-/// Editable state captured before a geometry edit. `settings` is `None` for
-/// transforms and node edits, while a settings-only entry has no geometry.
+/// Editable state captured before an edit. Each section is `None` unless that
+/// kind of state is restored by the entry.
 #[derive(Default)]
 struct UndoSnapshot {
     shapes: Vec<(usize, String, kurbo::BezPath)>,
@@ -60,6 +90,7 @@ struct UndoSnapshot {
     edited_paths: Option<BTreeSet<(usize, String)>>,
     rasters: Vec<RasterSnapshot>,
     settings: Option<SettingsSnapshot>,
+    groups: Option<Vec<ShapeGroup>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -326,6 +357,7 @@ pub struct OrleansApp {
     preview: Preview,
     selected_layer: Option<usize>,
     selected_shapes: BTreeSet<ShapeRef>,
+    groups: Vec<ShapeGroup>,
     shape_transforms: ShapeTransforms,
     undo_stack: Vec<UndoSnapshot>,
     redo_stack: Vec<UndoSnapshot>,
@@ -405,6 +437,7 @@ impl OrleansApp {
             preview: Preview::default(),
             selected_layer: None,
             selected_shapes: BTreeSet::new(),
+            groups: Vec::new(),
             shape_transforms: ShapeTransforms::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -500,6 +533,7 @@ impl OrleansApp {
                     .first()
                     .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
+                self.groups.clear();
                 self.shape_transforms.clear();
                 self.clear_undo();
                 self.dragging_shape = false;
@@ -558,6 +592,7 @@ impl OrleansApp {
                     .first()
                     .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
+                self.groups.clear();
                 self.shape_transforms.clear();
                 self.clear_undo();
                 self.dragging_shape = false;
@@ -666,6 +701,36 @@ impl OrleansApp {
                 ((transform.layer, transform.shape.clone()), affine)
             })
             .collect();
+        self.groups = project
+            .groups
+            .iter()
+            .filter_map(|group| {
+                let members: BTreeSet<ShapeRef> = group
+                    .members
+                    .iter()
+                    .filter_map(|member| {
+                        let layer = self
+                            .doc
+                            .layers
+                            .iter()
+                            .find(|layer| layer.index == member.layer)?;
+                        layer
+                            .shapes
+                            .iter()
+                            .any(|shape| shape.id == member.shape)
+                            .then(|| ShapeRef {
+                                layer: member.layer,
+                                shape: member.shape.clone(),
+                            })
+                    })
+                    .collect();
+                (!members.is_empty()).then(|| ShapeGroup {
+                    id: group.id,
+                    name: group.name.clone(),
+                    members,
+                })
+            })
+            .collect();
         self.clear_undo();
         self.dragging_shape = false;
         self.active_handle = None;
@@ -751,6 +816,22 @@ impl OrleansApp {
             transforms,
         );
         project.edited_paths = edited_paths;
+        project.groups = self
+            .groups
+            .iter()
+            .map(|group| GroupSettings {
+                id: group.id,
+                name: group.name.clone(),
+                members: group
+                    .members
+                    .iter()
+                    .map(|member| GroupMember {
+                        layer: member.layer,
+                        shape: member.shape.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
         let json = match serde_json::to_string_pretty(&project) {
             Ok(json) => json,
             Err(err) => {
@@ -1149,6 +1230,196 @@ impl OrleansApp {
         })
     }
 
+    fn shape_by_ref(&self, shape: &ShapeRef) -> Option<&orleans_core::Shape> {
+        self.doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == shape.layer)?
+            .shapes
+            .iter()
+            .find(|entry| entry.id == shape.shape)
+    }
+
+    /// The whole group containing `shape`, or just the shape when ungrouped.
+    fn unit_members(&self, shape: &ShapeRef) -> BTreeSet<ShapeRef> {
+        self.groups
+            .iter()
+            .find(|group| group.members.contains(shape))
+            .map(|group| group.members.clone())
+            .unwrap_or_else(|| std::iter::once(shape.clone()).collect())
+    }
+
+    /// Select a shape or its whole group. With `toggle`, an already fully
+    /// selected unit is removed instead of added (Ctrl/Shift-click).
+    fn select_shape_unit(&mut self, shape: &ShapeRef, additive: bool, toggle: bool) {
+        let members = self.unit_members(shape);
+        if additive {
+            let all_selected = members
+                .iter()
+                .all(|member| self.selected_shapes.contains(member));
+            if toggle && all_selected {
+                for member in &members {
+                    self.selected_shapes.remove(member);
+                }
+            } else {
+                self.selected_shapes.extend(members);
+            }
+        } else {
+            self.selected_shapes = members;
+        }
+        self.selected_layer = Some(shape.layer);
+        self.selected_raster = None;
+    }
+
+    fn push_groups_undo(&mut self) {
+        self.push_undo(UndoSnapshot {
+            groups: Some(self.groups.clone()),
+            ..UndoSnapshot::default()
+        });
+    }
+
+    fn group_selection(&mut self) {
+        if self.selected_shapes.len() < 2 {
+            self.set_status("select at least two shapes to group", false);
+            return;
+        }
+        let selected = self.selected_shapes.clone();
+        let merge: Vec<u64> = self
+            .groups
+            .iter()
+            .filter(|group| group.members.iter().any(|member| selected.contains(member)))
+            .map(|group| group.id)
+            .collect();
+        let mut members = selected;
+        for group in &self.groups {
+            if merge.contains(&group.id) {
+                members.extend(group.members.iter().cloned());
+            }
+        }
+        self.push_groups_undo();
+        self.groups.retain(|group| !merge.contains(&group.id));
+        let id = self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+        self.groups.push(ShapeGroup {
+            id,
+            name: format!("Group {id}"),
+            members: members.clone(),
+        });
+        self.selected_shapes = members;
+        self.set_status(
+            format!("grouped {} shapes", self.selected_shapes.len()),
+            false,
+        );
+    }
+
+    fn ungroup_selection(&mut self) {
+        let selected = self.selected_shapes.clone();
+        let affected = self
+            .groups
+            .iter()
+            .filter(|group| group.members.iter().any(|member| selected.contains(member)))
+            .count();
+        if affected == 0 {
+            self.set_status("selection is not grouped", false);
+            return;
+        }
+        self.push_groups_undo();
+        self.groups
+            .retain(|group| !group.members.iter().any(|member| selected.contains(member)));
+        self.set_status(format!("ungrouped {affected} group(s)"), false);
+    }
+
+    /// Alignment targets: one per selected group, plus every ungrouped shape.
+    fn selection_units(&self) -> Vec<SelectionUnit> {
+        let mut units: Vec<SelectionUnit> = Vec::new();
+        let mut slots: BTreeMap<u64, usize> = BTreeMap::new();
+        for selected in &self.selected_shapes {
+            let Some(shape) = self.shape_by_ref(selected) else {
+                continue;
+            };
+            let group = self
+                .groups
+                .iter()
+                .find(|group| group.members.contains(selected));
+            let Some(group) = group else {
+                units.push(SelectionUnit {
+                    members: vec![selected.clone()],
+                    bounds: shape.bounds(),
+                });
+                continue;
+            };
+            let slot = *slots.entry(group.id).or_insert_with(|| {
+                units.push(SelectionUnit {
+                    members: Vec::new(),
+                    bounds: shape.bounds(),
+                });
+                units.len() - 1
+            });
+            let unit = &mut units[slot];
+            unit.members.push(selected.clone());
+            unit.bounds = unit.bounds.union(shape.bounds());
+        }
+        units
+    }
+
+    fn align_selection(&mut self, axis: AlignAxis, edge: AlignEdge) {
+        let units = self.selection_units();
+        if units.len() < 2 {
+            return;
+        }
+        let overall = units
+            .iter()
+            .skip(1)
+            .fold(units[0].bounds, |bounds, unit| bounds.union(unit.bounds));
+        let deltas: Vec<f64> = units
+            .iter()
+            .map(|unit| align_delta(unit.bounds, overall, axis, edge))
+            .collect();
+        if deltas.iter().all(|delta| delta.abs() < 1e-9) {
+            self.set_status("already aligned", false);
+            return;
+        }
+        self.push_selection_undo();
+        for (unit, delta) in units.iter().zip(deltas) {
+            if delta.abs() < 1e-9 {
+                continue;
+            }
+            let affine = match axis {
+                AlignAxis::Horizontal => Affine::translate((delta, 0.0)),
+                AlignAxis::Vertical => Affine::translate((0.0, delta)),
+            };
+            let members: BTreeSet<ShapeRef> = unit.members.iter().cloned().collect();
+            self.apply_affine_to(&members, affine);
+        }
+        self.set_status(format!("aligned {} object(s)", units.len()), false);
+    }
+
+    fn distribute_selection(&mut self, axis: AlignAxis) {
+        let units = self.selection_units();
+        if units.len() < 3 {
+            self.set_status("select at least three objects to distribute", false);
+            return;
+        }
+        let bounds: Vec<kurbo::Rect> = units.iter().map(|unit| unit.bounds).collect();
+        let deltas = distribute_deltas(&bounds, axis);
+        if deltas.iter().all(|delta| delta.abs() < 1e-9) {
+            self.set_status("already evenly spaced", false);
+            return;
+        }
+        self.push_selection_undo();
+        for (unit, delta) in units.iter().zip(deltas) {
+            if delta.abs() < 1e-9 {
+                continue;
+            }
+            let affine = match axis {
+                AlignAxis::Horizontal => Affine::translate((delta, 0.0)),
+                AlignAxis::Vertical => Affine::translate((0.0, delta)),
+            };
+            let members: BTreeSet<ShapeRef> = unit.members.iter().cloned().collect();
+            self.apply_affine_to(&members, affine);
+        }
+        self.set_status(format!("distributed {} objects", units.len()), false);
+    }
+
     fn clear_undo(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -1221,6 +1492,7 @@ impl OrleansApp {
             edited_paths: Some(self.edited_paths.clone()),
             rasters: Vec::new(),
             settings: None,
+            groups: None,
         });
     }
 
@@ -1247,6 +1519,7 @@ impl OrleansApp {
                 angle: raster.angle,
             }],
             settings: None,
+            groups: None,
         });
     }
 
@@ -1297,6 +1570,7 @@ impl OrleansApp {
                 .map(|_| self.edited_paths.clone()),
             rasters,
             settings: snapshot.settings.as_ref().map(|_| self.capture_settings()),
+            groups: snapshot.groups.as_ref().map(|_| self.groups.clone()),
         }
     }
 
@@ -1341,6 +1615,9 @@ impl OrleansApp {
         }
         if let Some(settings) = snapshot.settings {
             settings.apply(&mut self.doc, &mut self.plan_opts, &mut self.gcode_opts);
+        }
+        if let Some(groups) = snapshot.groups {
+            self.groups = groups;
         }
 
         self.settings_edit = None;
@@ -1408,8 +1685,12 @@ impl OrleansApp {
     }
 
     fn apply_affine_to_selection(&mut self, affine: Affine) {
-        let selected: Vec<ShapeRef> = self.selected_shapes.iter().cloned().collect();
-        for selection in selected {
+        let selected = self.selected_shapes.clone();
+        self.apply_affine_to(&selected, affine);
+    }
+
+    fn apply_affine_to(&mut self, shapes: &BTreeSet<ShapeRef>, affine: Affine) {
+        for selection in shapes {
             {
                 let Some(layer) = self
                     .doc
@@ -3507,6 +3788,102 @@ impl OrleansApp {
                             );
                         });
                     }
+                    let units = self.selection_units();
+                    let has_group = self.groups.iter().any(|group| {
+                        group
+                            .members
+                            .iter()
+                            .any(|member| self.selected_shapes.contains(member))
+                    });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(selected_count >= 2, egui::Button::new("Group"))
+                            .on_hover_text("Select and transform these shapes together")
+                            .clicked()
+                        {
+                            self.group_selection();
+                        }
+                        if ui
+                            .add_enabled(has_group, egui::Button::new("Ungroup"))
+                            .on_hover_text("Remove the groups these shapes belong to")
+                            .clicked()
+                        {
+                            self.ungroup_selection();
+                        }
+                        if has_group {
+                            ui.label(
+                                RichText::new(format!("{} object(s)", units.len()))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    });
+                    if units.len() >= 2 {
+                        ui.horizontal(|ui| {
+                            ui.label("Align");
+                            if ui
+                                .small_button("L")
+                                .on_hover_text("Align left edges")
+                                .clicked()
+                            {
+                                self.align_selection(AlignAxis::Horizontal, AlignEdge::Start);
+                            }
+                            if ui
+                                .small_button("C")
+                                .on_hover_text("Align horizontal centres")
+                                .clicked()
+                            {
+                                self.align_selection(AlignAxis::Horizontal, AlignEdge::Center);
+                            }
+                            if ui
+                                .small_button("R")
+                                .on_hover_text("Align right edges")
+                                .clicked()
+                            {
+                                self.align_selection(AlignAxis::Horizontal, AlignEdge::End);
+                            }
+                            if ui
+                                .small_button("T")
+                                .on_hover_text("Align top edges")
+                                .clicked()
+                            {
+                                self.align_selection(AlignAxis::Vertical, AlignEdge::End);
+                            }
+                            if ui
+                                .small_button("M")
+                                .on_hover_text("Align vertical centres")
+                                .clicked()
+                            {
+                                self.align_selection(AlignAxis::Vertical, AlignEdge::Center);
+                            }
+                            if ui
+                                .small_button("B")
+                                .on_hover_text("Align bottom edges")
+                                .clicked()
+                            {
+                                self.align_selection(AlignAxis::Vertical, AlignEdge::Start);
+                            }
+                        });
+                    }
+                    if units.len() >= 3 {
+                        ui.horizontal(|ui| {
+                            ui.label("Distribute");
+                            if ui
+                                .small_button("H")
+                                .on_hover_text("Space centres evenly left to right")
+                                .clicked()
+                            {
+                                self.distribute_selection(AlignAxis::Horizontal);
+                            }
+                            if ui
+                                .small_button("V")
+                                .on_hover_text("Space centres evenly bottom to top")
+                                .clicked()
+                            {
+                                self.distribute_selection(AlignAxis::Vertical);
+                            }
+                        });
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Move");
                         ui.label("X");
@@ -3770,16 +4147,7 @@ impl OrleansApp {
                     let world = self.view.screen_to_world(area, position);
                     let hit = self.hit_test(world);
                     if let Some(hit) = hit {
-                        if additive {
-                            if !self.selected_shapes.remove(&hit) {
-                                self.selected_shapes.insert(hit.clone());
-                            }
-                        } else {
-                            self.selected_shapes.clear();
-                            self.selected_shapes.insert(hit.clone());
-                        }
-                        self.selected_layer = Some(hit.layer);
-                        self.selected_raster = None;
+                        self.select_shape_unit(&hit, additive, true);
                     } else if let Some(layer) = self.raster_at(world) {
                         self.select_raster_layer(layer);
                     } else if !additive {
@@ -3832,14 +4200,7 @@ impl OrleansApp {
                         if self.press_on_selection(world) {
                             drag = true;
                         } else if let Some(hit) = vector_hit {
-                            if additive {
-                                self.selected_shapes.insert(hit.clone());
-                            } else {
-                                self.selected_shapes.clear();
-                                self.selected_shapes.insert(hit.clone());
-                            }
-                            self.selected_layer = Some(hit.layer);
-                            self.selected_raster = None;
+                            self.select_shape_unit(&hit, additive, false);
                             drag = true;
                         } else if let Some(layer) = self.raster_at(world) {
                             self.begin_raster_move(layer, world);
@@ -4417,6 +4778,41 @@ fn selection_handle_positions(rect: Rect) -> [(Handle, Pos2); 5] {
     ]
 }
 
+/// Translation needed to align `bounds` with the selection bounds `target`.
+fn align_delta(bounds: kurbo::Rect, target: kurbo::Rect, axis: AlignAxis, edge: AlignEdge) -> f64 {
+    match (axis, edge) {
+        (AlignAxis::Horizontal, AlignEdge::Start) => target.x0 - bounds.x0,
+        (AlignAxis::Horizontal, AlignEdge::Center) => target.center().x - bounds.center().x,
+        (AlignAxis::Horizontal, AlignEdge::End) => target.x1 - bounds.x1,
+        (AlignAxis::Vertical, AlignEdge::Start) => target.y0 - bounds.y0,
+        (AlignAxis::Vertical, AlignEdge::Center) => target.center().y - bounds.center().y,
+        (AlignAxis::Vertical, AlignEdge::End) => target.y1 - bounds.y1,
+    }
+}
+
+/// Per-item translations that keep the first and last centres fixed and space
+/// the intermediate centres evenly. Returned in the same order as `bounds`.
+fn distribute_deltas(bounds: &[kurbo::Rect], axis: AlignAxis) -> Vec<f64> {
+    let mut deltas = vec![0.0; bounds.len()];
+    if bounds.len() < 3 {
+        return deltas;
+    }
+    let center = |rect: &kurbo::Rect| match axis {
+        AlignAxis::Horizontal => rect.center().x,
+        AlignAxis::Vertical => rect.center().y,
+    };
+    let mut order: Vec<usize> = (0..bounds.len()).collect();
+    order.sort_by(|&a, &b| center(&bounds[a]).total_cmp(&center(&bounds[b])));
+    let first = center(&bounds[order[0]]);
+    let last = center(&bounds[order[order.len() - 1]]);
+    let step = (last - first) / (order.len() - 1) as f64;
+    for (rank, &index) in order.iter().enumerate() {
+        let target = first + step * rank as f64;
+        deltas[index] = target - center(&bounds[index]);
+    }
+    deltas
+}
+
 fn opposite_corner(corner: HandleCorner) -> HandleCorner {
     match corner {
         HandleCorner::TopLeft => HandleCorner::BottomRight,
@@ -4973,6 +5369,36 @@ mod tests {
         assert_eq!(format_duration(42.4), "42s");
         assert_eq!(format_duration(61.0), "1m 01s");
         assert_eq!(format_duration(3725.0), "1h 02m");
+    }
+
+    #[test]
+    fn align_deltas_match_edges_and_centres() {
+        let target = kurbo::Rect::new(0.0, 0.0, 100.0, 50.0);
+        let bounds = kurbo::Rect::new(10.0, 5.0, 30.0, 15.0);
+        let cases = [
+            (AlignAxis::Horizontal, AlignEdge::Start, -10.0),
+            (AlignAxis::Horizontal, AlignEdge::Center, 30.0),
+            (AlignAxis::Horizontal, AlignEdge::End, 70.0),
+            (AlignAxis::Vertical, AlignEdge::Start, -5.0),
+            (AlignAxis::Vertical, AlignEdge::Center, 15.0),
+            (AlignAxis::Vertical, AlignEdge::End, 35.0),
+        ];
+        for (axis, edge, expected) in cases {
+            assert_eq!(align_delta(bounds, target, axis, edge), expected);
+        }
+    }
+
+    #[test]
+    fn distribute_moves_only_the_intermediate_centres() {
+        let rect = |x: f64| kurbo::Rect::new(x - 1.0, 0.0, x + 1.0, 1.0);
+        // Input order is deliberately not left-to-right.
+        let bounds = [rect(10.0), rect(40.0), rect(0.0)];
+        let deltas = distribute_deltas(&bounds, AlignAxis::Horizontal);
+        assert_eq!(deltas, vec![10.0, 0.0, 0.0]);
+
+        let bounds = [rect(0.0), rect(10.0), rect(40.0)];
+        let deltas = distribute_deltas(&bounds, AlignAxis::Horizontal);
+        assert_eq!(deltas, vec![0.0, 10.0, 0.0]);
     }
 
     #[test]

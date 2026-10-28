@@ -35,6 +35,7 @@ was decompiled or copied.
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
+| Shape groups and align/distribute | ✅ |
 | Project save/load (`.orleans`, embedded SVG + settings/path edits) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -47,7 +48,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-121 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+124 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -146,7 +147,7 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   reports it, otherwise `MPos`;
 * **Save project…** (`Ctrl+S`) writes a self-contained `.orleans` JSON file
   with the SVG, layer parameters, job settings, per-shape transforms,
-  node-edited paths and embedded raster image data.
+  node-edited paths, groups and embedded raster image data.
   **Open…** accepts SVG, images and `.orleans`; **Reload** reloads whichever is
   current;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
@@ -169,9 +170,15 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   the path; double-click a segment to insert an anchor; select an anchor and
   press `Delete` or **Delete node** to remove it; enable **Snap** to snap node
   drags to the canvas grid. Use **Done** or `Esc` to leave node mode.
+  **Group** makes the selection one object: clicking any member selects the
+  whole group, and drags, handles and align/distribute move it as a unit.
+  **Ungroup** releases its members. With two or more objects selected, the
+  **Align** row aligns left/centre/right and top/middle/bottom; with
+  three or more, **Distribute** spaces their centres evenly horizontally or
+  vertically. Groups can span layers; ungroup before node-editing a member.
   **Undo**/`Ctrl+Z` reverses the last transform, node drag, insertion,
-  deletion, raster move or layer/job setting change; `Ctrl+Shift+Z` (or
-  `Ctrl+Y`) redoes it. Right-drag pans;
+  deletion, raster move, group change or layer/job setting change;
+  `Ctrl+Shift+Z` (or `Ctrl+Y`) redoes it. Right-drag pans;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
   when the controller is connected, idle and the laser is off; `Ctrl+Enter`
@@ -284,17 +291,21 @@ concept of a line and some bridges emit negotiation on connect.
 * The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
   assumes work zero coincides with machine zero.
 * Project layer settings, Show/Cut state and cut order are matched by layer
-  index; shape transforms and node-edited paths are matched by layer index
-  plus shape id. If the SVG's colour grouping changes after saving, check that
-  the settings landed on the right layers.
+  index; shape transforms, node-edited paths and groups are matched by layer
+  index plus shape id. If the SVG's colour grouping changes after saving, check
+  that the settings landed on the right layers.
 * Interactive handles scale uniformly around the opposite corner and rotate
   around the selection centre. There is no non-uniform/skewed scaling.
+* Groups contain vector shapes only and cannot be nested; grouping a selection
+  that already touches groups merges them. Ungroup before node-editing a
+  member. Align/distribute treat each group as one object, and distribution
+  equalises object centres rather than edge gaps.
 * Node editing supports moving anchors and Bézier controls, inserting anchors
   on segments, deleting anchors, and optional grid snapping while dragging.
   Deleting an anchor reconnects the remaining segments directly; there is no
   join/break or smoothing, and nodes do not snap to other geometry yet. Undo
-  and redo cover transforms, node edits, raster placement, layer settings and
-  job settings.
+  and redo cover transforms, node edits, raster placement, groups, layer
+  settings and job settings.
 * Fill mode emits hatch strokes only, not the shape outline; put the outline on
   a separate Line layer/colour if you need both. It supports scanline hatching
   of closed contours with even-odd holes; cross-hatch and offset fill are not

@@ -35,6 +35,24 @@ pub struct ProjectFile {
     /// Complete path overrides for shapes edited with the node editor.
     #[serde(default)]
     pub edited_paths: Vec<EditedPath>,
+    /// Editor groups. They affect selection and transforms, not cutting.
+    #[serde(default)]
+    pub groups: Vec<GroupSettings>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupSettings {
+    pub id: u64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<GroupMember>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupMember {
+    pub layer: usize,
+    pub shape: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -233,6 +251,7 @@ impl ProjectFile {
             height_mm: doc.height.max(1.0),
             transforms,
             edited_paths: Vec::new(),
+            groups: Vec::new(),
         }
     }
 
@@ -448,6 +467,51 @@ mod tests {
     }
 
     #[test]
+    fn json_round_trip_keeps_groups() {
+        let mut project = ProjectFile::new(
+            "<svg/>".to_owned(),
+            None,
+            &Document::new(100.0, 100.0),
+            0.0,
+            true,
+            LaserMode::M3,
+            1000,
+            Vec::new(),
+        );
+        project.groups = vec![GroupSettings {
+            id: 4,
+            name: "Fixture".to_owned(),
+            members: vec![
+                GroupMember {
+                    layer: 0,
+                    shape: "a".to_owned(),
+                },
+                GroupMember {
+                    layer: 1,
+                    shape: "b".to_owned(),
+                },
+            ],
+        }];
+        let json = serde_json::to_string(&project).expect("serialise");
+        let back: ProjectFile = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back.groups.len(), 1);
+        assert_eq!(back.groups[0].id, 4);
+        assert_eq!(back.groups[0].name, "Fixture");
+        assert_eq!(back.groups[0].members.len(), 2);
+        assert_eq!(back.groups[0].members[1].layer, 1);
+        assert_eq!(back.groups[0].members[1].shape, "b");
+
+        // Projects saved before groups were added still load.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("json value");
+        value
+            .as_object_mut()
+            .expect("project object")
+            .remove("groups");
+        let old: ProjectFile = serde_json::from_value(value).expect("old project");
+        assert!(old.groups.is_empty());
+    }
+
+    #[test]
     fn json_round_trip_keeps_affine_matrix() {
         use kurbo::{Affine, Point};
         let affine = Affine::translate((5.0, 3.0)) * Affine::rotate(0.5) * Affine::scale(2.0);
@@ -643,6 +707,7 @@ mod tests {
                 shape: "line".to_owned(),
                 path: "M0,0 L0,20".to_owned(),
             }],
+            groups: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -682,6 +747,7 @@ mod tests {
                 dy: 0.0,
             }],
             edited_paths: Vec::new(),
+            groups: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -718,6 +784,7 @@ mod tests {
                 dy: 2.0,
             }],
             edited_paths: Vec::new(),
+            groups: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -765,6 +832,7 @@ mod tests {
             height_mm: 100.0,
             transforms: Vec::new(),
             edited_paths: Vec::new(),
+            groups: Vec::new(),
         };
         project.apply(&mut doc);
         assert_eq!(
@@ -812,6 +880,7 @@ mod tests {
             height_mm: 80.0,
             transforms: Vec::new(),
             edited_paths: Vec::new(),
+            groups: Vec::new(),
         };
         project.apply(&mut doc);
         let layer = &doc.layers[0];
