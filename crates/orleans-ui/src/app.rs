@@ -13,8 +13,9 @@ use orleans_import::{import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
+use crate::nodes::{self, NodeRef};
 use crate::preview::Preview;
-use crate::project::{ProjectFile, ShapeTransform, FORMAT};
+use crate::project::{EditedPath, ProjectFile, ShapeTransform, FORMAT};
 use crate::viewport::Viewport;
 
 const DISPLAY_TOLERANCE: f64 = 0.05;
@@ -51,6 +52,13 @@ type ShapeTransforms = BTreeMap<(usize, String), Affine>;
 struct UndoSnapshot {
     shapes: Vec<(usize, String, kurbo::BezPath)>,
     transforms: ShapeTransforms,
+    edited_paths: BTreeSet<(usize, String)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NodeDrag {
+    node: NodeRef,
+    last_world: Point,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +98,7 @@ enum Action {
     Send,
     SaveProject,
     Undo,
+    ExitNodes,
 }
 
 pub struct OrleansApp {
@@ -105,6 +114,10 @@ pub struct OrleansApp {
     transform_scale: f64,
     transform_angle: f64,
     active_handle: Option<ActiveHandle>,
+    node_edit: Option<ShapeRef>,
+    selected_node: Option<NodeRef>,
+    node_drag: Option<NodeDrag>,
+    edited_paths: BTreeSet<(usize, String)>,
     job: Job,
     path: Option<PathBuf>,
     view: Viewport,
@@ -167,6 +180,10 @@ impl OrleansApp {
             transform_scale: 1.0,
             transform_angle: 0.0,
             active_handle: None,
+            node_edit: None,
+            selected_node: None,
+            node_drag: None,
+            edited_paths: BTreeSet::new(),
             job: Job::default(),
             path: None,
             view: Viewport::default(),
@@ -237,6 +254,10 @@ impl OrleansApp {
                 self.undo_stack.clear();
                 self.dragging_shape = false;
                 self.active_handle = None;
+                self.node_edit = None;
+                self.selected_node = None;
+                self.node_drag = None;
+                self.edited_paths.clear();
                 self.replan();
                 self.status = Status::ok(format!(
                     "{}: {} layers, {} shapes, {} contours",
@@ -310,6 +331,14 @@ impl OrleansApp {
                 self.undo_stack.clear();
                 self.dragging_shape = false;
                 self.active_handle = None;
+                self.node_edit = None;
+                self.selected_node = None;
+                self.node_drag = None;
+                self.edited_paths = project
+                    .edited_paths
+                    .iter()
+                    .map(|edited| (edited.layer, edited.shape.clone()))
+                    .collect();
                 self.plan_opts.kerf = project.kerf;
                 self.plan_opts.optimize = project.optimize;
                 self.gcode_opts.laser_mode = project.laser_mode();
@@ -364,7 +393,25 @@ impl OrleansApp {
                 dy: 0.0,
             })
             .collect();
-        let project = ProjectFile::new(
+        let edited_paths = self
+            .edited_paths
+            .iter()
+            .filter_map(|(layer, shape)| {
+                self.doc
+                    .layers
+                    .iter()
+                    .find(|entry| entry.index == *layer)?
+                    .shapes
+                    .iter()
+                    .find(|entry| entry.id == *shape)
+                    .map(|entry| EditedPath {
+                        layer: *layer,
+                        shape: shape.clone(),
+                        path: entry.path.to_svg(),
+                    })
+            })
+            .collect();
+        let mut project = ProjectFile::new(
             svg,
             source,
             &self.doc,
@@ -374,6 +421,7 @@ impl OrleansApp {
             self.gcode_opts.max_s,
             transforms,
         );
+        project.edited_paths = edited_paths;
         let json = match serde_json::to_string_pretty(&project) {
             Ok(json) => json,
             Err(err) => {
@@ -791,6 +839,7 @@ impl OrleansApp {
         self.undo_stack.push(UndoSnapshot {
             shapes,
             transforms: self.shape_transforms.clone(),
+            edited_paths: self.edited_paths.clone(),
         });
         if self.undo_stack.len() > 30 {
             self.undo_stack.remove(0);
@@ -814,6 +863,9 @@ impl OrleansApp {
             }
         }
         self.shape_transforms = snapshot.transforms;
+        self.edited_paths = snapshot.edited_paths;
+        self.node_drag = None;
+        self.selected_node = None;
         self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
         self.replan();
         self.dirty = false;
@@ -839,7 +891,7 @@ impl OrleansApp {
         }
         self.dragging_shape = false;
         self.active_handle = None;
-        self.set_status("undid selection edit", false);
+        self.set_status("undid edit", false);
     }
 
     fn apply_affine_to_selection(&mut self, affine: Affine) {
@@ -1014,6 +1066,125 @@ impl OrleansApp {
             }
         }
         self.active_handle = Some(active);
+    }
+
+    fn node_shape(&self) -> Option<&orleans_core::Shape> {
+        let target = self.node_edit.as_ref()?;
+        self.doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == target.layer && layer.visible)?
+            .shapes
+            .iter()
+            .find(|shape| shape.id == target.shape)
+    }
+
+    fn node_at(&self, screen: Pos2, area: Rect) -> Option<NodeRef> {
+        let shape = self.node_shape()?;
+        let mut best: Option<(bool, f32, NodeRef)> = None;
+        for node in nodes::nodes(&shape.path) {
+            let position = self.view.world_to_screen(area, node.point);
+            let distance = position.distance(screen);
+            if distance > 8.0 {
+                continue;
+            }
+            let anchor = node.is_anchor();
+            let replace = match best {
+                None => true,
+                Some((best_anchor, best_distance, _)) => {
+                    if (distance - best_distance).abs() < 0.5 {
+                        anchor && !best_anchor
+                    } else {
+                        distance < best_distance
+                    }
+                }
+            };
+            if replace {
+                best = Some((anchor, distance, node.node));
+            }
+        }
+        best.map(|(_, _, node)| node)
+    }
+
+    fn begin_node_drag(&mut self, node: NodeRef, world: Point) {
+        if self.node_edit.is_none() {
+            return;
+        }
+        self.selected_node = Some(node);
+        self.push_selection_undo();
+        self.node_drag = Some(NodeDrag {
+            node,
+            last_world: world,
+        });
+        self.dragging_shape = false;
+    }
+
+    fn update_node_drag(&mut self, world: Point) {
+        let Some(mut drag) = self.node_drag else {
+            return;
+        };
+        let delta = world - drag.last_world;
+        if delta.hypot() < 1e-9 {
+            return;
+        }
+        let Some(target) = self.node_edit.clone() else {
+            self.node_drag = None;
+            return;
+        };
+
+        let path = {
+            let Some(shape) = self
+                .doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == target.layer)
+                .and_then(|layer| {
+                    layer
+                        .shapes
+                        .iter_mut()
+                        .find(|shape| shape.id == target.shape)
+                })
+            else {
+                return;
+            };
+            if !nodes::move_node(&mut shape.path, drag.node, delta) {
+                return;
+            }
+            shape.path.clone()
+        };
+
+        self.preview
+            .update_shape(target.layer, &target.shape, &path, DISPLAY_TOLERANCE);
+        self.edited_paths
+            .insert((target.layer, target.shape.clone()));
+        self.dirty = true;
+        drag.last_world = world;
+        self.node_drag = Some(drag);
+    }
+
+    fn toggle_node_edit(&mut self) {
+        if self.node_edit.is_some() {
+            self.exit_node_edit();
+            return;
+        }
+        if self.selected_shapes.len() != 1 {
+            self.set_status("select exactly one shape to edit its nodes", true);
+            return;
+        }
+        self.node_edit = self.selected_shapes.iter().next().cloned();
+        self.selected_node = None;
+        self.node_drag = None;
+        self.active_handle = None;
+        self.dragging_shape = false;
+        self.set_status("node editing: drag anchors and control points", false);
+    }
+
+    fn exit_node_edit(&mut self) {
+        if self.node_edit.take().is_some() {
+            self.selected_node = None;
+            self.node_drag = None;
+            self.set_status("node editing finished", false);
+        }
     }
 
     fn pause_is_safe(&self) -> bool {
@@ -1745,7 +1916,7 @@ impl OrleansApp {
                 }
                 if ui
                     .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("Undo"))
-                    .on_hover_text("Undo selection edit (Ctrl+Z)")
+                    .on_hover_text("Undo last edit (Ctrl+Z)")
                     .clicked()
                 {
                     *action = Some(Action::Undo);
@@ -2013,15 +2184,14 @@ impl OrleansApp {
                 }
 
                 let selected_count = self.selected_shapes.len();
-                ui.label(
-                    RichText::new(if selected_count == 0 {
-                        "Click a shape · Ctrl/Shift-click for multiple · drag to move · right-drag to pan"
-                    } else {
-                        "Corner handles scale · top handle rotates · Ctrl+Z to undo"
-                    })
-                    .small()
-                    .weak(),
-                );
+                let hint = if self.node_edit.is_some() {
+                    "Drag nodes · Done or Esc to finish · Ctrl+Z to undo"
+                } else if selected_count == 0 {
+                    "Click a shape · Ctrl/Shift-click for multiple · drag to move · right-drag to pan"
+                } else {
+                    "Corner handles scale · top handle rotates · Ctrl+Z to undo"
+                };
+                ui.label(RichText::new(hint).small().weak());
 
                 if selected_count > 0 {
                     ui.horizontal(|ui| {
@@ -2065,6 +2235,23 @@ impl OrleansApp {
                             self.rotate_selection();
                         }
                     });
+                    if selected_count == 1 {
+                        ui.horizontal(|ui| {
+                            let editing = self.node_edit.is_some();
+                            if ui
+                                .button(if editing { "Done" } else { "Edit nodes" })
+                                .on_hover_text(
+                                    "Edit path anchors and Bézier control points of the selected shape",
+                                )
+                                .clicked()
+                            {
+                                self.toggle_node_edit();
+                            }
+                            if editing {
+                                ui.label(RichText::new("drag anchors / controls").small().weak());
+                            }
+                        });
+                    }
                 }
 
                 ui.separator();
@@ -2179,13 +2366,17 @@ impl OrleansApp {
         }
         self.draw_layers(&painter, area);
         self.draw_selected_shape(&painter, area);
+        self.draw_nodes(&painter, area);
         self.draw_origin(&painter, area);
 
         let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
+        let node_editing = self.node_edit.is_some();
 
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some(position) = response.interact_pointer_pos() {
-                if self.selection_handle_at(position, area).is_none() {
+                if node_editing {
+                    self.selected_node = self.node_at(position, area);
+                } else if self.selection_handle_at(position, area).is_none() {
                     let world = self.view.screen_to_world(area, position);
                     let hit = self.hit_test(world);
                     if let Some(hit) = hit {
@@ -2210,36 +2401,46 @@ impl OrleansApp {
                 .ctx()
                 .input(|input| input.pointer.press_origin())
                 .or_else(|| response.interact_pointer_pos());
-            let mut handle_started = false;
-            if let Some(position) = origin {
-                if let Some(handle) = self.selection_handle_at(position, area) {
-                    let world = self.view.screen_to_world(area, position);
-                    self.begin_handle_drag(handle, world);
-                    handle_started = true;
-                }
-            }
-            if !handle_started {
-                let world = origin.map(|position| self.view.screen_to_world(area, position));
-                let mut drag = false;
-                if let Some(world) = world {
-                    if self.press_on_selection(world) {
-                        drag = true;
-                    } else if let Some(hit) = self.hit_test(world) {
-                        if additive {
-                            self.selected_shapes.insert(hit.clone());
-                        } else {
-                            self.selected_shapes.clear();
-                            self.selected_shapes.insert(hit.clone());
-                        }
-                        self.selected_layer = Some(hit.layer);
-                        drag = true;
+            if node_editing {
+                self.dragging_shape = false;
+                if let Some(position) = origin {
+                    if let Some(node) = self.node_at(position, area) {
+                        let world = self.view.screen_to_world(area, position);
+                        self.begin_node_drag(node, world);
                     }
                 }
-                if drag {
-                    self.push_selection_undo();
-                    self.dragging_shape = true;
-                } else {
-                    self.dragging_shape = false;
+            } else {
+                let mut handle_started = false;
+                if let Some(position) = origin {
+                    if let Some(handle) = self.selection_handle_at(position, area) {
+                        let world = self.view.screen_to_world(area, position);
+                        self.begin_handle_drag(handle, world);
+                        handle_started = true;
+                    }
+                }
+                if !handle_started {
+                    let world = origin.map(|position| self.view.screen_to_world(area, position));
+                    let mut drag = false;
+                    if let Some(world) = world {
+                        if self.press_on_selection(world) {
+                            drag = true;
+                        } else if let Some(hit) = self.hit_test(world) {
+                            if additive {
+                                self.selected_shapes.insert(hit.clone());
+                            } else {
+                                self.selected_shapes.clear();
+                                self.selected_shapes.insert(hit.clone());
+                            }
+                            self.selected_layer = Some(hit.layer);
+                            drag = true;
+                        }
+                    }
+                    if drag {
+                        self.push_selection_undo();
+                        self.dragging_shape = true;
+                    } else {
+                        self.dragging_shape = false;
+                    }
                 }
             }
         }
@@ -2253,6 +2454,9 @@ impl OrleansApp {
                 };
                 self.set_status(format!("{action} {count} shape(s)"), false);
             }
+            if self.node_drag.take().is_some() {
+                self.set_status("moved node", false);
+            }
         }
 
         if response.dragged_by(egui::PointerButton::Secondary)
@@ -2260,7 +2464,12 @@ impl OrleansApp {
         {
             self.view.pan(response.drag_delta());
         } else if response.dragged_by(egui::PointerButton::Primary) {
-            if self.active_handle.is_some() {
+            if self.node_drag.is_some() {
+                if let Some(position) = response.interact_pointer_pos() {
+                    let world = self.view.screen_to_world(area, position);
+                    self.update_node_drag(world);
+                }
+            } else if self.active_handle.is_some() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let world = self.view.screen_to_world(area, position);
                     self.update_handle_drag(world);
@@ -2275,7 +2484,11 @@ impl OrleansApp {
         }
 
         if let Some(position) = response.hover_pos() {
-            if let Some(handle) = self.selection_handle_at(position, area) {
+            if node_editing {
+                if self.node_at(position, area).is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+            } else if let Some(handle) = self.selection_handle_at(position, area) {
                 let icon = match handle {
                     Handle::Rotate => egui::CursorIcon::Crosshair,
                     Handle::Scale(HandleCorner::TopLeft | HandleCorner::BottomRight) => {
@@ -2491,63 +2704,112 @@ impl OrleansApp {
                 }
             }
 
-            let bounds = shape.bounds();
-            let rect = Rect::from_two_pos(
-                self.view
-                    .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
-                self.view
-                    .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
-            )
-            .expand(4.0);
-            painter.rect_stroke(
-                rect,
-                0.0,
-                Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
-                StrokeKind::Inside,
+            if self.node_edit.is_none() {
+                let bounds = shape.bounds();
+                let rect = Rect::from_two_pos(
+                    self.view
+                        .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
+                    self.view
+                        .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
+                )
+                .expand(4.0);
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+
+        if self.node_edit.is_none() {
+            if let Some(bounds) = self.selection_bounds() {
+                let rect = Rect::from_two_pos(
+                    self.view
+                        .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
+                    self.view
+                        .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
+                );
+                painter.rect_stroke(
+                    rect.expand(4.0),
+                    0.0,
+                    Stroke::new(1.0, Color32::from_rgb(255, 230, 150)),
+                    StrokeKind::Inside,
+                );
+
+                let handles = selection_handle_positions(rect);
+                let rotate = handles[0].1;
+                painter.line_segment(
+                    [Pos2::new(rect.center().x, rect.top()), rotate],
+                    Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+                );
+                for (handle, position) in handles {
+                    match handle {
+                        Handle::Rotate => {
+                            painter.circle_filled(position, 5.0, Color32::from_rgb(255, 225, 120));
+                            painter.circle_stroke(
+                                position,
+                                5.0,
+                                Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                            );
+                        }
+                        Handle::Scale(_) => {
+                            let square = Rect::from_center_size(position, egui::vec2(8.0, 8.0));
+                            painter.rect_filled(square, 1.0, Color32::from_rgb(255, 232, 140));
+                            painter.rect_stroke(
+                                square,
+                                1.0,
+                                Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                                StrokeKind::Inside,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_nodes(&self, painter: &egui::Painter, area: Rect) {
+        let Some(shape) = self.node_shape() else {
+            return;
+        };
+
+        for (start, end) in nodes::control_links(&shape.path) {
+            painter.line_segment(
+                [
+                    self.view.world_to_screen(area, start),
+                    self.view.world_to_screen(area, end),
+                ],
+                Stroke::new(1.0, Color32::from_rgb(120, 110, 70)),
             );
         }
 
-        if let Some(bounds) = self.selection_bounds() {
-            let rect = Rect::from_two_pos(
-                self.view
-                    .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
-                self.view
-                    .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
-            );
-            painter.rect_stroke(
-                rect.expand(4.0),
-                0.0,
-                Stroke::new(1.0, Color32::from_rgb(255, 230, 150)),
-                StrokeKind::Inside,
-            );
+        let path_nodes = nodes::nodes(&shape.path);
+        for node in &path_nodes {
+            let position = self.view.world_to_screen(area, node.point);
+            if node.is_anchor() {
+                let square = Rect::from_center_size(position, egui::vec2(8.0, 8.0));
+                painter.rect_filled(square, 1.0, Color32::from_rgb(255, 232, 140));
+                painter.rect_stroke(
+                    square,
+                    1.0,
+                    Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                    StrokeKind::Inside,
+                );
+            } else {
+                painter.circle_filled(position, 3.5, Color32::from_rgb(35, 35, 35));
+                painter.circle_stroke(
+                    position,
+                    3.5,
+                    Stroke::new(1.0, Color32::from_rgb(230, 220, 160)),
+                );
+            }
+        }
 
-            let handles = selection_handle_positions(rect);
-            let rotate = handles[0].1;
-            painter.line_segment(
-                [Pos2::new(rect.center().x, rect.top()), rotate],
-                Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
-            );
-            for (handle, position) in handles {
-                match handle {
-                    Handle::Rotate => {
-                        painter.circle_filled(position, 5.0, Color32::from_rgb(255, 225, 120));
-                        painter.circle_stroke(
-                            position,
-                            5.0,
-                            Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
-                        );
-                    }
-                    Handle::Scale(_) => {
-                        let square = Rect::from_center_size(position, egui::vec2(8.0, 8.0));
-                        painter.rect_filled(square, 1.0, Color32::from_rgb(255, 232, 140));
-                        painter.rect_stroke(
-                            square,
-                            1.0,
-                            Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
-                            StrokeKind::Inside,
-                        );
-                    }
-                }
+        if let Some(selected) = self.selected_node {
+            if let Some(node) = path_nodes.iter().find(|node| node.node == selected) {
+                let position = self.view.world_to_screen(area, node.point);
+                painter.circle_stroke(position, 7.0, Stroke::new(2.0, Color32::WHITE));
             }
         }
     }
@@ -2738,6 +3000,7 @@ impl eframe::App for OrleansApp {
             self.dirty = false;
         }
 
+        let node_editing = self.node_edit.is_some();
         let mut action: Option<Action> = None;
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(egui::Key::O) {
@@ -2757,6 +3020,9 @@ impl eframe::App for OrleansApp {
             }
             if i.modifiers.command && i.key_pressed(egui::Key::Enter) {
                 action = Some(Action::Send);
+            }
+            if node_editing && i.key_pressed(egui::Key::Escape) {
+                action = Some(Action::ExitNodes);
             }
         });
 
@@ -2780,6 +3046,7 @@ impl eframe::App for OrleansApp {
             Some(Action::Export) => self.export(),
             Some(Action::SaveProject) => self.save_project(),
             Some(Action::Undo) => self.undo_shape_move(),
+            Some(Action::ExitNodes) => self.exit_node_edit(),
             Some(Action::Reload) => {
                 if let Some(path) = self.project_path.clone() {
                     self.load_project(path);

@@ -32,7 +32,7 @@ was decompiled or copied.
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | Canvas: selection, drag-move, interactive scale/rotate handles, undo | ✅ |
-| Project save/load (`.orleans`, embedded SVG + layer/job settings) | ✅ |
+| Project save/load (`.orleans`, embedded SVG + settings/path edits) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
@@ -40,11 +40,12 @@ was decompiled or copied.
 | GUI jog (X/Y) and work zero: temporary `G92` or stored `G54` | ✅ |
 | Controller settings editor (`$32`, `$30`, `$22`, raw `$$`) | ✅ |
 | GUI pause/resume (M4 + `$32=1`; framing always) | ✅ |
-| Node editing | ❌ |
+| Node editing: drag anchors and Bézier controls | ✅ |
+| Insert/delete nodes, snapping | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-79 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+89 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -125,7 +126,8 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   jobs select G54. The position readout shows `WPos` when the controller
   reports it, otherwise `MPos`;
 * **Save project…** (`Ctrl+S`) writes a self-contained `.orleans` JSON file
-  with the SVG, layer parameters, job settings and per-shape transforms.
+  with the SVG, layer parameters, job settings, per-shape transforms and
+  node-edited paths.
   **Open…** accepts both SVG and `.orleans`; **Reload** reloads whichever is
   current;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
@@ -139,8 +141,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   any selected shape to move the whole selection. Drag a corner handle to
   scale uniformly around the opposite corner, or drag the circular handle above
   the box to rotate around the selection centre. The **Selection** panel still
-  offers numeric Move, uniform Scale and Rotate. **Undo**/`Ctrl+Z` reverses the
-  last transform; right-drag pans;
+  offers numeric Move, uniform Scale and Rotate. With one shape selected,
+  **Edit nodes** shows its anchors and Bézier controls; drag them to reshape
+  the path, then use **Done** or `Esc` to leave node mode. **Undo**/`Ctrl+Z`
+  reverses the last transform or node edit; right-drag pans;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
   when the controller is connected, idle and the laser is off; `Ctrl+Enter`
@@ -253,12 +257,14 @@ concept of a line and some bridges emit negotiation on connect.
 * The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
   assumes work zero coincides with machine zero.
 * Project layer settings, Show/Cut state and cut order are matched by layer
-  index; shape transforms are matched by layer index plus shape id.
-  If the SVG's colour grouping changes after saving, check that the settings
-  landed on the right layers.
+  index; shape transforms and node-edited paths are matched by layer index
+  plus shape id. If the SVG's colour grouping changes after saving, check that
+  the settings landed on the right layers.
 * Interactive handles scale uniformly around the opposite corner and rotate
-  around the selection centre. There is no non-uniform/skewed scaling or node
-  editing yet. Undo covers shape transforms only.
+  around the selection centre. There is no non-uniform/skewed scaling.
+* Node editing moves existing anchors and Bézier controls, including the
+  controls attached to a moved anchor. It cannot insert or delete nodes or snap
+  them to a grid yet. Undo covers transforms and node edits.
 * Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
   Framing uses a fixed 3000 mm/min and the design bounds, with no margin
   setting.
@@ -270,8 +276,8 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **Finish the editor** — node editing and job history for the streaming
-   panel.
+1. **Finish the editor** — insert/delete nodes, snapping, and job history for
+   the streaming panel.
 2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.

@@ -2,7 +2,7 @@
 //!
 //! This is a clean-room format; it does not read or write LightBurn files.
 //! Geometry comes from the SVG, while the project stores the per-layer cutting
-//! parameters and the job-level options.
+//! parameters, the job-level options, shape transforms and node-edited paths.
 
 use orleans_core::{CutParams, Document, LayerMode};
 use orleans_driver::gcode::LaserMode;
@@ -26,6 +26,17 @@ pub struct ProjectFile {
     /// Affine edits applied to individual shapes in the editor.
     #[serde(default)]
     pub transforms: Vec<ShapeTransform>,
+    /// Complete path overrides for shapes edited with the node editor.
+    #[serde(default)]
+    pub edited_paths: Vec<EditedPath>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EditedPath {
+    pub layer: usize,
+    pub shape: String,
+    /// SVG path data in document coordinates.
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,6 +112,7 @@ impl ProjectFile {
             .to_owned(),
             max_s,
             transforms,
+            edited_paths: Vec::new(),
         }
     }
 
@@ -157,6 +169,30 @@ impl ProjectFile {
                         .unwrap_or_else(|| kurbo::Affine::translate((transform.dx, transform.dy)));
                     shape.path.apply_affine(affine);
                 }
+            }
+        }
+
+        // Node-edited paths are stored in final document coordinates. Apply
+        // them after transforms so a reload restores the exact edited shape.
+        for edited in &self.edited_paths {
+            let Ok(path) = kurbo::BezPath::from_svg(&edited.path) else {
+                continue;
+            };
+            if path.elements().is_empty() {
+                continue;
+            }
+            if let Some(shape) = doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == edited.layer)
+                .and_then(|layer| {
+                    layer
+                        .shapes
+                        .iter_mut()
+                        .find(|shape| shape.id == edited.shape)
+                })
+            {
+                shape.path = path;
             }
         }
     }
@@ -252,6 +288,88 @@ mod tests {
     }
 
     #[test]
+    fn old_projects_without_edited_paths_still_load() {
+        let json = r#"{
+            "format": 1,
+            "svg": "<svg/>",
+            "layers": [],
+            "kerf": 0.0,
+            "optimize": true,
+            "laser_mode": "M4",
+            "max_s": 1000
+        }"#;
+        let project: ProjectFile = serde_json::from_str(json).expect("deserialise");
+        assert!(project.transforms.is_empty());
+        assert!(project.edited_paths.is_empty());
+    }
+
+    #[test]
+    fn json_round_trip_keeps_edited_paths() {
+        let mut project = ProjectFile::new(
+            "<svg/>".to_owned(),
+            None,
+            &Document::new(100.0, 100.0),
+            0.0,
+            true,
+            LaserMode::M4,
+            1000,
+            Vec::new(),
+        );
+        project.edited_paths = vec![EditedPath {
+            layer: 3,
+            shape: "path-7".to_owned(),
+            path: "M0,0 L10,10 Z".to_owned(),
+        }];
+        let json = serde_json::to_string(&project).expect("serialise");
+        let back: ProjectFile = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back.edited_paths.len(), 1);
+        assert_eq!(back.edited_paths[0].layer, 3);
+        assert_eq!(back.edited_paths[0].shape, "path-7");
+        assert_eq!(back.edited_paths[0].path, "M0,0 L10,10 Z");
+    }
+
+    #[test]
+    fn edited_paths_override_geometry_after_transforms() {
+        use kurbo::{Line, Shape as _};
+        let mut doc = Document::new(100.0, 100.0);
+        let mut layer = Layer::new(0, "C00", [0, 0, 0], CutParams::default());
+        layer.shapes.push(Shape::new(
+            "line",
+            Line::new((0.0, 0.0), (10.0, 0.0)).into_path(0.01),
+            false,
+        ));
+        doc.layers.push(layer);
+        let project = ProjectFile {
+            format: FORMAT,
+            svg: "<svg/>".to_owned(),
+            source: None,
+            layers: Vec::new(),
+            kerf: 0.0,
+            optimize: true,
+            laser_mode: "M4".to_owned(),
+            max_s: 1000,
+            transforms: vec![ShapeTransform {
+                layer: 0,
+                shape: "line".to_owned(),
+                matrix: None,
+                dx: 5.0,
+                dy: 0.0,
+            }],
+            edited_paths: vec![EditedPath {
+                layer: 0,
+                shape: "line".to_owned(),
+                path: "M0,0 L0,20".to_owned(),
+            }],
+        };
+        project.apply(&mut doc);
+        let bounds = doc.layers[0].shapes[0].path.bounding_box();
+        assert!((bounds.x0 - 0.0).abs() < 1e-9);
+        assert!((bounds.x1 - 0.0).abs() < 1e-9);
+        assert!((bounds.y0 - 0.0).abs() < 1e-9);
+        assert!((bounds.y1 - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn apply_matrix_transforms() {
         use kurbo::{Line, Shape as _};
         let mut doc = Document::new(100.0, 100.0);
@@ -278,6 +396,7 @@ mod tests {
                 dx: 0.0,
                 dy: 0.0,
             }],
+            edited_paths: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -311,6 +430,7 @@ mod tests {
                 dx: 5.0,
                 dy: 2.0,
             }],
+            edited_paths: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -347,6 +467,7 @@ mod tests {
             laser_mode: "M4".to_owned(),
             max_s: 1000,
             transforms: Vec::new(),
+            edited_paths: Vec::new(),
         };
         project.apply(&mut doc);
         assert_eq!(
@@ -383,6 +504,7 @@ mod tests {
             laser_mode: "M3".to_owned(),
             max_s: 500,
             transforms: Vec::new(),
+            edited_paths: Vec::new(),
         };
         project.apply(&mut doc);
         let layer = &doc.layers[0];

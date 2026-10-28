@@ -1,11 +1,12 @@
 //! Desktop editor for orleans.
 //!
-//! Milestone 1 is a viewer with layer settings: import an SVG, inspect the
-//! geometry, tune speed/power/passes per layer, see live job statistics and
-//! export G-code. Streaming from the GUI comes next.
+//! Imports SVG designs, keeps per-layer cutting parameters, edits geometry on
+//! the canvas (selection transforms and path nodes), previews the planned job
+//! and streams it to a GRBL controller.
 
 mod app;
 mod machine;
+mod nodes;
 mod preview;
 mod project;
 mod viewport;

@@ -3,7 +3,7 @@
 //! Flattening every frame would be wasteful, so the curves are converted to
 //! polylines once per import. Zooming and panning then only transform points.
 
-use kurbo::Point;
+use kurbo::{BezPath, Point};
 use orleans_core::Document;
 use orleans_geom::flatten_path;
 
@@ -44,14 +44,7 @@ impl Preview {
                     .iter()
                     .map(|shape| ShapePreview {
                         id: shape.id.clone(),
-                        contours: flatten_path(&shape.path, tolerance)
-                            .into_iter()
-                            .filter(|contour| contour.points.len() >= 2)
-                            .map(|contour| PreviewContour {
-                                points: contour.points,
-                                closed: contour.closed,
-                            })
-                            .collect(),
+                        contours: contours(&shape.path, tolerance),
                     })
                     .collect(),
             })
@@ -86,6 +79,26 @@ impl Preview {
             .iter_mut()
             .find(|shape| shape.id == id)
     }
+
+    /// Re-flatten one edited shape without rebuilding the rest of the preview.
+    pub fn update_shape(&mut self, layer: usize, id: &str, path: &BezPath, tolerance: f64) -> bool {
+        let Some(shape) = self.shape_mut(layer, id) else {
+            return false;
+        };
+        shape.contours = contours(path, tolerance);
+        true
+    }
+}
+
+fn contours(path: &BezPath, tolerance: f64) -> Vec<PreviewContour> {
+    flatten_path(path, tolerance)
+        .into_iter()
+        .filter(|contour| contour.points.len() >= 2)
+        .map(|contour| PreviewContour {
+            points: contour.points,
+            closed: contour.closed,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -111,5 +124,26 @@ mod tests {
             preview.shape(0, "line").unwrap().contours[0].points.len(),
             2
         );
+    }
+
+    #[test]
+    fn update_shape_refreshes_only_the_edited_path() {
+        use kurbo::Line;
+        let mut doc = Document::new(100.0, 100.0);
+        let mut layer = Layer::new(0, "C00", [0, 0, 0], CutParams::default());
+        layer.shapes.push(Shape::new(
+            "line",
+            Line::new((0.0, 0.0), (10.0, 0.0)).into_path(0.01),
+            false,
+        ));
+        doc.layers.push(layer);
+        let mut preview = Preview::build(&doc, 0.05);
+
+        let replacement: BezPath = Line::new((0.0, 0.0), (0.0, 20.0)).into_path(0.01);
+        assert!(preview.update_shape(0, "line", &replacement, 0.05));
+        let points = &preview.shape(0, "line").unwrap().contours[0].points;
+        assert!((points[1].x - 0.0).abs() < 1e-9);
+        assert!((points[1].y - 20.0).abs() < 1e-9);
+        assert!(!preview.update_shape(0, "missing", &replacement, 0.05));
     }
 }
