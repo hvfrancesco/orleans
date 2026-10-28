@@ -199,6 +199,16 @@ impl<T: Transport> GrblClient<T> {
         self.soft_reset()
     }
 
+    /// Write a command without waiting for its `ok`.
+    ///
+    /// Useful for long-running system commands (homing) and for UIs that must
+    /// stay responsive while the controller works. The eventual `ok` is read
+    /// and ignored by the next status poll.
+    pub fn write_command(&mut self, line: &str) -> Result<(), DriverError> {
+        self.transport.write_line(line)?;
+        Ok(())
+    }
+
     /// Send a single command and wait for its `ok`.
     pub fn send(&mut self, line: &str) -> Result<(), DriverError> {
         self.transport.write_line(line)?;

@@ -20,7 +20,7 @@ use clap::{Args, Parser, Subcommand};
 use kurbo::Point;
 use orleans_core::Document;
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
-use orleans_driver::net::{TcpTransport, TELNET_PORT};
+use orleans_driver::net::{parse_endpoint, TcpTransport};
 use orleans_driver::{GrblClient, GrblConfig, SimulatedGrbl, Transport};
 use orleans_import::{import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
@@ -43,6 +43,9 @@ enum Command {
     Gui {
         /// Design to open at startup.
         input: Option<PathBuf>,
+        /// Machine endpoint to prefill, e.g. tcp://192.168.1.10.
+        #[arg(long)]
+        url: Option<String>,
     },
     /// Inspect a design and the job it would produce.
     Info(Common),
@@ -200,7 +203,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         #[cfg(feature = "gui")]
-        Command::Gui { input } => orleans_ui::run(input),
+        Command::Gui { input, url } => orleans_ui::run(input, url),
         Command::Info(cmd) => info(&cmd),
         Command::Gcode {
             common,
@@ -478,7 +481,7 @@ fn open_transport(
     match (url, port) {
         (Some(_), Some(_)) => bail!("use either --url or --port, not both"),
         (Some(url), None) => {
-            let (host, port) = parse_tcp_url(url)?;
+            let (host, port) = parse_endpoint(url).map_err(anyhow::Error::msg)?;
             eprintln!("link: tcp://{host}:{port}");
             let link = TcpTransport::connect(&host, port, Duration::from_secs(5))
                 .with_context(|| format!("connecting to {host}:{port}"))?;
@@ -493,52 +496,5 @@ fn open_transport(
         (None, None) => {
             bail!("no connection given: pass --url tcp://HOST, --port /dev/ttyUSB0, or --mock")
         }
-    }
-}
-
-/// Parse `tcp://host[:port]`, `telnet://host[:port]`, or a bare `host[:port]`.
-/// Telnet's port 23 is the default.
-fn parse_tcp_url(input: &str) -> Result<(String, u16)> {
-    let raw = input.trim();
-    let raw = raw
-        .strip_prefix("tcp://")
-        .or_else(|| raw.strip_prefix("telnet://"))
-        .unwrap_or(raw)
-        .trim_end_matches('/');
-    if raw.is_empty() {
-        bail!("empty network address");
-    }
-    if let Some((host, port)) = raw.rsplit_once(':') {
-        let port: u16 = port
-            .parse()
-            .with_context(|| format!("invalid port in {input:?}"))?;
-        if host.is_empty() {
-            bail!("missing host in {input:?}");
-        }
-        return Ok((host.to_owned(), port));
-    }
-    Ok((raw.to_owned(), TELNET_PORT))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_tcp_urls() {
-        assert_eq!(
-            parse_tcp_url("tcp://192.168.1.50:23").unwrap(),
-            ("192.168.1.50".to_owned(), 23)
-        );
-        assert_eq!(
-            parse_tcp_url("192.168.1.50").unwrap(),
-            ("192.168.1.50".to_owned(), TELNET_PORT)
-        );
-        assert_eq!(
-            parse_tcp_url("telnet://laser.local:2323/").unwrap(),
-            ("laser.local".to_owned(), 2323)
-        );
-        assert!(parse_tcp_url("tcp://host:not-a-port").is_err());
-        assert!(parse_tcp_url("tcp://:23").is_err());
     }
 }

@@ -30,11 +30,12 @@ was decompiled or copied.
 | DXF / PDF / AI import | ❌ |
 | Raster engraving, dithering, fill/hatch | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
+| GUI machine control: connect, status, home, unlock, stop | ✅ |
 | Selection, transforms, node editing | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-53 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+57 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -46,7 +47,7 @@ from source).
 cargo build --release
 
 # Open the visual editor (the SVG is optional)
-cargo run -q -- gui examples/coaster.svg
+cargo run -q -- gui examples/coaster.svg --url tcp://192.168.1.10
 
 # Inspect a design: size, layers, cut length, time estimate
 cargo run -q -- info examples/coaster.svg
@@ -94,12 +95,17 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   panel and the job statistics update immediately;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel;
 * **Export G-code…** writes a `.gcode` file of your choosing;
-* `Ctrl+O` opens, `Ctrl+E` exports, and dropping an SVG onto the window loads it.
+* `Ctrl+O` opens, `Ctrl+E` exports, and dropping an SVG onto the window loads it;
+* the **Machine** panel connects over Telnet, shows the live GRBL state,
+  position, feed and `S` value, and offers **Home ($H)**, **Unlock ($X)** and
+  **Stop** (feed hold + soft reset). Homing asks for confirmation and is only
+  enabled when the controller is idle or in alarm, with the laser off.
 
 The canvas shows the design geometry; kerf compensation is applied to the
 toolpath, so it affects the exported G-code and the statistics rather than the
-outline drawing, as in LightBurn. The GUI does not stream jobs to the laser yet:
-use `orleans run` with the exported file.
+outline drawing, as in LightBurn. The GUI connects to the controller and can
+home, unlock and stop it, but it does not stream jobs yet: use `orleans run`
+from the CLI for cutting.
 
 ## Architecture
 
@@ -189,15 +195,15 @@ concept of a line and some bridges emit negotiation on connect.
 * Text in SVG needs a font database wired into `usvg::Options`; without it,
   text elements are dropped.
 * The simulator is protocol-level, not a motion model.
-* The GUI is a viewer with layer settings for now: no selection, transforms or
-  node editing, and no job control yet.
+* The GUI is a viewer with layer settings and machine control: no selection,
+  transforms or node editing, and it cannot stream a job yet.
 * Large designs are redrawn as polylines every frame; a spatial index and
   level-of-detail rendering will be needed for very complex files.
 
 ## Roadmap
 
 1. **Finish the editor** — selection, transforms, node editing, undo, then
-   send-to-laser from the GUI with a confirmation step, progress and pause.
+   send jobs from the GUI with a confirmation step, progress and pause.
 2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.

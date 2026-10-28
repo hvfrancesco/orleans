@@ -1,6 +1,7 @@
 //! The main application window: toolbar, layer panel, canvas, status bar.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use kurbo::Point;
@@ -9,6 +10,7 @@ use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_import::{import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
+use crate::machine::{Event as MachineEvent, Machine, Status as MachineStatus};
 use crate::preview::Preview;
 use crate::viewport::Viewport;
 
@@ -36,6 +38,13 @@ impl Status {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkState {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     Open,
     Export,
@@ -57,10 +66,22 @@ pub struct OrleansApp {
     fit_pending: bool,
     show_grid: bool,
     show_travel: bool,
+
+    endpoint: String,
+    machine: Machine,
+    link: LinkState,
+    machine_status: Option<MachineStatus>,
+    /// Set right after asking for homing, to debounce the button.
+    home_pending_until: Option<Instant>,
+    confirm_home: bool,
 }
 
 impl OrleansApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial: Option<PathBuf>,
+        endpoint: Option<String>,
+    ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut app = Self {
             doc: Document::new(100.0, 100.0),
@@ -75,6 +96,12 @@ impl OrleansApp {
             fit_pending: true,
             show_grid: true,
             show_travel: false,
+            endpoint: endpoint.unwrap_or_default(),
+            machine: Machine::spawn(),
+            link: LinkState::Disconnected,
+            machine_status: None,
+            home_pending_until: None,
+            confirm_home: false,
         };
         if let Some(path) = initial {
             app.load(path);
@@ -119,6 +146,238 @@ impl OrleansApp {
 
     fn replan(&mut self) {
         self.job = plan(&self.doc, &self.plan_opts);
+    }
+
+    fn set_status(&mut self, text: impl Into<String>, error: bool) {
+        self.status = if error {
+            Status::error(text)
+        } else {
+            Status::ok(text)
+        };
+    }
+
+    fn pump_machine(&mut self, ctx: &egui::Context) {
+        while let Some(event) = self.machine.try_recv() {
+            match event {
+                MachineEvent::Connecting(endpoint) => {
+                    self.link = LinkState::Connecting;
+                    self.machine_status = None;
+                    self.set_status(format!("connecting to {endpoint}…"), false);
+                }
+                MachineEvent::Connected(endpoint) => {
+                    self.link = LinkState::Connected;
+                    self.set_status(format!("connected to {endpoint}"), false);
+                }
+                MachineEvent::Disconnected(reason) => {
+                    self.link = LinkState::Disconnected;
+                    self.machine_status = None;
+                    self.home_pending_until = None;
+                    match reason {
+                        Some(reason) => self.set_status(reason, true),
+                        None => self.set_status("disconnected", false),
+                    }
+                }
+                MachineEvent::Status(line) => {
+                    if self.link == LinkState::Connected {
+                        if let Some(status) = MachineStatus::parse(&line) {
+                            self.machine_status = Some(status);
+                        }
+                    }
+                }
+                MachineEvent::Message { text, error } => self.set_status(text, error),
+            }
+        }
+        if self.link != LinkState::Disconnected {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn begin_connect(&mut self) {
+        let endpoint = self.endpoint.trim().to_owned();
+        if endpoint.is_empty() {
+            self.set_status("enter an endpoint, e.g. tcp://192.168.1.10", true);
+            return;
+        }
+        self.endpoint = endpoint.clone();
+        if self.machine.connect(&endpoint) {
+            self.link = LinkState::Connecting;
+            self.machine_status = None;
+            self.confirm_home = false;
+            self.set_status(format!("connecting to {endpoint}…"), false);
+        } else {
+            self.set_status("machine thread stopped", true);
+        }
+    }
+
+    fn machine_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::right("machine")
+            .resizable(true)
+            .default_size(300.0)
+            .min_size(260.0)
+            .max_size(420.0)
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.heading("Machine");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (text, color) = match self.link {
+                            LinkState::Connected => ("connected", Color32::from_rgb(120, 200, 130)),
+                            LinkState::Connecting => {
+                                ("connecting", Color32::from_rgb(230, 190, 90))
+                            }
+                            LinkState::Disconnected => ("offline", Color32::from_gray(140)),
+                        };
+                        ui.label(RichText::new(text).color(color).small());
+                    });
+                });
+                ui.add_space(4.0);
+
+                ui.label("Endpoint");
+                let field = ui.add_enabled(
+                    self.link == LinkState::Disconnected,
+                    egui::TextEdit::singleline(&mut self.endpoint)
+                        .hint_text("tcp://192.168.1.10")
+                        .desired_width(f32::INFINITY),
+                );
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                ui.horizontal(|ui| match self.link {
+                    LinkState::Disconnected => {
+                        if ui.button("Connect").clicked() || enter {
+                            self.begin_connect();
+                        }
+                    }
+                    LinkState::Connecting => {
+                        ui.spinner();
+                        ui.label("Connecting…");
+                    }
+                    LinkState::Connected => {
+                        if ui.button("Disconnect").clicked() {
+                            let _ = self.machine.disconnect();
+                            self.link = LinkState::Disconnected;
+                            self.machine_status = None;
+                            self.set_status("disconnected", false);
+                        }
+                    }
+                });
+
+                ui.separator();
+                ui.heading("Status");
+                match &self.machine_status {
+                    Some(status) => {
+                        ui.horizontal(|ui| {
+                            ui.label("State");
+                            ui.colored_label(
+                                state_color(&status.state),
+                                RichText::new(&status.state).strong(),
+                            );
+                        });
+                        if let Some([x, y, z]) = status.mpos {
+                            ui.monospace(format!("MPos  X {x:8.3}  Y {y:8.3}  Z {z:8.3}"));
+                        }
+                        if status.feed.is_some() || status.spindle.is_some() {
+                            ui.label(format!(
+                                "F {} mm/min   S {}",
+                                status.feed.unwrap_or(0),
+                                status.spindle.unwrap_or(0)
+                            ));
+                        }
+                        ui.add_space(2.0);
+                        ui.label(RichText::new(&status.raw).small().weak().monospace());
+                    }
+                    None => {
+                        let text = if self.link == LinkState::Connecting {
+                            "waiting for status…"
+                        } else {
+                            "not connected"
+                        };
+                        ui.label(RichText::new(text).weak());
+                    }
+                }
+
+                ui.separator();
+                ui.heading("Control");
+                let connected = self.link == LinkState::Connected;
+                let pending = self
+                    .home_pending_until
+                    .map(|until| until > Instant::now())
+                    .unwrap_or(false);
+                let can_home = connected
+                    && !pending
+                    && self
+                        .machine_status
+                        .as_ref()
+                        .map(|status| status.can_home())
+                        .unwrap_or(false);
+
+                if ui
+                    .add_enabled(can_home, egui::Button::new("Home ($H)"))
+                    .on_hover_text(
+                        "Move the head to the limit switches. \
+                         Enabled when the controller is idle or in alarm.",
+                    )
+                    .clicked()
+                {
+                    self.confirm_home = true;
+                }
+                if ui
+                    .add_enabled(connected, egui::Button::new("Unlock ($X)"))
+                    .on_hover_text("Clear a GRBL alarm.")
+                    .clicked()
+                    && !self.machine.unlock()
+                {
+                    self.set_status("machine thread stopped", true);
+                }
+                ui.add_space(6.0);
+                let stop = egui::Button::new(RichText::new("Stop").strong().color(Color32::WHITE))
+                    .fill(Color32::from_rgb(145, 40, 40));
+                if ui
+                    .add_enabled(connected, stop)
+                    .on_hover_text("Feed hold and soft reset; switches the laser off.")
+                    .clicked()
+                {
+                    if !self.machine.stop() {
+                        self.set_status("machine thread stopped", true);
+                    }
+                    self.home_pending_until = None;
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Homing moves the head. Clear the bed first.")
+                        .small()
+                        .weak(),
+                );
+            });
+    }
+
+    fn home_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_home {
+            return;
+        }
+        egui::Window::new("Home the machine?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    "The head will move to the limit switches. Make sure the machine is clear.",
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Home").clicked() {
+                        if self.machine.home() {
+                            self.home_pending_until = Some(Instant::now() + Duration::from_secs(3));
+                            self.set_status("homing…", false);
+                        } else {
+                            self.set_status("machine thread stopped", true);
+                        }
+                        self.confirm_home = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_home = false;
+                    }
+                });
+            });
     }
 
     fn export(&mut self) {
@@ -346,15 +605,13 @@ impl OrleansApp {
                     ui.separator();
                     ui.label(format!("{:.1} px/mm", self.view.zoom));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let color = if self.status.error {
-                        Color32::from_rgb(235, 120, 110)
-                    } else {
-                        Color32::from_gray(160)
-                    };
-                    ui.label(RichText::new(&self.status.text).color(color));
-                });
             });
+            let color = if self.status.error {
+                Color32::from_rgb(235, 120, 110)
+            } else {
+                Color32::from_gray(170)
+            };
+            ui.label(RichText::new(&self.status.text).color(color).small());
             ui.add_space(3.0);
         });
     }
@@ -528,6 +785,20 @@ impl OrleansApp {
 /// Layer colours come from the SVG, and black is common. On a dark canvas the
 /// original colour would be invisible, so lift dark colours toward white while
 /// keeping their hue. Bright or saturated colours are left untouched.
+fn state_color(state: &str) -> Color32 {
+    if state.starts_with("Alarm") || state.starts_with("Door") {
+        Color32::from_rgb(235, 100, 90)
+    } else if state == "Run" || state == "Jog" {
+        Color32::from_rgb(230, 190, 90)
+    } else if state == "Home" {
+        Color32::from_rgb(120, 170, 240)
+    } else if state == "Idle" {
+        Color32::from_rgb(120, 200, 130)
+    } else {
+        Color32::from_gray(180)
+    }
+}
+
 fn display_color(rgb: [u8; 3]) -> Color32 {
     let r = f32::from(rgb[0]);
     let g = f32::from(rgb[1]);
@@ -574,6 +845,7 @@ fn format_duration(seconds: f64) -> String {
 impl eframe::App for OrleansApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.pump_machine(&ctx);
 
         if self.dirty {
             self.replan();
@@ -595,6 +867,7 @@ impl eframe::App for OrleansApp {
 
         self.toolbar(ui, &mut action);
         self.side_panel(ui);
+        self.machine_panel(ui);
         self.bottom_bar(ui);
         self.canvas_panel(ui);
 
@@ -630,6 +903,8 @@ impl eframe::App for OrleansApp {
         if let Some(path) = dropped.into_iter().next() {
             self.load(path);
         }
+
+        self.home_dialog(&ctx);
     }
 }
 

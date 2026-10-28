@@ -15,6 +15,30 @@ use crate::transport::Transport;
 /// Default Telnet port used by GRBL WiFi bridges.
 pub const TELNET_PORT: u16 = 23;
 
+/// Parse `tcp://host[:port]`, `telnet://host[:port]`, or a bare `host[:port]`.
+/// Telnet's port 23 is the default.
+pub fn parse_endpoint(input: &str) -> Result<(String, u16), String> {
+    let raw = input.trim();
+    let raw = raw
+        .strip_prefix("tcp://")
+        .or_else(|| raw.strip_prefix("telnet://"))
+        .unwrap_or(raw)
+        .trim_end_matches('/');
+    if raw.is_empty() {
+        return Err("empty network address".to_owned());
+    }
+    if let Some((host, port)) = raw.rsplit_once(':') {
+        let port: u16 = port
+            .parse()
+            .map_err(|_| format!("invalid port in {input:?}"))?;
+        if host.is_empty() {
+            return Err(format!("missing host in {input:?}"));
+        }
+        return Ok((host.to_owned(), port));
+    }
+    Ok((raw.to_owned(), TELNET_PORT))
+}
+
 pub struct TcpTransport {
     stream: TcpStream,
     /// Bytes received but not yet terminated by a newline.
@@ -169,6 +193,25 @@ mod tests {
         filter.feed(&[0xFF, 251, 1, b'o', b'k', b'\r', b'\n'], &mut out);
         filter.feed(&[0xFF, 254, 1, b'I', b'd', b'l', b'e'], &mut out);
         assert_eq!(out, b"ok\nIdle");
+    }
+
+    #[test]
+    fn parses_endpoints() {
+        assert_eq!(
+            parse_endpoint("tcp://192.168.1.50:23").unwrap(),
+            ("192.168.1.50".to_owned(), 23)
+        );
+        assert_eq!(
+            parse_endpoint("192.168.1.50").unwrap(),
+            ("192.168.1.50".to_owned(), TELNET_PORT)
+        );
+        assert_eq!(
+            parse_endpoint("telnet://laser.local:2323/").unwrap(),
+            ("laser.local".to_owned(), 2323)
+        );
+        assert!(parse_endpoint("tcp://host:not-a-port").is_err());
+        assert!(parse_endpoint("tcp://:23").is_err());
+        assert!(parse_endpoint("  ").is_err());
     }
 
     #[test]
