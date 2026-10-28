@@ -20,6 +20,98 @@ use crate::viewport::Viewport;
 
 const DISPLAY_TOLERANCE: f64 = 0.05;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Theme {
+    Dark,
+    Light,
+}
+
+impl Theme {
+    fn visuals(self) -> egui::Visuals {
+        match self {
+            Self::Dark => egui::Visuals::dark(),
+            Self::Light => egui::Visuals::light(),
+        }
+    }
+
+    fn is_light(self) -> bool {
+        self == Self::Light
+    }
+}
+
+/// Canvas colours that egui's own visuals do not cover.
+#[derive(Clone, Copy)]
+struct CanvasPalette {
+    background: Color32,
+    grid: Color32,
+    axis_x: Color32,
+    axis_y: Color32,
+    page: Color32,
+    travel: Color32,
+    bed_fill: Color32,
+    bed_stroke: Color32,
+    bed_text: Color32,
+    muted: Color32,
+    selection: Color32,
+    selection_bounds: Color32,
+    handle_fill: Color32,
+    handle_stroke: Color32,
+    control_link: Color32,
+    control_fill: Color32,
+    control_stroke: Color32,
+    selected_node: Color32,
+    origin: Color32,
+}
+
+impl CanvasPalette {
+    fn for_theme(theme: Theme) -> Self {
+        match theme {
+            Theme::Dark => Self {
+                background: Color32::from_gray(16),
+                grid: Color32::from_gray(34),
+                axis_x: Color32::from_rgb(110, 55, 55),
+                axis_y: Color32::from_rgb(55, 110, 55),
+                page: Color32::from_gray(90),
+                travel: Color32::from_gray(55),
+                bed_fill: Color32::from_rgba_unmultiplied(60, 100, 160, 18),
+                bed_stroke: Color32::from_rgb(75, 110, 160),
+                bed_text: Color32::from_rgb(110, 140, 180),
+                muted: Color32::from_gray(85),
+                selection: Color32::from_rgb(255, 214, 90),
+                selection_bounds: Color32::from_rgb(255, 230, 150),
+                handle_fill: Color32::from_rgb(255, 232, 140),
+                handle_stroke: Color32::from_rgb(120, 90, 30),
+                control_link: Color32::from_rgb(120, 110, 70),
+                control_fill: Color32::from_rgb(35, 35, 35),
+                control_stroke: Color32::from_rgb(230, 220, 160),
+                selected_node: Color32::WHITE,
+                origin: Color32::from_rgb(230, 190, 90),
+            },
+            Theme::Light => Self {
+                background: Color32::from_rgb(248, 248, 244),
+                grid: Color32::from_gray(224),
+                axis_x: Color32::from_rgb(190, 90, 90),
+                axis_y: Color32::from_rgb(90, 150, 90),
+                page: Color32::from_gray(150),
+                travel: Color32::from_gray(190),
+                bed_fill: Color32::from_rgba_unmultiplied(60, 100, 160, 20),
+                bed_stroke: Color32::from_rgb(70, 105, 160),
+                bed_text: Color32::from_rgb(70, 100, 145),
+                muted: Color32::from_gray(150),
+                selection: Color32::from_rgb(190, 130, 0),
+                selection_bounds: Color32::from_rgb(205, 145, 20),
+                handle_fill: Color32::WHITE,
+                handle_stroke: Color32::from_rgb(120, 90, 30),
+                control_link: Color32::from_rgb(150, 135, 90),
+                control_fill: Color32::WHITE,
+                control_stroke: Color32::from_rgb(140, 115, 45),
+                selected_node: Color32::from_rgb(30, 70, 140),
+                origin: Color32::from_rgb(180, 130, 30),
+            },
+        }
+    }
+}
+
 struct Status {
     text: String,
     error: bool,
@@ -355,6 +447,7 @@ enum Action {
 pub struct OrleansApp {
     doc: Document,
     preview: Preview,
+    theme: Theme,
     selected_layer: Option<usize>,
     selected_shapes: BTreeSet<ShapeRef>,
     groups: Vec<ShapeGroup>,
@@ -383,7 +476,7 @@ pub struct OrleansApp {
     node_snap_geometry: bool,
     edited_paths: BTreeSet<(usize, String)>,
     raster_textures: BTreeMap<usize, egui::TextureHandle>,
-    raster_texture_keys: BTreeMap<usize, (u32, u32, bool, [u8; 3])>,
+    raster_texture_keys: BTreeMap<usize, (u32, u32, bool, [u8; 4])>,
     job: Job,
     path: Option<PathBuf>,
     view: Viewport,
@@ -432,10 +525,10 @@ impl OrleansApp {
         initial: Option<PathBuf>,
         endpoint: Option<String>,
     ) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut app = Self {
             doc: Document::new(100.0, 100.0),
             preview: Preview::default(),
+            theme: Theme::Dark,
             selected_layer: None,
             selected_shapes: BTreeSet::new(),
             groups: Vec::new(),
@@ -507,10 +600,27 @@ impl OrleansApp {
             setting_max_s: 1000,
             setting_homing: false,
         };
+        app.apply_theme(&cc.egui_ctx);
         if let Some(path) = initial {
             app.open_path(path);
         }
         app
+    }
+
+    fn apply_theme(&self, ctx: &egui::Context) {
+        ctx.set_visuals(self.theme.visuals());
+    }
+
+    fn palette(&self) -> CanvasPalette {
+        CanvasPalette::for_theme(self.theme)
+    }
+
+    fn layer_paint(&self, rgb: [u8; 3]) -> Color32 {
+        layer_color(rgb, self.theme.is_light())
+    }
+
+    fn accent(&self, color: Color32) -> Color32 {
+        readable_accent(color, self.theme.is_light())
     }
 
     fn load_svg(&mut self, path: PathBuf) {
@@ -1755,14 +1865,14 @@ impl OrleansApp {
                 continue;
             };
             keep.insert(layer.index);
-            let key = (raster.width, raster.height, raster.invert, layer.color);
+            let color = self.layer_paint(layer.color);
+            let key = (raster.width, raster.height, raster.invert, color.to_array());
             if self.raster_texture_keys.get(&layer.index) == Some(&key) {
                 continue;
             }
             if raster.grayscale.len() != (raster.width * raster.height) as usize {
                 continue;
             }
-            let color = display_color(layer.color);
             let pixels = raster
                 .grayscale
                 .iter()
@@ -2221,6 +2331,7 @@ impl OrleansApp {
         else {
             return;
         };
+        let palette = self.palette();
         let corners: Vec<Pos2> = raster
             .corners()
             .iter()
@@ -2228,7 +2339,7 @@ impl OrleansApp {
             .collect();
         painter.add(egui::Shape::closed_line(
             corners.clone(),
-            Stroke::new(2.0, Color32::from_rgb(255, 230, 120)),
+            Stroke::new(2.0, palette.selection),
         ));
         let top_center = raster.local_to_world(Point::new(
             raster.x + raster.width_mm * 0.5,
@@ -2239,21 +2350,17 @@ impl OrleansApp {
             if handle == RasterHandle::Rotate {
                 painter.line_segment(
                     [top_center_screen, position],
-                    Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+                    Stroke::new(1.0, palette.selection_bounds),
                 );
-                painter.circle_filled(position, 5.0, Color32::from_rgb(255, 225, 120));
-                painter.circle_stroke(
-                    position,
-                    5.0,
-                    Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
-                );
+                painter.circle_filled(position, 5.0, palette.handle_fill);
+                painter.circle_stroke(position, 5.0, Stroke::new(1.0, palette.handle_stroke));
             } else {
                 let square = Rect::from_center_size(position, egui::vec2(8.0, 8.0));
-                painter.rect_filled(square, 1.0, Color32::from_rgb(255, 232, 140));
+                painter.rect_filled(square, 1.0, palette.handle_fill);
                 painter.rect_stroke(
                     square,
                     1.0,
-                    Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                    Stroke::new(1.0, palette.handle_stroke),
                     StrokeKind::Inside,
                 );
             }
@@ -2660,10 +2767,10 @@ impl OrleansApp {
                         } else {
                             ("Streaming", Color32::from_rgb(230, 190, 90))
                         };
-                        ui.colored_label(color, RichText::new(label).strong());
+                        ui.colored_label(self.accent(color), RichText::new(label).strong());
                     } else {
                         ui.colored_label(
-                            state_color(&status.state),
+                            self.accent(state_color(&status.state)),
                             RichText::new(&status.state).strong(),
                         );
                     }
@@ -2737,14 +2844,14 @@ impl OrleansApp {
             }
             if settings.laser_mode == Some(false) {
                 ui.colored_label(
-                    Color32::from_rgb(235, 120, 110),
+                    self.accent(Color32::from_rgb(235, 120, 110)),
                     "laser mode is off ($32=0)",
                 );
             }
             if let Some(max_s) = settings.max_s {
                 if max_s != self.gcode_opts.max_s {
                     ui.colored_label(
-                        Color32::from_rgb(230, 190, 90),
+                        self.accent(Color32::from_rgb(230, 190, 90)),
                         format!("Max S {} differs from $30={max_s}", self.gcode_opts.max_s),
                     );
                 }
@@ -2776,7 +2883,7 @@ impl OrleansApp {
                             }
                             LinkState::Disconnected => ("offline", Color32::from_gray(140)),
                         };
-                        ui.label(RichText::new(text).color(color).small());
+                        ui.label(RichText::new(text).color(self.accent(color)).small());
                     });
                 });
                 ui.add_space(4.0);
@@ -3213,7 +3320,7 @@ impl OrleansApp {
                     }
                     if settings.laser_mode == Some(false) {
                         ui.colored_label(
-                            Color32::from_rgb(235, 120, 110),
+                            self.accent(Color32::from_rgb(235, 120, 110)),
                             "laser mode is off; M4 pause will stay disabled",
                         );
                     }
@@ -3271,7 +3378,7 @@ impl OrleansApp {
                         "The machine will move and the laser will fire. Check the material, \
                          focus and work origin first.",
                     )
-                    .color(Color32::from_rgb(235, 190, 90)),
+                    .color(self.accent(Color32::from_rgb(235, 190, 90))),
                 );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -3370,6 +3477,15 @@ impl OrleansApp {
                     *action = Some(Action::Redo);
                 }
                 ui.separator();
+                let mut light = self.theme.is_light();
+                if ui
+                    .checkbox(&mut light, "Light")
+                    .on_hover_text("Use the light interface and canvas")
+                    .changed()
+                {
+                    self.theme = if light { Theme::Light } else { Theme::Dark };
+                    self.apply_theme(ui.ctx());
+                }
                 ui.checkbox(&mut self.show_grid, "Grid");
                 ui.checkbox(&mut self.show_travel, "Travel");
                 ui.checkbox(&mut self.show_bed, "Bed");
@@ -3424,6 +3540,8 @@ impl OrleansApp {
                         (ui.available_height() - 350.0 - transform_height).clamp(80.0, 360.0);
                     let mut pick = None;
                     let mut output_changed = false;
+                    let light = self.theme.is_light();
+                    let muted_chip = self.palette().muted;
                     egui::ScrollArea::vertical()
                         .id_salt("layer-list")
                         .max_height(list_height)
@@ -3476,9 +3594,9 @@ impl OrleansApp {
                                                 chip,
                                                 2.0,
                                                 if layer.output {
-                                                    display_color(layer.color)
+                                                    layer_color(layer.color, light)
                                                 } else {
-                                                    Color32::from_gray(90)
+                                                    muted_chip
                                                 },
                                             );
                                             let text = if layer.visible {
@@ -4246,9 +4364,9 @@ impl OrleansApp {
                 }
             });
             let color = if self.status.error {
-                Color32::from_rgb(235, 120, 110)
+                self.accent(Color32::from_rgb(235, 120, 110))
             } else {
-                Color32::from_gray(170)
+                ui.visuals().weak_text_color()
             };
             ui.label(RichText::new(&self.status.text).color(color).small());
             ui.add_space(3.0);
@@ -4262,7 +4380,8 @@ impl OrleansApp {
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let area = response.rect;
-        painter.rect_filled(area, 0.0, Color32::from_gray(16));
+        let palette = self.palette();
+        painter.rect_filled(area, 0.0, palette.background);
 
         if self.fit_pending {
             let mut bounds = self.doc.bounds().unwrap_or_else(|| {
@@ -4507,7 +4626,8 @@ impl OrleansApp {
         if !(step.is_finite() && step > 0.0) {
             return;
         }
-        let stroke = Stroke::new(1.0, Color32::from_gray(34));
+        let palette = self.palette();
+        let stroke = Stroke::new(1.0, palette.grid);
 
         let mut guard = 0;
         let mut x = (visible.x0 / step).floor() * step;
@@ -4540,14 +4660,14 @@ impl OrleansApp {
             let sx = self.view.world_to_screen(area, Point::new(0.0, 0.0)).x;
             painter.line_segment(
                 [Pos2::new(sx, area.top()), Pos2::new(sx, area.bottom())],
-                Stroke::new(1.2, Color32::from_rgb(110, 55, 55)),
+                Stroke::new(1.2, palette.axis_x),
             );
         }
         if visible.y0 <= 0.0 && visible.y1 >= 0.0 {
             let sy = self.view.world_to_screen(area, Point::new(0.0, 0.0)).y;
             painter.line_segment(
                 [Pos2::new(area.left(), sy), Pos2::new(area.right(), sy)],
-                Stroke::new(1.2, Color32::from_rgb(55, 110, 55)),
+                Stroke::new(1.2, palette.axis_y),
             );
         }
     }
@@ -4556,15 +4676,16 @@ impl OrleansApp {
         let Some(bed) = self.bed_rect() else {
             return;
         };
+        let palette = self.palette();
         let rect = Rect::from_two_pos(
             self.view.world_to_screen(area, Point::new(bed.x0, bed.y0)),
             self.view.world_to_screen(area, Point::new(bed.x1, bed.y1)),
         );
-        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(60, 100, 160, 18));
+        painter.rect_filled(rect, 0.0, palette.bed_fill);
         painter.rect_stroke(
             rect,
             0.0,
-            Stroke::new(1.0, Color32::from_rgb(75, 110, 160)),
+            Stroke::new(1.0, palette.bed_stroke),
             StrokeKind::Inside,
         );
         painter.text(
@@ -4572,7 +4693,7 @@ impl OrleansApp {
             egui::Align2::LEFT_TOP,
             format!("bed {:.0}×{:.0} mm", bed.width(), bed.height()),
             egui::FontId::proportional(10.0),
-            Color32::from_rgb(110, 140, 180),
+            palette.bed_text,
         );
     }
 
@@ -4588,13 +4709,13 @@ impl OrleansApp {
         painter.rect_stroke(
             rect,
             0.0,
-            Stroke::new(1.0, Color32::from_gray(90)),
+            Stroke::new(1.0, self.palette().page),
             StrokeKind::Inside,
         );
     }
 
     fn draw_travel(&self, painter: &egui::Painter, area: Rect) {
-        let stroke = Stroke::new(1.0, Color32::from_gray(55));
+        let stroke = Stroke::new(1.0, self.palette().travel);
         let mut pos = self.plan_opts.start;
         for op in &self.job.ops {
             match op {
@@ -4626,9 +4747,9 @@ impl OrleansApp {
                 continue;
             };
             let color = if layer.output {
-                display_color(layer.color)
+                self.layer_paint(layer.color)
             } else {
-                Color32::from_gray(85)
+                self.palette().muted
             };
             let width = if self.selected_layer == Some(layer.index) {
                 2.4
@@ -4779,6 +4900,7 @@ impl OrleansApp {
     }
 
     fn draw_selected_shape(&self, painter: &egui::Painter, area: Rect) {
+        let palette = self.palette();
         for selected in &self.selected_shapes {
             let Some(layer) = self
                 .doc
@@ -4798,7 +4920,7 @@ impl OrleansApp {
                 continue;
             };
 
-            let stroke = Stroke::new(2.4, Color32::from_rgb(255, 214, 90));
+            let stroke = Stroke::new(2.4, palette.selection);
             for contour in &preview.contours {
                 let mut points: Vec<Pos2> = contour
                     .points
@@ -4825,7 +4947,7 @@ impl OrleansApp {
                 painter.rect_stroke(
                     rect,
                     0.0,
-                    Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+                    Stroke::new(1.0, palette.selection_bounds),
                     StrokeKind::Inside,
                 );
             }
@@ -4842,7 +4964,7 @@ impl OrleansApp {
                 painter.rect_stroke(
                     rect.expand(4.0),
                     0.0,
-                    Stroke::new(1.0, Color32::from_rgb(255, 230, 150)),
+                    Stroke::new(1.0, palette.selection_bounds),
                     StrokeKind::Inside,
                 );
 
@@ -4850,25 +4972,25 @@ impl OrleansApp {
                 let rotate = handles[0].1;
                 painter.line_segment(
                     [Pos2::new(rect.center().x, rect.top()), rotate],
-                    Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+                    Stroke::new(1.0, palette.selection),
                 );
                 for (handle, position) in handles {
                     match handle {
                         Handle::Rotate => {
-                            painter.circle_filled(position, 5.0, Color32::from_rgb(255, 225, 120));
+                            painter.circle_filled(position, 5.0, palette.handle_fill);
                             painter.circle_stroke(
                                 position,
                                 5.0,
-                                Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                                Stroke::new(1.0, palette.handle_stroke),
                             );
                         }
                         Handle::Scale(_) => {
                             let square = Rect::from_center_size(position, egui::vec2(8.0, 8.0));
-                            painter.rect_filled(square, 1.0, Color32::from_rgb(255, 232, 140));
+                            painter.rect_filled(square, 1.0, palette.handle_fill);
                             painter.rect_stroke(
                                 square,
                                 1.0,
-                                Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                                Stroke::new(1.0, palette.handle_stroke),
                                 StrokeKind::Inside,
                             );
                         }
@@ -4882,6 +5004,7 @@ impl OrleansApp {
         let Some(shape) = self.node_shape() else {
             return;
         };
+        let palette = self.palette();
 
         for (start, end) in nodes::control_links(&shape.path) {
             painter.line_segment(
@@ -4889,7 +5012,7 @@ impl OrleansApp {
                     self.view.world_to_screen(area, start),
                     self.view.world_to_screen(area, end),
                 ],
-                Stroke::new(1.0, Color32::from_rgb(120, 110, 70)),
+                Stroke::new(1.0, palette.control_link),
             );
         }
 
@@ -4898,27 +5021,23 @@ impl OrleansApp {
             let position = self.view.world_to_screen(area, node.point);
             if node.is_anchor() {
                 let square = Rect::from_center_size(position, egui::vec2(8.0, 8.0));
-                painter.rect_filled(square, 1.0, Color32::from_rgb(255, 232, 140));
+                painter.rect_filled(square, 1.0, palette.handle_fill);
                 painter.rect_stroke(
                     square,
                     1.0,
-                    Stroke::new(1.0, Color32::from_rgb(120, 90, 30)),
+                    Stroke::new(1.0, palette.handle_stroke),
                     StrokeKind::Inside,
                 );
             } else {
-                painter.circle_filled(position, 3.5, Color32::from_rgb(35, 35, 35));
-                painter.circle_stroke(
-                    position,
-                    3.5,
-                    Stroke::new(1.0, Color32::from_rgb(230, 220, 160)),
-                );
+                painter.circle_filled(position, 3.5, palette.control_fill);
+                painter.circle_stroke(position, 3.5, Stroke::new(1.0, palette.control_stroke));
             }
         }
 
         for selected in &self.selected_nodes {
             if let Some(node) = path_nodes.iter().find(|node| node.node == *selected) {
                 let position = self.view.world_to_screen(area, node.point);
-                painter.circle_stroke(position, 7.0, Stroke::new(2.0, Color32::WHITE));
+                painter.circle_stroke(position, 7.0, Stroke::new(2.0, palette.selected_node));
             }
         }
     }
@@ -4928,7 +5047,7 @@ impl OrleansApp {
             return;
         }
         let origin = self.view.world_to_screen(area, Point::ORIGIN);
-        painter.circle_filled(origin, 3.0, Color32::from_rgb(230, 190, 90));
+        painter.circle_filled(origin, 3.0, self.palette().origin);
     }
 }
 
@@ -5204,6 +5323,34 @@ fn display_color(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(lift(r), lift(g), lift(b))
 }
 
+/// Layer colours on the light canvas. Dark colours stay as imported; very
+/// bright colours are darkened so they remain visible on the pale background.
+fn layer_color(rgb: [u8; 3], light: bool) -> Color32 {
+    if !light {
+        return display_color(rgb);
+    }
+    let r = f32::from(rgb[0]);
+    let g = f32::from(rgb[1]);
+    let b = f32::from(rgb[2]);
+    let brightest = r.max(g).max(b);
+    if brightest <= 220.0 {
+        return Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    }
+    let t = (brightest - 220.0) / 35.0;
+    let factor = 1.0 - 0.55 * t;
+    let darken = |c: f32| (c * factor).round() as u8;
+    Color32::from_rgb(darken(r), darken(g), darken(b))
+}
+
+/// Darken pastel status accents for the light theme.
+fn readable_accent(color: Color32, light: bool) -> Color32 {
+    if !light {
+        return color;
+    }
+    let scale = |channel: u8| (f32::from(channel) * 0.65).round() as u8;
+    Color32::from_rgb(scale(color.r()), scale(color.g()), scale(color.b()))
+}
+
 fn snap_point(point: Point, step: f64) -> Point {
     if !step.is_finite() || step <= 0.0 {
         return point;
@@ -5391,6 +5538,22 @@ mod tests {
         // Bright or saturated colours are untouched.
         assert_eq!(display_color([255, 0, 0]), Color32::from_rgb(255, 0, 0));
         assert_eq!(display_color([0, 0, 255]), Color32::from_rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn light_theme_keeps_dark_layers_and_darkens_bright_ones() {
+        assert_eq!(layer_color([0, 0, 0], true), Color32::from_rgb(0, 0, 0));
+        assert_eq!(
+            layer_color([20, 40, 60], true),
+            Color32::from_rgb(20, 40, 60)
+        );
+        let white = layer_color([255, 255, 255], true);
+        assert!(white.r() < 150 && white.g() < 150 && white.b() < 150);
+        // The dark canvas still lifts dark colours.
+        assert_eq!(
+            layer_color([0, 0, 0], false),
+            Color32::from_rgb(150, 150, 150)
+        );
     }
 
     #[test]

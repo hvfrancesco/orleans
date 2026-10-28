@@ -36,6 +36,7 @@ was decompiled or copied.
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Shape groups and align/distribute | ✅ |
+| Dark or light interface and canvas theme | ✅ |
 | Project save/load (`.orleans`, embedded SVG + settings/path edits) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -48,7 +49,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-133 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+134 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -107,6 +108,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 `orleans gui [design.svg|design.orleans]` opens the editor:
 
 * wheel to zoom at the cursor, drag to pan, `F` or double-click to fit;
+* **Light** in the toolbar switches the interface and canvas to a light theme.
+  The canvas background, grid, page, bed, travel, selection handles and node
+  markers change with it. The choice applies immediately and lasts for the
+  session;
 * every SVG colour becomes a layer. The left panel is a compact, scrollable
   layer list; select one layer to edit its name, colour, speed, power and
   passes. **Cut** decides whether the layer is planned, framed and sent;
