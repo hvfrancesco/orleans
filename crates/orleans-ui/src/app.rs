@@ -2437,6 +2437,21 @@ impl OrleansApp {
                     ui.horizontal(|ui| {
                         ui.strong(format!("Selection ({selected_count})"));
                     });
+                    if let Some(bounds) = self.selection_bounds() {
+                        ui.horizontal(|ui| {
+                            ui.label("Size").on_hover_text(
+                                "Bounding-box width and height of the selected shapes",
+                            );
+                            ui.label("W");
+                            ui.label(
+                                RichText::new(format!("{:.3} mm", bounds.width())).monospace(),
+                            );
+                            ui.label("H");
+                            ui.label(
+                                RichText::new(format!("{:.3} mm", bounds.height())).monospace(),
+                            );
+                        });
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Move");
                         ui.label("X");

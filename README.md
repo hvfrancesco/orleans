@@ -31,7 +31,7 @@ was decompiled or copied.
 | Raster engraving, dithering, fill/hatch | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
-| Canvas: selection, drag-move, handles, absolute position, undo | ✅ |
+| Canvas: selection, drag-move, handles, live size/position, undo | ✅ |
 | Project save/load (`.orleans`, embedded SVG + settings/path edits) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -136,7 +136,8 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   `WCO` when the controller reports it, and included in **Fit**. Toggle it
   with **Bed**;
 * click a shape on the canvas to select it; Ctrl/Shift-click adds or removes
-  shapes. Selected shapes are yellow with their bounds and a group box. Drag
+  shapes. Selected shapes are yellow with their bounds and a group box. The
+  live **Size** row shows the selection's bounding-box width and height. Drag
   any selected shape to move the whole selection. Drag a corner handle to
   scale uniformly around the opposite corner, or drag the circular handle above
   the box to rotate around the selection centre. The **Selection** panel still
