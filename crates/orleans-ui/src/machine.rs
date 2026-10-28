@@ -4,6 +4,7 @@
 //! status polling. A worker thread owns the connection and talks to the UI
 //! through two channels: commands in, events out.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -24,6 +25,9 @@ pub enum Command {
     Jog { dx: f64, dy: f64, feed: f64 },
     JogCancel,
     SetOrigin,
+    SaveOrigin,
+    SetSetting { key: u32, value: String },
+    RefreshSettings,
 }
 
 /// Notifications from the worker to the UI.
@@ -137,6 +141,23 @@ impl Machine {
 
     pub fn set_origin(&self) -> bool {
         self.tx.send(Command::SetOrigin).is_ok()
+    }
+
+    pub fn save_origin(&self) -> bool {
+        self.tx.send(Command::SaveOrigin).is_ok()
+    }
+
+    pub fn set_setting(&self, key: u32, value: &str) -> bool {
+        self.tx
+            .send(Command::SetSetting {
+                key,
+                value: value.to_owned(),
+            })
+            .is_ok()
+    }
+
+    pub fn refresh_settings(&self) -> bool {
+        self.tx.send(Command::RefreshSettings).is_ok()
     }
 
     pub fn try_recv(&self) -> Option<Event> {
@@ -290,6 +311,41 @@ fn worker(
                     Ok(()) => message(&events, "work origin set (G92 X0 Y0)", false),
                     Err(err) => message(&events, format!("setting origin failed: {err}"), true),
                 },
+                None => message(&events, "not connected", true),
+            },
+            Ok(Command::SaveOrigin) => match client.as_mut() {
+                Some(connected) => match connected.write_command("G10 L20 P1 X0 Y0") {
+                    Ok(()) => message(
+                        &events,
+                        "stored work origin saved (G10 L20 P1 X0 Y0)",
+                        false,
+                    ),
+                    Err(err) => message(&events, format!("saving origin failed: {err}"), true),
+                },
+                None => message(&events, "not connected", true),
+            },
+            Ok(Command::SetSetting { key, value }) => match client.as_mut() {
+                Some(connected) => {
+                    let line = format!("${key}={value}");
+                    match connected.send(&line) {
+                        Ok(()) => {
+                            let settings = read_settings(connected);
+                            let _ = events.send(Event::Settings(settings));
+                            message(&events, format!("applied {line}"), false);
+                        }
+                        Err(err) => {
+                            message(&events, format!("setting failed: {err}"), true);
+                        }
+                    }
+                }
+                None => message(&events, "not connected", true),
+            },
+            Ok(Command::RefreshSettings) => match client.as_mut() {
+                Some(connected) => {
+                    let settings = read_settings(connected);
+                    let _ = events.send(Event::Settings(settings));
+                    message(&events, "settings refreshed", false);
+                }
                 None => message(&events, "not connected", true),
             },
             Ok(Command::Run(program)) => match client.as_mut() {
@@ -482,6 +538,8 @@ pub struct Settings {
     pub max_s: Option<u32>,
     /// `$22=1`: homing enabled.
     pub homing: Option<bool>,
+    /// Every `$n=value` returned by `$$`, for the raw list.
+    pub all: BTreeMap<u32, String>,
 }
 
 fn read_settings(client: &mut GrblClient<Box<dyn Transport>>) -> Settings {
@@ -507,6 +565,13 @@ fn read_settings(client: &mut GrblClient<Box<dyn Transport>>) -> Settings {
 
 fn parse_setting(line: &str, settings: &mut Settings) {
     let line = line.trim();
+    if let Some(rest) = line.strip_prefix('$') {
+        if let Some((key, value)) = rest.split_once('=') {
+            if let Ok(key) = key.parse::<u32>() {
+                settings.all.insert(key, value.trim().to_owned());
+            }
+        }
+    }
     if let Some(value) = line.strip_prefix("$32=") {
         settings.laser_mode = value.parse::<u8>().ok().map(|value| value != 0);
     } else if let Some(value) = line.strip_prefix("$30=") {
@@ -656,6 +721,12 @@ mod tests {
                                     let command = std::mem::take(&mut line);
                                     let command = command.trim().to_owned();
                                     if command != "$$" {
+                                        if command == "$$" {
+                                            let _ =
+                                                stream.write_all(b"$30=1000\n$32=1\n$22=1\nok\n");
+                                            let _ = stream.flush();
+                                            continue;
+                                        }
                                         let _ = tx.send(command.clone());
                                     }
                                     let _ = stream.write_all(b"ok\n");
@@ -724,6 +795,12 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("origin command");
         assert_eq!(command, "G92 X0 Y0");
+
+        assert!(machine.save_origin());
+        let command = commands
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stored origin command");
+        assert_eq!(command, "G10 L20 P1 X0 Y0");
 
         drop(machine);
         let _ = server.join();

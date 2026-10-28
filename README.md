@@ -33,7 +33,8 @@ was decompiled or copied.
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
 | GUI laser-off framing pass | ✅ |
-| GUI jog (X/Y) and set work zero (`G92`) | ✅ |
+| GUI jog (X/Y) and work zero: temporary `G92` or stored `G54` | ✅ |
+| Controller settings editor (`$32`, `$30`, `$22`, raw `$$`) | ✅ |
 | GUI pause/resume (M4 + `$32=1`; framing always) | ✅ |
 | Selection, transforms, node editing | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
@@ -111,10 +112,13 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   and shows `$32` (laser mode), `$30` (max S) and `$22` (homing), warning when
   `$32` is off or `$30` differs from **Max S**;
 * jog the head with the X/Y pad, an adjustable step and feed, and a jog-cancel
-  button; **Set work zero** sends `G92 X0 Y0` at the current position. Jogging
-  needs GRBL 1.1 (`$J=`); the G92 origin is temporary and a controller reset
-  clears it. The position readout shows `WPos` when the controller reports it,
-  otherwise `MPos`;
+  button; **Set zero (G92)** is a temporary work origin and **Save zero (G54)**
+  stores it with `G10 L20 P1 X0 Y0`. Jogging needs GRBL 1.1 (`$J=`); generated
+  jobs select G54. The position readout shows `WPos` when the controller
+  reports it, otherwise `MPos`;
+* **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
+  homing `$22`, and the raw `$$` list. **Apply** writes the changed settings
+  to EEPROM; editing is blocked while cutting or homing;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
   when the controller is connected, idle and the laser is off; `Ctrl+Enter`
@@ -227,8 +231,9 @@ concept of a line and some bridges emit negotiation on connect.
 * The GUI has no selection, transforms or node editing. Pause is restricted to
   M4 jobs with `$32=1`; M3 jobs can only be stopped. Framing uses a fixed
   3000 mm/min and the design bounds, with no margin setting.
-* Work zero uses a temporary `G92` offset, not a stored G54 offset: a soft
-  reset, Stop or controller reconnect after a reset clears it.
+* **Set zero (G92)** is temporary: a soft reset, Stop or controller reconnect
+  after a reset clears it. **Save zero (G54)** writes `G10 L20 P1`; whether the
+  offset survives a reset depends on the controller. Generated jobs select G54.
 * Large designs are redrawn as polylines every frame; a spatial index and
   level-of-detail rendering will be needed for very complex files.
 
@@ -241,8 +246,7 @@ concept of a line and some bridges emit negotiation on connect.
    PWM mapping, run-length output.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
 5. **Second driver** — Marlin, then Ruida over UDP.
-6. **Job control extras** — feed/power overrides, stored work offsets, rotary
-   setup.
+6. **Job control extras** — feed/power overrides, rotary setup.
 
 ## License
 

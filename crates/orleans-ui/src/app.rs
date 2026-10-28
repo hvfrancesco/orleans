@@ -90,6 +90,10 @@ pub struct OrleansApp {
     job_paused: bool,
     job_uses_m4: bool,
     settings: Option<Settings>,
+    settings_open: bool,
+    setting_laser: bool,
+    setting_max_s: u32,
+    setting_homing: bool,
 }
 
 impl OrleansApp {
@@ -137,6 +141,10 @@ impl OrleansApp {
             job_paused: false,
             job_uses_m4: false,
             settings: None,
+            settings_open: false,
+            setting_laser: true,
+            setting_max_s: 1000,
+            setting_homing: false,
         };
         if let Some(path) = initial {
             app.load(path);
@@ -256,6 +264,15 @@ impl OrleansApp {
                     }
                 }
                 MachineEvent::Settings(settings) => {
+                    if let Some(laser) = settings.laser_mode {
+                        self.setting_laser = laser;
+                    }
+                    if let Some(max_s) = settings.max_s {
+                        self.setting_max_s = max_s;
+                    }
+                    if let Some(homing) = settings.homing {
+                        self.setting_homing = homing;
+                    }
                     self.settings = Some(settings);
                 }
                 MachineEvent::JobStarted(total) => {
@@ -408,6 +425,53 @@ impl OrleansApp {
         }
     }
 
+    fn open_settings(&mut self) {
+        if let Some(settings) = &self.settings {
+            if let Some(laser) = settings.laser_mode {
+                self.setting_laser = laser;
+            }
+            if let Some(max_s) = settings.max_s {
+                self.setting_max_s = max_s;
+            }
+            if let Some(homing) = settings.homing {
+                self.setting_homing = homing;
+            }
+        }
+        self.settings_open = true;
+    }
+
+    fn apply_settings(&mut self) {
+        let Some(settings) = self.settings.clone() else {
+            self.set_status("refresh controller settings first", true);
+            return;
+        };
+        let current_laser = settings.laser_mode.unwrap_or(true);
+        let current_max_s = settings.max_s.unwrap_or(1000);
+        let current_homing = settings.homing.unwrap_or(false);
+
+        let mut changed = false;
+        if self.setting_laser != current_laser {
+            changed = true;
+            self.machine
+                .set_setting(32, if self.setting_laser { "1" } else { "0" });
+        }
+        if self.setting_max_s != current_max_s {
+            changed = true;
+            self.machine
+                .set_setting(30, &self.setting_max_s.to_string());
+        }
+        if self.setting_homing != current_homing {
+            changed = true;
+            self.machine
+                .set_setting(22, if self.setting_homing { "1" } else { "0" });
+        }
+        if changed {
+            self.set_status("applying controller settings…", false);
+        } else {
+            self.set_status("no controller settings changed", false);
+        }
+    }
+
     fn pause_is_safe(&self) -> bool {
         self.job_uses_m4
             && self
@@ -485,6 +549,9 @@ impl OrleansApp {
                             .clicked()
                         {
                             self.disconnect_machine();
+                        }
+                        if ui.button("Settings…").clicked() {
+                            self.open_settings();
                         }
                     }
                 });
@@ -693,17 +760,30 @@ impl OrleansApp {
                         ui.end_row();
                     });
 
-                if ui
-                    .add_enabled(can_jog, egui::Button::new("Set work zero"))
-                    .on_hover_text(
-                        "Set the current position as work zero (G92 X0 Y0). \
-                         A controller reset clears it.",
-                    )
-                    .clicked()
-                    && !self.machine.set_origin()
-                {
-                    self.set_status("machine thread stopped", true);
-                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_jog, egui::Button::new("Set zero (G92)"))
+                        .on_hover_text(
+                            "Temporary work zero at the current position. \
+                             A controller reset clears it.",
+                        )
+                        .clicked()
+                        && !self.machine.set_origin()
+                    {
+                        self.set_status("machine thread stopped", true);
+                    }
+                    if ui
+                        .add_enabled(can_jog, egui::Button::new("Save zero (G54)"))
+                        .on_hover_text(
+                            "Stored G54 work zero (G10 L20 P1) at the current position. \
+                             Survives a reset on most GRBL builds.",
+                        )
+                        .clicked()
+                        && !self.machine.save_origin()
+                    {
+                        self.set_status("machine thread stopped", true);
+                    }
+                });
 
                 ui.separator();
                 ui.heading("Job");
@@ -789,10 +869,21 @@ impl OrleansApp {
 
                 ui.separator();
                 ui.heading("Control");
+                let homing_enabled = self
+                    .settings
+                    .as_ref()
+                    .map(|settings| settings.homing != Some(false))
+                    .unwrap_or(true);
                 let can_home = connected
                     && !self.job_running
                     && !self.homing
+                    && homing_enabled
                     && !pending
+                    && self
+                        .settings
+                        .as_ref()
+                        .map(|settings| settings.homing != Some(false))
+                        .unwrap_or(true)
                     && self
                         .machine_status
                         .as_ref()
@@ -801,10 +892,12 @@ impl OrleansApp {
 
                 if ui
                     .add_enabled(can_home, egui::Button::new("Home ($H)"))
-                    .on_hover_text(
+                    .on_hover_text(if homing_enabled {
                         "Move the head to the limit switches. \
-                         Enabled when the controller is idle or in alarm.",
-                    )
+                         Enabled when the controller is idle or in alarm."
+                    } else {
+                        "Homing is disabled ($22=0); enable it in Settings."
+                    })
                     .clicked()
                 {
                     self.confirm_home = true;
@@ -876,6 +969,93 @@ impl OrleansApp {
                     }
                 });
             });
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let connected = self.link == LinkState::Connected;
+        let can_edit = connected && !self.job_running && !self.homing && self.settings.is_some();
+        let mut close = false;
+
+        egui::Window::new("Controller settings")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "GRBL stores these settings in EEPROM. \
+                         Only change them while the machine is not cutting.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(4.0);
+                ui.add_enabled(
+                    can_edit,
+                    egui::Checkbox::new(&mut self.setting_laser, "Laser mode ($32)"),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("$30 max S");
+                    ui.add_enabled(
+                        can_edit,
+                        egui::DragValue::new(&mut self.setting_max_s)
+                            .speed(10.0)
+                            .range(1..=100_000),
+                    );
+                });
+                ui.add_enabled(
+                    can_edit,
+                    egui::Checkbox::new(&mut self.setting_homing, "Homing enabled ($22)"),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_edit, egui::Button::new("Apply"))
+                        .clicked()
+                    {
+                        self.apply_settings();
+                    }
+                    if ui
+                        .add_enabled(connected, egui::Button::new("Refresh"))
+                        .clicked()
+                    {
+                        self.machine.refresh_settings();
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+                if !connected {
+                    ui.label(RichText::new("connect to edit controller settings").weak());
+                } else if self.settings.is_none() {
+                    ui.label(RichText::new("settings unavailable; press Refresh").weak());
+                }
+                if let Some(settings) = &self.settings {
+                    if settings.laser_mode == Some(false) {
+                        ui.colored_label(
+                            Color32::from_rgb(235, 120, 110),
+                            "laser mode is off; M4 pause will stay disabled",
+                        );
+                    }
+                    egui::CollapsingHeader::new("All settings")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(180.0)
+                                .show(ui, |ui| {
+                                    for (key, value) in &settings.all {
+                                        ui.monospace(format!("${key}={value}"));
+                                    }
+                                });
+                        });
+                }
+            });
+        if close {
+            self.settings_open = false;
+        }
     }
 
     fn send_dialog(&mut self, ctx: &egui::Context) {
@@ -1344,7 +1524,7 @@ const FRAME_FEED: f64 = 3000.0;
 fn frame_program(bounds: kurbo::Rect, feed: f64) -> String {
     let (x0, y0, x1, y1) = (bounds.x0, bounds.y0, bounds.x1, bounds.y1);
     format!(
-        "; frame (laser off)\nG21\nG90\nM5\n\
+        "; frame (laser off)\nG21\nG90\nG54\nM5\n\
          G0 X{x0:.3} Y{y0:.3}\n\
          G1 X{x1:.3} Y{y0:.3} F{feed:.0}\n\
          G1 X{x1:.3} Y{y1:.3}\n\
@@ -1487,6 +1667,7 @@ impl eframe::App for OrleansApp {
 
         self.home_dialog(&ctx);
         self.send_dialog(&ctx);
+        self.settings_window(&ctx);
     }
 }
 
@@ -1525,7 +1706,7 @@ mod tests {
     #[test]
     fn frame_program_traces_bounds_without_firing() {
         let program = frame_program(kurbo::Rect::new(1.0, 2.0, 30.0, 40.0), 3000.0);
-        assert!(program.starts_with("; frame (laser off)\nG21\nG90\nM5\n"));
+        assert!(program.starts_with("; frame (laser off)\nG21\nG90\nG54\nM5\n"));
         assert!(program.contains("G0 X1.000 Y2.000"));
         assert!(program.contains("G1 X30.000 Y2.000 F3000"));
         assert!(program.contains("G1 X30.000 Y40.000"));
