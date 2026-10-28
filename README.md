@@ -31,7 +31,7 @@ was decompiled or copied.
 | Hardware-free GRBL simulator | ✅ |
 | DXF / PDF / AI import | ❌ |
 | Raster engraving (threshold, dither, grayscale) | ✅ |
-| Tabs/bridges on contour cuts | ✅ |
+| Tabs/bridges on contour cuts, automatic or manual, with canvas markers | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | New layers; move/copy/delete objects between layers; delete empty layers | ✅ |
@@ -51,7 +51,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-140 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+144 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -137,7 +137,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   and **Outline** traces the closed contours after filling them. Open contours
   are ignored by fill mode. Line mode adds
   **Tabs**: count and width of uncut holding bridges per contour, with an
-  optional **Holes** setting for inner contours;
+  optional **Holes** setting for inner contours. Enable **Manual**, press
+  **Place tabs**, then click any closed contour to put a tab there; click a
+  tab marker again to remove it. `Esc` or **Done** leaves tab mode. The
+  selected layer draws each tab span in cyan on the canvas, for both automatic
+  and manual tabs;
 * **Open…** also accepts PNG/JPEG/BMP images. An image opens as a raster layer
   with threshold, Floyd–Steinberg dithering or grayscale power levels, plus
   line interval, angle, invert, alternate rows, position, physical size and
@@ -347,8 +351,10 @@ concept of a line and some bridges emit negotiation on connect.
   implemented yet. Raster layers with Cut disabled show the image preview but
   not the engraving scan lines; raster selection handles are available on the
   canvas.
-* Tabs are distributed evenly by arc length and start at the contour seam; there
-  is no manual tab placement yet.
+* Automatic tabs are distributed evenly by arc length from the contour seam.
+  Manual tabs are stored as fractions of the flattened contour perimeter, so a
+  heavy node edit that reorders or removes contours can detach a tab. Fill
+  outlines never use tabs.
 * Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
   Framing uses a fixed 3000 mm/min and the design bounds, with no margin
   setting.
@@ -361,7 +367,7 @@ concept of a line and some bridges emit negotiation on connect.
 ## Roadmap
 
 1. **Finish the editor** — job history for the streaming panel.
-2. **Fill refinements and manual tabs** — offset fill and manual tab placement.
+2. **Fill refinements** — offset/concentric fill.
 3. **Raster refinements** — more dithering algorithms and image cropping.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
 5. **Second driver** — Marlin, then Ruida over UDP.

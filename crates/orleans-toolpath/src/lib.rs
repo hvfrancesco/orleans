@@ -13,8 +13,8 @@ use orleans_core::{
     CutParams, Document, Job, JobStats, Layer, LayerMode, Op, RasterImage, RasterMode,
 };
 use orleans_geom::{
-    dedup, flatten_path, hatch_contours, offset_closed, point_in_polygon, split_tabs, Contour,
-    HatchOptions,
+    dedup, flatten_path, hatch_contours, offset_closed, point_in_polygon, split_manual_tabs,
+    split_tabs, Contour, HatchOptions,
 };
 
 /// Knobs for [`plan`].
@@ -65,12 +65,20 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
             continue;
         }
 
-        let contours: Vec<Contour> = layer
-            .shapes
-            .iter()
-            .flat_map(|shape| flatten_path(&shape.path, opt.tolerance))
-            .filter(|c| c.points.len() >= 2)
-            .collect();
+        let mut contours = Vec::new();
+        let mut origins = Vec::new();
+        for shape in &layer.shapes {
+            for (contour, path) in flatten_path(&shape.path, opt.tolerance)
+                .into_iter()
+                .enumerate()
+            {
+                if path.points.len() < 2 {
+                    continue;
+                }
+                contours.push(path);
+                origins.push((shape.id.clone(), contour));
+            }
+        }
         if contours.is_empty() {
             continue;
         }
@@ -98,12 +106,16 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
             }
             plan_hatch(layer, segments, &mut job, &mut stats, &mut pos);
             if layer.fill.outline {
-                plan_contours(layer, &contours, opt, false, &mut job, &mut stats, &mut pos);
+                plan_contours(
+                    layer, &contours, &origins, opt, false, &mut job, &mut stats, &mut pos,
+                );
             }
             continue;
         }
 
-        plan_contours(layer, &contours, opt, true, &mut job, &mut stats, &mut pos);
+        plan_contours(
+            layer, &contours, &origins, opt, true, &mut job, &mut stats, &mut pos,
+        );
     }
 
     stats.seconds += stats.travel_mm / opt.rapid_speed.max(1.0) * 60.0;
@@ -151,9 +163,11 @@ fn plan_hatch(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_contours(
     layer: &Layer,
     contours: &[Contour],
+    origins: &[(String, usize)],
     opt: &PlanOptions,
     use_tabs: bool,
     job: &mut Job,
@@ -168,9 +182,27 @@ fn plan_contours(
         if points.len() < 2 {
             continue;
         }
-        let parts = if use_tabs
+        let closed = contours[contour_idx].closed;
+        let manual_positions = use_tabs
+            .then(|| origins.get(contour_idx))
+            .flatten()
+            .and_then(|(shape, contour)| {
+                layer
+                    .manual_tabs
+                    .iter()
+                    .find(|tabs| tabs.shape == *shape && tabs.contour == *contour)
+                    .map(|tabs| tabs.positions.as_slice())
+            });
+        let parts = if use_tabs && layer.tabs.manual {
+            match manual_positions {
+                Some(positions) if closed && !positions.is_empty() => {
+                    split_manual_tabs(&points, positions, layer.tabs.width)
+                }
+                _ => vec![points],
+            }
+        } else if use_tabs
             && layer.tabs.count > 0
-            && contours[contour_idx].closed
+            && closed
             && (layer.tabs.inner || depths[contour_idx].is_multiple_of(2))
         {
             split_tabs(&points, layer.tabs.count, layer.tabs.width)
@@ -623,6 +655,7 @@ mod tests {
             count: 4,
             width: 2.0,
             inner: false,
+            manual: false,
         };
         let job = plan(&doc, &PlanOptions::default());
         assert_eq!(job.cuts().count(), 4);
@@ -637,11 +670,32 @@ mod tests {
             count: 2,
             width: 0.5,
             inner: false,
+            manual: false,
         };
         assert_eq!(plan(&doc, &PlanOptions::default()).cuts().count(), 3);
 
         doc.layers[0].tabs.inner = true;
         assert_eq!(plan(&doc, &PlanOptions::default()).cuts().count(), 4);
+    }
+
+    #[test]
+    fn manual_tabs_override_evenly_distributed_tabs() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
+        doc.layers[0].tabs = orleans_core::TabParams {
+            count: 4,
+            width: 2.0,
+            inner: false,
+            manual: true,
+        };
+        doc.layers[0].manual_tabs.push(orleans_core::ManualTabs {
+            shape: "s0".to_owned(),
+            contour: 0,
+            positions: vec![0.5],
+        });
+
+        let job = plan(&doc, &PlanOptions::default());
+        assert_eq!(job.cuts().count(), 2);
+        assert!((job.stats.cut_mm - 38.0).abs() < 1e-6);
     }
 
     #[test]

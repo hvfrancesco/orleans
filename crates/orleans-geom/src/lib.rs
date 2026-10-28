@@ -111,6 +111,187 @@ pub fn flatten_path(path: &BezPath, tolerance: f64) -> Vec<Contour> {
     contours
 }
 
+/// The ring vertices, cumulative distances and perimeter of a closed contour.
+/// A duplicated closing point is ignored.
+fn closed_ring(points: &[Point]) -> Option<(Vec<Point>, Vec<f64>, f64)> {
+    if points.len() < 3 {
+        return None;
+    }
+    let mut ring = points.to_vec();
+    if let (Some(first), Some(last)) = (ring.first(), ring.last()) {
+        if (*first - *last).hypot() < 1e-6 {
+            ring.pop();
+        }
+    }
+    if ring.len() < 3 {
+        return None;
+    }
+    let mut cumulative = Vec::with_capacity(ring.len());
+    cumulative.push(0.0);
+    for index in 1..ring.len() {
+        cumulative.push(cumulative[index - 1] + (ring[index] - ring[index - 1]).hypot());
+    }
+    let total = cumulative[ring.len() - 1] + (ring[0] - ring[ring.len() - 1]).hypot();
+    if !total.is_finite() || total <= 1e-9 {
+        return None;
+    }
+    Some((ring, cumulative, total))
+}
+
+fn point_at_distance(ring: &[Point], cumulative: &[f64], total: f64, distance: f64) -> Point {
+    if distance <= 0.0 || distance >= total {
+        return ring[0];
+    }
+    for index in 0..ring.len() {
+        let next = (index + 1) % ring.len();
+        let edge_start = cumulative[index];
+        let edge_end = if next == 0 { total } else { cumulative[next] };
+        if distance <= edge_end {
+            let t = (distance - edge_start) / (edge_end - edge_start).max(1e-12);
+            let a = ring[index];
+            let b = ring[next];
+            return Point::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+        }
+    }
+    ring[0]
+}
+
+/// Point at a normalised distance along a closed contour.
+pub fn point_at_fraction(points: &[Point], fraction: f64) -> Option<Point> {
+    let (ring, cumulative, total) = closed_ring(points)?;
+    Some(point_at_distance(
+        &ring,
+        &cumulative,
+        total,
+        fraction.rem_euclid(1.0) * total,
+    ))
+}
+
+/// Nearest point on a closed contour: returns `(fraction, distance)`.
+pub fn nearest_along_closed(points: &[Point], point: Point) -> Option<(f64, f64)> {
+    let (ring, cumulative, total) = closed_ring(points)?;
+    let mut best: Option<(f64, f64)> = None;
+    for index in 0..ring.len() {
+        let next = (index + 1) % ring.len();
+        let a = ring[index];
+        let b = ring[next];
+        let edge = b - a;
+        let length = edge.hypot();
+        let t = if length <= 1e-12 {
+            0.0
+        } else {
+            let offset = point - a;
+            ((offset.x * edge.x + offset.y * edge.y) / (length * length)).clamp(0.0, 1.0)
+        };
+        let nearest = Point::new(a.x + t * edge.x, a.y + t * edge.y);
+        let distance = (point - nearest).hypot();
+        if best.is_none_or(|(_, current)| distance < current) {
+            best = Some(((cumulative[index] + t * length) / total, distance));
+        }
+    }
+    best
+}
+
+/// Merged tab intervals on a closed contour, in distance units.
+fn tab_intervals(total: f64, positions: &[f64], width: f64) -> Vec<(f64, f64)> {
+    if !width.is_finite() || width <= 0.0 {
+        return Vec::new();
+    }
+    let half = width * 0.5;
+    let mut intervals = Vec::new();
+    for &position in positions {
+        if !position.is_finite() {
+            continue;
+        }
+        let center = position.rem_euclid(1.0) * total;
+        let start = center - half;
+        let end = center + half;
+        if start < 0.0 {
+            intervals.push((start + total, total));
+            intervals.push((0.0, end.min(total)));
+        } else if end > total {
+            intervals.push((start, total));
+            intervals.push((0.0, end - total));
+        } else {
+            intervals.push((start, end));
+        }
+    }
+    intervals.retain(|(start, end)| end - start > 1e-9);
+    intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in intervals {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 + 1e-9 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+fn span_polyline(
+    ring: &[Point],
+    cumulative: &[f64],
+    total: f64,
+    start: f64,
+    end: f64,
+) -> Vec<Point> {
+    let mut span = vec![point_at_distance(ring, cumulative, total, start)];
+    for (index, &distance) in cumulative.iter().enumerate() {
+        if distance > start + 1e-9 && distance < end - 1e-9 {
+            span.push(ring[index]);
+        }
+    }
+    span.push(point_at_distance(ring, cumulative, total, end));
+    dedup(&span, false)
+}
+
+/// Split a closed contour at manually placed tab fractions.
+pub fn split_manual_tabs(points: &[Point], positions: &[f64], width: f64) -> Vec<Vec<Point>> {
+    let Some((ring, cumulative, total)) = closed_ring(points) else {
+        return vec![points.to_vec()];
+    };
+    let intervals = tab_intervals(total, positions, width);
+    if intervals.is_empty() {
+        return vec![points.to_vec()];
+    }
+
+    let mut cuts = Vec::new();
+    let mut cursor = 0.0;
+    for (start, end) in intervals {
+        if start > cursor + 1e-9 {
+            cuts.push((cursor, start));
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < total - 1e-9 {
+        cuts.push((cursor, total));
+    }
+
+    let mut parts = Vec::new();
+    for (start, end) in cuts {
+        let part = span_polyline(&ring, &cumulative, total, start, end);
+        if part.len() >= 2 {
+            parts.push(part);
+        }
+    }
+    parts
+}
+
+/// Polylines covering the tab spans themselves, for canvas previews.
+pub fn tab_span_polylines(points: &[Point], positions: &[f64], width: f64) -> Vec<Vec<Point>> {
+    let Some((ring, cumulative, total)) = closed_ring(points) else {
+        return Vec::new();
+    };
+    tab_intervals(total, positions, width)
+        .into_iter()
+        .map(|(start, end)| span_polyline(&ring, &cumulative, total, start, end))
+        .filter(|span| span.len() >= 2)
+        .collect()
+}
+
 /// Total length of a polyline.
 pub fn polyline_length(points: &[Point]) -> f64 {
     points.windows(2).map(|w| (w[1] - w[0]).hypot()).sum()
@@ -549,6 +730,36 @@ mod tests {
         let full = split_tabs(&square(10.0), 20, 5.0);
         assert_eq!(full.len(), 1);
         assert_eq!(full[0], square(10.0));
+    }
+
+    #[test]
+    fn manual_tabs_split_at_the_requested_fraction() {
+        let parts = split_manual_tabs(&square(10.0), &[0.5], 2.0);
+        assert_eq!(parts.len(), 2);
+        let cut_length: f64 = parts.iter().map(|part| polyline_length(part)).sum();
+        assert!((cut_length - 38.0).abs() < 1e-9);
+
+        let spans = tab_span_polylines(&square(10.0), &[0.5], 2.0);
+        assert_eq!(spans.len(), 1);
+        assert!((polyline_length(&spans[0]) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_manual_tab_across_the_seam_is_one_gap() {
+        let parts = split_manual_tabs(&square(10.0), &[0.0], 2.0);
+        assert_eq!(parts.len(), 1);
+        assert!((polyline_length(&parts[0]) - 38.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nearest_point_reports_fraction_and_distance() {
+        let (fraction, distance) =
+            nearest_along_closed(&square(10.0), Point::new(5.0, -2.0)).expect("nearest");
+        assert!((fraction - 0.125).abs() < 1e-9);
+        assert!((distance - 2.0).abs() < 1e-9);
+
+        let point = point_at_fraction(&square(10.0), 0.125).expect("point");
+        assert!((point - Point::new(5.0, 0.0)).hypot() < 1e-9);
     }
 
     #[test]

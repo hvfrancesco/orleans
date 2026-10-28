@@ -6,11 +6,14 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use kurbo::{Affine, Point};
-use orleans_core::{Document, Job, Layer, LayerMode, Op, RasterMode, Shape};
+use orleans_core::{Document, Job, Layer, LayerMode, ManualTabs, Op, RasterMode, Shape};
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
-use orleans_geom::{flatten_path, hatch_contours, point_in_polygon, HatchOptions};
+use orleans_geom::{
+    flatten_path, hatch_contours, nearest_along_closed, point_at_fraction, point_in_polygon,
+    tab_span_polylines, HatchOptions,
+};
 use orleans_import::{import_image, import_svg, ImportOptions, DEFAULT_RASTER_DPI};
-use orleans_toolpath::{plan, PlanOptions};
+use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::nodes::{self, NodeKind, NodeRef};
@@ -95,6 +98,7 @@ struct CanvasPalette {
     control_stroke: Color32,
     selected_node: Color32,
     origin: Color32,
+    tab: Color32,
 }
 
 impl CanvasPalette {
@@ -120,6 +124,7 @@ impl CanvasPalette {
                 control_stroke: Color32::from_rgb(230, 220, 160),
                 selected_node: Color32::WHITE,
                 origin: Color32::from_rgb(230, 190, 90),
+                tab: Color32::from_rgb(110, 200, 230),
             },
             Theme::Light => Self {
                 background: Color32::from_rgb(232, 232, 228),
@@ -141,6 +146,7 @@ impl CanvasPalette {
                 control_stroke: Color32::from_rgb(140, 115, 45),
                 selected_node: Color32::from_rgb(30, 70, 140),
                 origin: Color32::from_rgb(180, 130, 30),
+                tab: Color32::from_rgb(0, 120, 160),
             },
         }
     }
@@ -275,6 +281,7 @@ struct LayerSettingsSnapshot {
     tabs: orleans_core::TabParams,
     visible: bool,
     output: bool,
+    manual_tabs: Vec<ManualTabs>,
     raster: Option<RasterSettingsSnapshot>,
 }
 
@@ -290,6 +297,7 @@ impl LayerSettingsSnapshot {
             tabs: layer.tabs,
             visible: layer.visible,
             output: layer.output,
+            manual_tabs: layer.manual_tabs.clone(),
             raster: layer.raster.as_ref().map(|raster| RasterSettingsSnapshot {
                 x: raster.x,
                 y: raster.y,
@@ -314,6 +322,7 @@ impl LayerSettingsSnapshot {
         layer.tabs = self.tabs;
         layer.visible = self.visible;
         layer.output = self.output;
+        layer.manual_tabs.clone_from(&self.manual_tabs);
         if let (Some(image), Some(saved)) = (layer.raster.as_mut(), self.raster.as_ref()) {
             image.x = saved.x;
             image.y = saved.y;
@@ -391,6 +400,13 @@ struct NodeDrag {
     node: NodeRef,
     start_world: Point,
     start_node: Point,
+}
+
+struct TabHit {
+    shape: String,
+    contour: usize,
+    fraction: f64,
+    points: Vec<Point>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,6 +534,7 @@ enum Action {
     Redo,
     Duplicate,
     ExitNodes,
+    ExitTabs,
     DeleteNode,
     DeleteObjects,
 }
@@ -566,6 +583,8 @@ pub struct OrleansApp {
     node_drag: Option<NodeDrag>,
     node_snap: bool,
     node_snap_geometry: bool,
+    /// Layer whose closed contours are being clicked to place manual tabs.
+    tab_edit_layer: Option<usize>,
     edited_paths: BTreeSet<(usize, String)>,
     raster_textures: BTreeMap<usize, egui::TextureHandle>,
     raster_texture_keys: BTreeMap<usize, (u32, u32, bool, [u8; 4])>,
@@ -655,6 +674,7 @@ impl OrleansApp {
             node_drag: None,
             node_snap: false,
             node_snap_geometry: true,
+            tab_edit_layer: None,
             edited_paths: BTreeSet::new(),
             raster_textures: BTreeMap::new(),
             raster_texture_keys: BTreeMap::new(),
@@ -759,6 +779,7 @@ impl OrleansApp {
                 self.node_edit = None;
                 self.selected_nodes.clear();
                 self.node_drag = None;
+                self.tab_edit_layer = None;
                 self.edited_paths.clear();
                 self.raster_textures.clear();
                 self.raster_texture_keys.clear();
@@ -823,6 +844,7 @@ impl OrleansApp {
                 self.node_edit = None;
                 self.selected_nodes.clear();
                 self.node_drag = None;
+                self.tab_edit_layer = None;
                 self.edited_paths.clear();
                 self.raster_textures.clear();
                 self.raster_texture_keys.clear();
@@ -982,6 +1004,7 @@ impl OrleansApp {
         self.node_edit = None;
         self.selected_nodes.clear();
         self.node_drag = None;
+        self.tab_edit_layer = None;
         self.edited_paths = project
             .edited_paths
             .iter()
@@ -1621,6 +1644,7 @@ impl OrleansApp {
         self.doc.layers.push(layer);
         self.deleted_layers.remove(&index);
         self.selected_layer = Some(index);
+        self.tab_edit_layer = None;
         self.transfer_layer = Some(index);
         self.selected_raster = None;
         self.dirty = true;
@@ -1643,6 +1667,7 @@ impl OrleansApp {
             {
                 layer.shapes.retain(|shape| shape.id != source.shape);
             }
+            self.remove_manual_tabs(source.layer, &source.shape);
             let key = (source.layer, source.shape.clone());
             if let Some(origin) = self.moved_shapes.remove(&key) {
                 self.removed_shapes.insert(origin);
@@ -1660,6 +1685,7 @@ impl OrleansApp {
         self.selected_nodes.clear();
         self.node_drag = None;
         self.node_edit = None;
+        self.tab_edit_layer = None;
         self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
         self.dirty = true;
         self.set_status(format!("deleted {} object(s)", refs.len()), false);
@@ -1698,6 +1724,9 @@ impl OrleansApp {
         if self.transfer_layer == Some(index) {
             self.transfer_layer = None;
         }
+        if self.tab_edit_layer == Some(index) {
+            self.tab_edit_layer = None;
+        }
         let next = self
             .doc
             .layers
@@ -1724,7 +1753,8 @@ impl OrleansApp {
         let mut templates = Vec::new();
         for source in sources {
             if let Some(shape) = self.shape_by_ref(&source) {
-                templates.push((source, shape.clone()));
+                let tabs = self.manual_tabs_for(source.layer, &source.shape);
+                templates.push((source, shape.clone(), tabs));
             }
         }
         if templates.is_empty() {
@@ -1734,7 +1764,7 @@ impl OrleansApp {
         self.push_structure_undo();
 
         let mut used: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
-        for (source, _) in &templates {
+        for (source, _, _) in &templates {
             used.entry(source.layer).or_insert_with(|| {
                 self.doc
                     .layers
@@ -1749,7 +1779,7 @@ impl OrleansApp {
         let mut copies = BTreeSet::new();
         for &(dx, dy) in offsets {
             let mut mapping = BTreeMap::new();
-            for (source, template) in &templates {
+            for (source, template, tabs) in &templates {
                 let Some(position) = self
                     .doc
                     .layers
@@ -1766,6 +1796,11 @@ impl OrleansApp {
                 shape.id = id.clone();
                 shape.path.apply_affine(Affine::translate((dx, dy)));
                 self.doc.layers[position].shapes.push(shape);
+                let mut tabs = tabs.clone();
+                for entry in &mut tabs {
+                    entry.shape.clone_from(&id);
+                }
+                self.add_manual_tabs(source.layer, tabs);
                 let new_ref = ShapeRef {
                     layer: source.layer,
                     shape: id,
@@ -1837,6 +1872,47 @@ impl OrleansApp {
         self.duplicate_selected(&offsets);
     }
 
+    fn manual_tabs_for(&self, layer_index: usize, shape_id: &str) -> Vec<ManualTabs> {
+        self.doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index)
+            .map(|layer| {
+                layer
+                    .manual_tabs
+                    .iter()
+                    .filter(|tabs| tabs.shape == shape_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn remove_manual_tabs(&mut self, layer_index: usize, shape_id: &str) {
+        if let Some(layer) = self
+            .doc
+            .layers
+            .iter_mut()
+            .find(|layer| layer.index == layer_index)
+        {
+            layer.manual_tabs.retain(|tabs| tabs.shape != shape_id);
+        }
+    }
+
+    fn add_manual_tabs(&mut self, layer_index: usize, tabs: Vec<ManualTabs>) {
+        if tabs.is_empty() {
+            return;
+        }
+        if let Some(layer) = self
+            .doc
+            .layers
+            .iter_mut()
+            .find(|layer| layer.index == layer_index)
+        {
+            layer.manual_tabs.extend(tabs);
+        }
+    }
+
     /// Move or copy the selected shapes to `target_layer`, keeping groups,
     /// project provenance and selection coherent.
     fn transfer_selection(&mut self, target_layer: usize, copy: bool) {
@@ -1878,7 +1954,8 @@ impl OrleansApp {
             let was_extra = self
                 .extra_shapes
                 .contains(&(source.layer, source.shape.clone()));
-            payload.push((source.clone(), shape.clone(), origin, was_extra));
+            let tabs = self.manual_tabs_for(source.layer, &source.shape);
+            payload.push((source.clone(), shape.clone(), origin, was_extra, tabs));
         }
         if payload.is_empty() {
             self.set_status("nothing to move or copy", true);
@@ -1887,7 +1964,7 @@ impl OrleansApp {
 
         self.push_structure_undo();
         if !copy {
-            for (source, _, _, _) in &payload {
+            for (source, _, _, _, _) in &payload {
                 if let Some(layer) = self
                     .doc
                     .layers
@@ -1896,6 +1973,7 @@ impl OrleansApp {
                 {
                     layer.shapes.retain(|shape| shape.id != source.shape);
                 }
+                self.remove_manual_tabs(source.layer, &source.shape);
                 let key = (source.layer, source.shape.clone());
                 self.moved_shapes.remove(&key);
                 self.extra_shapes.remove(&key);
@@ -1919,10 +1997,14 @@ impl OrleansApp {
             .map(|shape| shape.id.clone())
             .collect();
         let mut mapping: BTreeMap<ShapeRef, ShapeRef> = BTreeMap::new();
-        for (source, mut shape, origin, was_extra) in payload {
+        for (source, mut shape, origin, was_extra, mut tabs) in payload {
             let id = unique_shape_id(&shape.id, &mut used);
             shape.id = id.clone();
             self.doc.layers[target_pos].shapes.push(shape);
+            for entry in &mut tabs {
+                entry.shape.clone_from(&id);
+            }
+            self.add_manual_tabs(target_layer, tabs);
             let new_ref = ShapeRef {
                 layer: target_layer,
                 shape: id,
@@ -1940,6 +2022,7 @@ impl OrleansApp {
         self.remap_groups(&mapping, copy);
         self.selected_shapes = mapping.values().cloned().collect();
         self.selected_layer = Some(target_layer);
+        self.tab_edit_layer = None;
         self.transfer_layer = Some(target_layer);
         self.selected_raster = None;
         self.node_edit = None;
@@ -2388,6 +2471,7 @@ impl OrleansApp {
         self.raster_drag = None;
         self.node_drag = None;
         self.selected_nodes.clear();
+        self.tab_edit_layer = None;
         self.dragging_shape = false;
         self.active_handle = None;
         if has_geometry {
@@ -2722,6 +2806,7 @@ impl OrleansApp {
     }
 
     fn select_raster_layer(&mut self, layer_index: usize) {
+        self.tab_edit_layer = None;
         self.selected_raster = Some(layer_index);
         self.selected_layer = Some(layer_index);
         self.selected_shapes.clear();
@@ -3375,6 +3460,7 @@ impl OrleansApp {
             self.set_status("select exactly one shape to edit its nodes", true);
             return;
         }
+        self.tab_edit_layer = None;
         self.node_edit = self.selected_shapes.iter().next().cloned();
         self.selected_nodes.clear();
         self.node_drag = None;
@@ -3390,6 +3476,169 @@ impl OrleansApp {
             self.node_drag = None;
             self.set_status("node editing finished", false);
         }
+    }
+
+    fn toggle_tab_edit(&mut self, layer_index: usize) {
+        if self.tab_edit_layer == Some(layer_index) {
+            self.exit_tab_edit();
+            return;
+        }
+        let editable = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index)
+            .is_some_and(|layer| {
+                layer.mode == LayerMode::Line && layer.raster.is_none() && layer.visible
+            });
+        if !editable {
+            self.set_status(
+                "tabs can be placed only on visible vector Line layers",
+                true,
+            );
+            return;
+        }
+        if let Some(layer) = self
+            .doc
+            .layers
+            .iter_mut()
+            .find(|layer| layer.index == layer_index)
+        {
+            layer.tabs.manual = true;
+        }
+        self.tab_edit_layer = Some(layer_index);
+        self.selected_layer = Some(layer_index);
+        self.node_edit = None;
+        self.selected_nodes.clear();
+        self.node_drag = None;
+        self.dragging_shape = false;
+        self.settings_edit_changed = true;
+        self.dirty = true;
+        self.set_status(
+            "tab editing: click a closed contour to add or remove tabs",
+            false,
+        );
+    }
+
+    fn exit_tab_edit(&mut self) {
+        if self.tab_edit_layer.take().is_some() {
+            self.set_status("tab editing finished", false);
+        }
+    }
+
+    fn tab_hit(&self, layer_index: usize, world: Point) -> Option<TabHit> {
+        let layer = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index && layer.visible)?;
+        let tolerance = (8.0 / f64::from(self.view.zoom)).max(0.1);
+        let mut best: Option<(f64, TabHit)> = None;
+        for shape in &layer.shapes {
+            for (contour, path) in flatten_path(&shape.path, DISPLAY_TOLERANCE)
+                .into_iter()
+                .enumerate()
+            {
+                if !path.closed || path.points.len() < 3 {
+                    continue;
+                }
+                let Some((fraction, distance)) = nearest_along_closed(&path.points, world) else {
+                    continue;
+                };
+                if distance <= tolerance
+                    && best.as_ref().is_none_or(|(current, _)| distance < *current)
+                {
+                    best = Some((
+                        distance,
+                        TabHit {
+                            shape: shape.id.clone(),
+                            contour,
+                            fraction,
+                            points: path.points,
+                        },
+                    ));
+                }
+            }
+        }
+        best.map(|(_, hit)| hit)
+    }
+
+    fn tab_edit_click(&mut self, screen: Pos2, area: Rect) {
+        let Some(layer_index) = self.tab_edit_layer else {
+            return;
+        };
+        let world = self.view.screen_to_world(area, screen);
+        let Some(hit) = self.tab_hit(layer_index, world) else {
+            self.set_status("click a closed contour to place a tab", true);
+            return;
+        };
+        let Some(layer) = self
+            .doc
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index)
+        else {
+            return;
+        };
+        let entry = layer
+            .manual_tabs
+            .iter()
+            .position(|tabs| tabs.shape == hit.shape && tabs.contour == hit.contour);
+        let positions = entry.map(|index| layer.manual_tabs[index].positions.clone());
+        let remove = positions.as_ref().and_then(|positions| {
+            positions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &position)| {
+                    let point = point_at_fraction(&hit.points, position)?;
+                    let distance = self.view.world_to_screen(area, point).distance(screen);
+                    (distance <= 8.0).then_some((distance, index))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, index)| index)
+        });
+
+        let Some(layer) = self
+            .doc
+            .layers
+            .iter_mut()
+            .find(|layer| layer.index == layer_index)
+        else {
+            return;
+        };
+        layer.tabs.manual = true;
+        let entry = layer
+            .manual_tabs
+            .iter()
+            .position(|tabs| tabs.shape == hit.shape && tabs.contour == hit.contour);
+        if let Some(index) = remove {
+            if let Some(entry_index) = entry {
+                let tabs = &mut layer.manual_tabs[entry_index];
+                if index < tabs.positions.len() {
+                    tabs.positions.remove(index);
+                }
+                if tabs.positions.is_empty() {
+                    layer.manual_tabs.remove(entry_index);
+                }
+            }
+            self.set_status("removed tab", false);
+        } else {
+            let entry_index = entry.unwrap_or_else(|| {
+                layer.manual_tabs.push(ManualTabs {
+                    shape: hit.shape.clone(),
+                    contour: hit.contour,
+                    positions: Vec::new(),
+                });
+                layer.manual_tabs.len() - 1
+            });
+            let positions = &mut layer.manual_tabs[entry_index].positions;
+            positions.push(hit.fraction.rem_euclid(1.0));
+            positions.sort_by(|a, b| a.total_cmp(b));
+            positions.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+            self.set_status("added tab", false);
+        }
+        self.settings_edit_changed = true;
+        self.dirty = true;
     }
 
     fn pause_is_safe(&self) -> bool {
@@ -4297,6 +4546,12 @@ impl OrleansApp {
                             }
                         });
                     if let Some(index) = pick {
+                        if self
+                            .tab_edit_layer
+                            .is_some_and(|active| active != index)
+                        {
+                            self.tab_edit_layer = None;
+                        }
                         let is_raster = self
                             .doc
                             .layers
@@ -4339,6 +4594,9 @@ impl OrleansApp {
                     let mut move_up = false;
                     let mut move_down = false;
                     let mut delete_layer = false;
+                    let mut toggle_tab_mode = false;
+                    let layer_index = self.doc.layers[pos].index;
+                    let tab_editing_here = self.tab_edit_layer == Some(layer_index);
                     // Name and colour do not affect the toolpath, so they are
                     // undoable without forcing a replan on every keystroke.
                     let mut display_changed = false;
@@ -4565,16 +4823,24 @@ impl OrleansApp {
                                 ui.horizontal(|ui| {
                                     ui.label("Tabs");
                                     changed |= ui
-                                        .add(
-                                            egui::DragValue::new(&mut layer.tabs.count)
-                                                .speed(1.0)
-                                                .range(0..=16),
-                                        )
+                                        .checkbox(&mut layer.tabs.manual, "Manual")
                                         .on_hover_text(
-                                            "Number of holding tabs per outer contour; 0 disables",
+                                            "Place tabs by clicking closed contours instead of distributing them evenly",
                                         )
                                         .changed();
-                                    if layer.tabs.count > 0 {
+                                    if !layer.tabs.manual {
+                                        changed |= ui
+                                            .add(
+                                                egui::DragValue::new(&mut layer.tabs.count)
+                                                    .speed(1.0)
+                                                    .range(0..=16),
+                                            )
+                                            .on_hover_text(
+                                                "Number of holding tabs per outer contour; 0 disables",
+                                            )
+                                            .changed();
+                                    }
+                                    if layer.tabs.manual || layer.tabs.count > 0 {
                                         ui.label("Width");
                                         changed |= ui
                                             .add(
@@ -4585,10 +4851,34 @@ impl OrleansApp {
                                             )
                                             .on_hover_text("Width of each uncut tab")
                                             .changed();
-                                        changed |= ui
-                                            .checkbox(&mut layer.tabs.inner, "Holes")
-                                            .on_hover_text("Also place tabs on inner contours")
-                                            .changed();
+                                        if !layer.tabs.manual {
+                                            changed |= ui
+                                                .checkbox(&mut layer.tabs.inner, "Holes")
+                                                .on_hover_text("Also place tabs on inner contours")
+                                                .changed();
+                                        }
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .button(if tab_editing_here {
+                                            "Done"
+                                        } else {
+                                            "Place tabs"
+                                        })
+                                        .on_hover_text(
+                                            "Click a closed contour to add a tab; click a tab again to remove it",
+                                        )
+                                        .clicked()
+                                    {
+                                        toggle_tab_mode = true;
+                                    }
+                                    if tab_editing_here {
+                                        ui.label(
+                                            RichText::new("click contours to add/remove tabs")
+                                                .small()
+                                                .weak(),
+                                        );
                                     }
                                 });
                             }
@@ -4677,6 +4967,14 @@ impl OrleansApp {
                         });
                     }
                     self.settings_edit_changed |= display_changed;
+                    if self.doc.layers[pos].mode != LayerMode::Line
+                        && self.tab_edit_layer == Some(layer_index)
+                    {
+                        self.tab_edit_layer = None;
+                    }
+                    if toggle_tab_mode {
+                        self.toggle_tab_edit(layer_index);
+                    }
                     if delete_layer {
                         self.delete_selected_layer();
                     } else if move_up {
@@ -5224,6 +5522,7 @@ impl OrleansApp {
             self.draw_travel(&painter, area);
         }
         self.draw_layers(&painter, area);
+        self.draw_tabs(&painter, area);
         self.draw_selected_shape(&painter, area);
         self.draw_nodes(&painter, area);
         self.draw_raster_selection(&painter, area);
@@ -5231,10 +5530,13 @@ impl OrleansApp {
 
         let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
         let node_editing = self.node_edit.is_some();
+        let tab_editing = self.tab_edit_layer.is_some();
 
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some(position) = response.interact_pointer_pos() {
-                if node_editing {
+                if tab_editing {
+                    self.tab_edit_click(position, area);
+                } else if node_editing {
                     if let Some(node) = self.node_at(position, area) {
                         if additive {
                             if !self.selected_nodes.remove(&node) {
@@ -5269,7 +5571,9 @@ impl OrleansApp {
                 .ctx()
                 .input(|input| input.pointer.press_origin())
                 .or_else(|| response.interact_pointer_pos());
-            if node_editing {
+            if tab_editing {
+                self.dragging_shape = false;
+            } else if node_editing {
                 self.dragging_shape = false;
                 if let Some(position) = origin {
                     if let Some(node) = self.node_at(position, area) {
@@ -5375,7 +5679,15 @@ impl OrleansApp {
         }
 
         if let Some(position) = response.hover_pos() {
-            if node_editing {
+            if tab_editing {
+                let world = self.view.screen_to_world(area, position);
+                if self
+                    .tab_edit_layer
+                    .is_some_and(|layer| self.tab_hit(layer, world).is_some())
+                {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+            } else if node_editing {
                 if self.node_at(position, area).is_some() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
@@ -5427,7 +5739,7 @@ impl OrleansApp {
                         self.fit_pending = true;
                     }
                 }
-            } else {
+            } else if !tab_editing {
                 self.fit_pending = true;
             }
         }
@@ -5722,6 +6034,68 @@ impl OrleansApp {
                     if points.len() >= 2 {
                         painter.add(egui::Shape::line(points, stroke));
                     }
+                }
+            }
+        }
+    }
+
+    fn draw_tabs(&self, painter: &egui::Painter, area: Rect) {
+        let Some(index) = self.selected_layer else {
+            return;
+        };
+        let Some(layer) = self.doc.layers.iter().find(|layer| layer.index == index) else {
+            return;
+        };
+        if !layer.visible
+            || layer.mode != LayerMode::Line
+            || layer.raster.is_some()
+            || (!layer.tabs.manual && layer.tabs.count == 0)
+            || (layer.tabs.manual && layer.manual_tabs.is_empty())
+        {
+            return;
+        }
+
+        let mut contours = Vec::new();
+        let mut origins = Vec::new();
+        for shape in &layer.shapes {
+            for (contour, path) in flatten_path(&shape.path, DISPLAY_TOLERANCE)
+                .into_iter()
+                .enumerate()
+            {
+                origins.push((shape.id.clone(), contour));
+                contours.push(path);
+            }
+        }
+        let depths = nesting_depths(&contours);
+        let palette = self.palette();
+        for ((contour, (shape, contour_index)), depth) in contours.iter().zip(origins).zip(depths) {
+            if !contour.closed {
+                continue;
+            }
+            let positions: Vec<f64> = if layer.tabs.manual {
+                layer
+                    .manual_tabs
+                    .iter()
+                    .find(|tabs| tabs.shape == shape && tabs.contour == contour_index)
+                    .map(|tabs| tabs.positions.clone())
+                    .unwrap_or_default()
+            } else if layer.tabs.count > 0 && (layer.tabs.inner || depth.is_multiple_of(2)) {
+                (0..layer.tabs.count)
+                    .map(|index| f64::from(index) / f64::from(layer.tabs.count))
+                    .collect()
+            } else {
+                continue;
+            };
+            if positions.is_empty() {
+                continue;
+            }
+            for span in tab_span_polylines(&contour.points, &positions, layer.tabs.width) {
+                let points: Vec<Pos2> = span
+                    .iter()
+                    .map(|point| self.view.world_to_screen(area, *point))
+                    .collect();
+                if points.len() >= 2 {
+                    painter.add(egui::Shape::line(points, Stroke::new(3.0, palette.tab)));
                 }
             }
         }
@@ -6299,12 +6673,19 @@ impl eframe::App for OrleansApp {
             if node_editing && !keyboard_input && i.key_pressed(egui::Key::Escape) {
                 action = Some(Action::ExitNodes);
             }
+            if !node_editing
+                && self.tab_edit_layer.is_some()
+                && !keyboard_input
+                && i.key_pressed(egui::Key::Escape)
+            {
+                action = Some(Action::ExitTabs);
+            }
             if !keyboard_input && i.key_pressed(egui::Key::Delete) {
-                action = Some(if node_editing {
-                    Action::DeleteNode
-                } else {
-                    Action::DeleteObjects
-                });
+                if node_editing {
+                    action = Some(Action::DeleteNode);
+                } else if self.tab_edit_layer.is_none() {
+                    action = Some(Action::DeleteObjects);
+                }
             }
         });
 
@@ -6336,6 +6717,7 @@ impl eframe::App for OrleansApp {
             Some(Action::Redo) => self.redo_edit(),
             Some(Action::Duplicate) => self.duplicate_selected(&[(0.0, 0.0)]),
             Some(Action::ExitNodes) => self.exit_node_edit(),
+            Some(Action::ExitTabs) => self.exit_tab_edit(),
             Some(Action::DeleteNode) => self.delete_selected_node(),
             Some(Action::DeleteObjects) => self.delete_selected_objects(),
             Some(Action::Reload) => {

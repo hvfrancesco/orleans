@@ -152,6 +152,18 @@ pub struct LayerSettings {
     pub tab_width: f64,
     #[serde(default)]
     pub tab_inner: bool,
+    #[serde(default)]
+    pub tab_manual: bool,
+    #[serde(default)]
+    pub manual_tabs: Vec<ManualTabsSettings>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManualTabsSettings {
+    pub shape: String,
+    pub contour: usize,
+    #[serde(default)]
+    pub positions: Vec<f64>,
 }
 
 fn default_true() -> bool {
@@ -284,6 +296,16 @@ impl ProjectFile {
                     tab_count: layer.tabs.count,
                     tab_width: layer.tabs.width,
                     tab_inner: layer.tabs.inner,
+                    tab_manual: layer.tabs.manual,
+                    manual_tabs: layer
+                        .manual_tabs
+                        .iter()
+                        .map(|tabs| ManualTabsSettings {
+                            shape: tabs.shape.clone(),
+                            contour: tabs.contour,
+                            positions: tabs.positions.clone(),
+                        })
+                        .collect(),
                 })
                 .collect(),
             kerf,
@@ -330,6 +352,7 @@ impl ProjectFile {
             layer.mode = parse_mode(&saved.mode);
             layer.fill = fill_from(saved);
             layer.tabs = tabs_from(saved);
+            layer.manual_tabs = manual_tabs_from(saved);
             layer.raster = saved.raster.as_ref().and_then(RasterSettings::to_image);
             doc.layers.push(layer);
         }
@@ -362,6 +385,7 @@ impl ProjectFile {
                 );
                 layer.fill = fill_from(saved);
                 layer.tabs = tabs_from(saved);
+                layer.manual_tabs = manual_tabs_from(saved);
                 if let Some(raster) = &saved.raster {
                     if let Some(image) = raster.to_image() {
                         layer.raster = Some(image);
@@ -532,7 +556,24 @@ fn tabs_from(saved: &LayerSettings) -> orleans_core::TabParams {
         count: saved.tab_count.min(16),
         width: saved.tab_width.clamp(0.5, 20.0),
         inner: saved.tab_inner,
+        manual: saved.tab_manual,
     }
+}
+
+fn manual_tabs_from(saved: &LayerSettings) -> Vec<orleans_core::ManualTabs> {
+    saved
+        .manual_tabs
+        .iter()
+        .map(|tabs| orleans_core::ManualTabs {
+            shape: tabs.shape.clone(),
+            contour: tabs.contour,
+            positions: tabs
+                .positions
+                .iter()
+                .map(|position| position.rem_euclid(1.0))
+                .collect(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -557,7 +598,13 @@ mod tests {
             count: 4,
             width: 2.5,
             inner: true,
+            manual: true,
         };
+        layer.manual_tabs.push(orleans_core::ManualTabs {
+            shape: "line".to_owned(),
+            contour: 0,
+            positions: vec![0.25, 0.75],
+        });
         doc.layers.push(layer);
 
         let project = ProjectFile::new(
@@ -595,6 +642,10 @@ mod tests {
         assert_eq!(back.layers[0].tab_count, 4);
         assert!((back.layers[0].tab_width - 2.5).abs() < 1e-9);
         assert!(back.layers[0].tab_inner);
+        assert!(back.layers[0].tab_manual);
+        assert_eq!(back.layers[0].manual_tabs.len(), 1);
+        assert_eq!(back.layers[0].manual_tabs[0].shape, "line");
+        assert_eq!(back.layers[0].manual_tabs[0].positions, vec![0.25, 0.75]);
         assert_eq!(back.transforms.len(), 1);
         assert_eq!(back.transforms[0].dx, 1.5);
         assert_eq!(back.transforms[0].dy, -2.0);
@@ -1080,6 +1131,8 @@ mod tests {
             tab_count: 0,
             tab_width: 3.0,
             tab_inner: false,
+            tab_manual: false,
+            manual_tabs: Vec::new(),
         };
         let project = ProjectFile {
             format: FORMAT,
@@ -1139,6 +1192,8 @@ mod tests {
                 tab_count: 3,
                 tab_width: 1.5,
                 tab_inner: true,
+                tab_manual: false,
+                manual_tabs: Vec::new(),
             }],
             kerf: 0.1,
             optimize: false,

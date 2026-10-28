@@ -184,6 +184,19 @@ pub struct TabParams {
     pub width: f64,
     /// Also place tabs on inner contours (holes).
     pub inner: bool,
+    /// Use the positions in [`Layer::manual_tabs`] instead of distributing
+    /// `count` tabs evenly.
+    pub manual: bool,
+}
+
+/// Manually placed tabs on one closed contour of a shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManualTabs {
+    pub shape: String,
+    /// Index of the closed contour in the flattened shape path.
+    pub contour: usize,
+    /// Tab centres as fractions of the contour perimeter, in `0..1`.
+    pub positions: Vec<f64>,
 }
 
 impl Default for TabParams {
@@ -192,6 +205,7 @@ impl Default for TabParams {
             count: 0,
             width: 3.0,
             inner: false,
+            manual: false,
         }
     }
 }
@@ -207,6 +221,7 @@ pub struct Layer {
     pub cut: CutParams,
     pub fill: FillParams,
     pub tabs: TabParams,
+    pub manual_tabs: Vec<ManualTabs>,
     pub raster: Option<RasterImage>,
     pub shapes: Vec<Shape>,
     /// Whether the layer is drawn in the editor.
@@ -225,6 +240,7 @@ impl Layer {
             cut,
             fill: FillParams::default(),
             tabs: TabParams::default(),
+            manual_tabs: Vec::new(),
             raster: None,
             shapes: Vec::new(),
             visible: true,
