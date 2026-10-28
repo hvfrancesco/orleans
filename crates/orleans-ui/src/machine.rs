@@ -35,6 +35,7 @@ pub enum Event {
     Disconnected(Option<String>),
     /// A raw `<...>` status report.
     Status(String),
+    Settings(Settings),
     JobStarted(usize),
     JobProgress {
         done: usize,
@@ -58,6 +59,8 @@ pub struct Machine {
     cancel: Arc<AtomicBool>,
     /// Set to abort an in-progress job without waiting for the worker loop.
     stream_stop: Arc<AtomicBool>,
+    /// Set to feed-hold an in-progress job and resume when cleared.
+    stream_pause: Arc<AtomicBool>,
 }
 
 impl Machine {
@@ -66,16 +69,19 @@ impl Machine {
         let (events, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stream_stop = Arc::new(AtomicBool::new(false));
+        let stream_pause = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         let worker_stop = Arc::clone(&stream_stop);
+        let worker_pause = Arc::clone(&stream_pause);
         let _ = thread::Builder::new()
             .name("orleans-machine".to_owned())
-            .spawn(move || worker(commands, events, worker_cancel, worker_stop));
+            .spawn(move || worker(commands, events, worker_cancel, worker_stop, worker_pause));
         Self {
             tx,
             rx,
             cancel,
             stream_stop,
+            stream_pause,
         }
     }
 
@@ -103,12 +109,22 @@ impl Machine {
 
     pub fn run(&self, program: &str) -> bool {
         self.stream_stop.store(false, Ordering::Relaxed);
+        self.stream_pause.store(false, Ordering::Relaxed);
         self.tx.send(Command::Run(program.to_owned())).is_ok()
     }
 
     /// Abort a running job. The driver sends feed hold and reset itself.
     pub fn stop_job(&self) {
         self.stream_stop.store(true, Ordering::Relaxed);
+        self.stream_pause.store(false, Ordering::Relaxed);
+    }
+
+    pub fn pause_job(&self) {
+        self.stream_pause.store(true, Ordering::Relaxed);
+    }
+
+    pub fn resume_job(&self) {
+        self.stream_pause.store(false, Ordering::Relaxed);
     }
 
     pub fn jog(&self, dx: f64, dy: f64, feed: f64) -> bool {
@@ -133,6 +149,7 @@ fn worker(
     events: Sender<Event>,
     cancel: Arc<AtomicBool>,
     stream_stop: Arc<AtomicBool>,
+    stream_pause: Arc<AtomicBool>,
 ) {
     const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
@@ -161,7 +178,7 @@ fn worker(
                             continue;
                         }
                         match result {
-                            Ok((connected, status)) => {
+                            Ok((connected, status, settings)) => {
                                 client = Some(connected);
                                 last_poll = Instant::now();
                                 misses = 0;
@@ -169,6 +186,7 @@ fn worker(
                                 reconnect_attempt = 0;
                                 let _ = events.send(Event::Connected(target));
                                 let _ = events.send(Event::Status(status));
+                                let _ = events.send(Event::Settings(settings));
                                 message(&events, "connection restored", false);
                             }
                             Err(err) => {
@@ -207,11 +225,12 @@ fn worker(
                     continue;
                 }
                 match result {
-                    Ok((connected, status)) => {
+                    Ok((connected, status, settings)) => {
                         client = Some(connected);
                         last_poll = Instant::now();
                         let _ = events.send(Event::Connected(target));
                         let _ = events.send(Event::Status(status));
+                        let _ = events.send(Event::Settings(settings));
                     }
                     Err(err) => {
                         endpoint = None;
@@ -281,16 +300,18 @@ fn worker(
                         .filter(|line| !line.is_empty() && !line.starts_with(';'))
                         .count();
                     let _ = events.send(Event::JobStarted(total));
-                    let result = connected.run_controlled(
+                    let result = connected.run_pausable(
                         &program,
                         |done, total| {
                             let _ = events.send(Event::JobProgress { done, total });
                         },
                         &stream_stop,
+                        &stream_pause,
                     );
                     match result {
                         Ok(acks) => {
-                            let idle = wait_until_idle(connected, &events, &stream_stop);
+                            let idle =
+                                wait_until_idle(connected, &events, &stream_stop, &stream_pause);
                             if idle {
                                 let _ = events.send(Event::JobDone(acks));
                             } else {
@@ -374,11 +395,13 @@ fn jog_line(dx: f64, dy: f64, feed: f64) -> String {
     format!("$J=G91 G21 X{dx:.3} Y{dy:.3} F{feed:.0}")
 }
 
+type Connected = (GrblClient<Box<dyn Transport>>, String, Settings);
+
 fn connect(
     endpoint: &str,
     tcp_timeout: Duration,
     probe_timeout: Duration,
-) -> Result<(GrblClient<Box<dyn Transport>>, String), String> {
+) -> Result<Connected, String> {
     let (host, port) = parse_endpoint(endpoint)?;
     let transport = TcpTransport::connect(&host, port, tcp_timeout)
         .map_err(|err| format!("connecting to {host}:{port}: {err}"))?;
@@ -393,7 +416,10 @@ fn connect(
         .probe_status(probe_timeout)
         .map_err(|err| format!("probing {host}:{port}: {err}"))?;
     match probe.status {
-        Some(status) => Ok((client, status)),
+        Some(status) => {
+            let settings = read_settings(&mut client);
+            Ok((client, status, settings))
+        }
         None => {
             let detail = if probe.seen.is_empty() {
                 "nothing received".to_owned()
@@ -415,11 +441,22 @@ fn wait_until_idle(
     connected: &mut GrblClient<Box<dyn Transport>>,
     events: &Sender<Event>,
     stop: &AtomicBool,
+    pause: &AtomicBool,
 ) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if stop.load(Ordering::Relaxed) {
             return false;
+        }
+        if pause.load(Ordering::Relaxed) {
+            let _ = connected.feed_hold();
+            while pause.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(50));
+            }
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            let _ = connected.resume();
         }
         let _ = connected.request_status();
         if let Ok(lines) = connected.collect_for(Duration::from_millis(200)) {
@@ -434,6 +471,49 @@ fn wait_until_idle(
         }
     }
     true
+}
+
+/// Controller settings that affect GUI safety.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Settings {
+    /// `$32=1`: laser mode. Required for a safe M4 pause.
+    pub laser_mode: Option<bool>,
+    /// `$30`: the S value for 100 % power.
+    pub max_s: Option<u32>,
+    /// `$22=1`: homing enabled.
+    pub homing: Option<bool>,
+}
+
+fn read_settings(client: &mut GrblClient<Box<dyn Transport>>) -> Settings {
+    let mut settings = Settings::default();
+    if client.write_command("$$").is_err() {
+        return settings;
+    }
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < deadline {
+        match client.transport_mut().read_line() {
+            Ok(Some(line)) => {
+                parse_setting(&line, &mut settings);
+                if line.trim() == "ok" {
+                    break;
+                }
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Err(_) => break,
+        }
+    }
+    settings
+}
+
+fn parse_setting(line: &str, settings: &mut Settings) {
+    let line = line.trim();
+    if let Some(value) = line.strip_prefix("$32=") {
+        settings.laser_mode = value.parse::<u8>().ok().map(|value| value != 0);
+    } else if let Some(value) = line.strip_prefix("$30=") {
+        settings.max_s = value.parse().ok();
+    } else if let Some(value) = line.strip_prefix("$22=") {
+        settings.homing = value.parse::<u8>().ok().map(|value| value != 0);
+    }
 }
 
 fn message(events: &Sender<Event>, text: impl Into<String>, error: bool) {
@@ -575,7 +655,9 @@ mod tests {
                                 b'\n' => {
                                     let command = std::mem::take(&mut line);
                                     let command = command.trim().to_owned();
-                                    let _ = tx.send(command.clone());
+                                    if command != "$$" {
+                                        let _ = tx.send(command.clone());
+                                    }
                                     let _ = stream.write_all(b"ok\n");
                                     let _ = stream.flush();
                                     if command == "$H" {
@@ -755,6 +837,20 @@ mod tests {
 
         drop(machine);
         let _ = server.join();
+    }
+
+    #[test]
+    fn parses_controller_settings() {
+        let mut settings = Settings::default();
+        parse_setting("$30=1000", &mut settings);
+        parse_setting("$32=1", &mut settings);
+        parse_setting("$22=0", &mut settings);
+        assert_eq!(settings.max_s, Some(1000));
+        assert_eq!(settings.laser_mode, Some(true));
+        assert_eq!(settings.homing, Some(false));
+
+        parse_setting("$32=0", &mut settings);
+        assert_eq!(settings.laser_mode, Some(false));
     }
 
     #[test]

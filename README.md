@@ -34,12 +34,12 @@ was decompiled or copied.
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
 | GUI laser-off framing pass | ✅ |
 | GUI jog (X/Y) and set work zero (`G92`) | ✅ |
-| GUI pause/resume | ❌ |
+| GUI pause/resume (M4 + `$32=1`; framing always) | ✅ |
 | Selection, transforms, node editing | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-63 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+65 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -97,7 +97,8 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 * wheel to zoom at the cursor, drag to pan, `F` or double-click to fit;
 * every SVG colour becomes a layer; edit speed, power and passes in the left
   panel and the job statistics update immediately;
-* kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel;
+* kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
+  (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
 * `Ctrl+O` opens, `Ctrl+E` exports, and dropping an SVG onto the window loads it;
 * the **Machine** panel connects over Telnet, shows the live GRBL state,
@@ -106,16 +107,22 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   enabled when the controller is idle or in alarm, with the laser off;
 * long status silences (for example while a controller homes) do not drop the
   link, and if the WiFi bridge closes the socket the GUI retries and reports
-  **Reconnecting…** instead of going offline;
+  **Reconnecting…** instead of going offline. On connect the GUI reads `$$`
+  and shows `$32` (laser mode), `$30` (max S) and `$22` (homing), warning when
+  `$32` is off or `$30` differs from **Max S**;
 * jog the head with the X/Y pad, an adjustable step and feed, and a jog-cancel
   button; **Set work zero** sends `G92 X0 Y0` at the current position. Jogging
   needs GRBL 1.1 (`$J=`); the G92 origin is temporary and a controller reset
   clears it. The position readout shows `WPos` when the controller reports it,
   otherwise `MPos`;
-* **Send to laser** streams the current job with a progress bar and a per-job
-  Stop button (feed hold + soft reset). It is only enabled when the controller
-  is connected, idle and the laser is off; `Ctrl+Enter` opens the confirmation,
-  and `Enter` confirms it;
+* **Send to laser** streams the current job with a progress bar, Pause/Resume
+  and a per-job Stop button (feed hold + soft reset). Sending is only enabled
+  when the controller is connected, idle and the laser is off; `Ctrl+Enter`
+  opens the confirmation and `Enter` confirms it. GUI jobs default to **M4
+  dynamic power**; Pause is offered only when the controller reports `$32=1`,
+  because a feed hold at zero velocity then switches the laser off. If you
+  switch a job to M3, Pause is disabled and you must use Stop. A framing pass
+  can always be paused because it holds `M5`;
 * **Frame** traces the job bounds at 3000 mm/min with the laser off, so you can
   check placement before committing to a cut.
 
@@ -123,11 +130,11 @@ The canvas shows the design geometry; kerf compensation is applied to the
 toolpath, so it affects the exported G-code and the statistics rather than the
 outline drawing, as in LightBurn. Sending a job uses the current layer settings
 and starts from the machine's current work origin, so set that origin before
-pressing **Send to laser**. There is no pause/resume yet; **Stop** aborts the
-job, resets the controller and switches the laser off. Pause is deliberately
-deferred: a plain GRBL feed hold can leave an `M3` laser enabled while the head
-is stationary, so a safe pause needs M4/`$32` verification or a pause at layer
-boundaries.
+pressing **Send to laser**. **Pause** uses feed hold and **Resume** cycle start. It is enabled only when
+the job was generated with **M4** and the controller reports `$32=1`; then the
+velocity-scaled laser is off at standstill. With `M3` the Pause button is
+disabled (a plain feed hold could leave the laser burning in place); **Stop**
+remains available. Framing can always be paused because it holds `M5`.
 
 ## Architecture
 
@@ -217,10 +224,9 @@ concept of a line and some bridges emit negotiation on connect.
 * Text in SVG needs a font database wired into `usvg::Options`; without it,
   text elements are dropped.
 * The simulator is protocol-level, not a motion model.
-* The GUI has no selection, transforms or node editing, and no pause/resume
-  yet: a plain feed hold can leave an `M3` laser burning in place, so stopping
-  a job aborts it rather than pausing. Framing uses a fixed 3000 mm/min and the
-  design bounds, with no margin setting.
+* The GUI has no selection, transforms or node editing. Pause is restricted to
+  M4 jobs with `$32=1`; M3 jobs can only be stopped. Framing uses a fixed
+  3000 mm/min and the design bounds, with no margin setting.
 * Work zero uses a temporary `G92` offset, not a stored G54 offset: a soft
   reset, Stop or controller reconnect after a reset clears it.
 * Large designs are redrawn as polylines every frame; a spatial index and
@@ -228,15 +234,15 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **Finish the editor** — selection, transforms, node editing, undo, then
-   job history and pause/resume for the streaming panel.
+1. **Finish the editor** — selection, transforms, node editing, undo, and job
+   history for the streaming panel.
 2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
 5. **Second driver** — Marlin, then Ruida over UDP.
-6. **Job control extras** — feed/power overrides, a laser-safe pause/resume,
-   stored work offsets, rotary setup.
+6. **Job control extras** — feed/power overrides, stored work offsets, rotary
+   setup.
 
 ## License
 

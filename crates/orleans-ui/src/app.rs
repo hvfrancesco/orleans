@@ -10,7 +10,7 @@ use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_import::{import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
-use crate::machine::{Event as MachineEvent, Machine, Status as MachineStatus};
+use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::preview::Preview;
 use crate::viewport::Viewport;
 
@@ -87,6 +87,9 @@ pub struct OrleansApp {
     homing: bool,
     saw_home: bool,
     frame_job: bool,
+    job_paused: bool,
+    job_uses_m4: bool,
+    settings: Option<Settings>,
 }
 
 impl OrleansApp {
@@ -103,7 +106,12 @@ impl OrleansApp {
             path: None,
             view: Viewport::default(),
             plan_opts: PlanOptions::default(),
-            gcode_opts: GcodeOptions::default(),
+            // The GUI defaults to velocity-scaled power: it is the safer
+            // choice for pausing and is what most diode controllers expect.
+            gcode_opts: GcodeOptions {
+                laser_mode: LaserMode::M4,
+                ..GcodeOptions::default()
+            },
             status: Status::ok("Open an SVG, or drop one onto the window."),
             dirty: false,
             fit_pending: true,
@@ -126,6 +134,9 @@ impl OrleansApp {
             homing: false,
             saw_home: false,
             frame_job: false,
+            job_paused: false,
+            job_uses_m4: false,
+            settings: None,
         };
         if let Some(path) = initial {
             app.load(path);
@@ -195,6 +206,7 @@ impl OrleansApp {
                     self.link = LinkState::Connecting;
                     self.reconnect_attempt = 0;
                     self.machine_status = None;
+                    self.settings = None;
                     self.set_status(format!("connecting to {endpoint}…"), false);
                 }
                 MachineEvent::Connected(endpoint) => {
@@ -214,6 +226,8 @@ impl OrleansApp {
                     self.link = LinkState::Disconnected;
                     self.reconnect_attempt = 0;
                     self.machine_status = None;
+                    self.settings = None;
+                    self.job_paused = false;
                     self.home_pending_until = None;
                     self.homing = false;
                     self.saw_home = false;
@@ -241,8 +255,12 @@ impl OrleansApp {
                         }
                     }
                 }
+                MachineEvent::Settings(settings) => {
+                    self.settings = Some(settings);
+                }
                 MachineEvent::JobStarted(total) => {
                     self.job_running = true;
+                    self.job_paused = false;
                     self.job_done = 0;
                     self.job_total = total;
                     self.confirm_send = false;
@@ -258,6 +276,7 @@ impl OrleansApp {
                 }
                 MachineEvent::JobDone(acks) => {
                     self.job_running = false;
+                    self.job_paused = false;
                     self.job_done = acks;
                     self.job_total = acks.max(self.job_total);
                     if self.frame_job {
@@ -269,6 +288,7 @@ impl OrleansApp {
                 }
                 MachineEvent::JobStopped => {
                     self.job_running = false;
+                    self.job_paused = false;
                     if self.frame_job {
                         self.set_status("framing stopped", true);
                     } else {
@@ -281,6 +301,7 @@ impl OrleansApp {
                 }
                 MachineEvent::JobFailed(reason) => {
                     self.job_running = false;
+                    self.job_paused = false;
                     if self.frame_job {
                         self.set_status(format!("framing failed: {reason}"), true);
                     } else {
@@ -347,10 +368,12 @@ impl OrleansApp {
             self.set_status("nothing to send: the job has no cuts", true);
             return;
         }
+        self.job_uses_m4 = self.gcode_opts.laser_mode == LaserMode::M4;
         let program = gcode::write(&self.job, &self.gcode_opts);
         if self.machine.run(&program) {
             self.job_running = true;
             self.frame_job = false;
+            self.job_paused = false;
             self.job_done = 0;
             self.job_total = 0;
             self.set_status("sending job…", false);
@@ -375,6 +398,8 @@ impl OrleansApp {
         if self.machine.run(&program) {
             self.job_running = true;
             self.frame_job = true;
+            self.job_uses_m4 = false;
+            self.job_paused = false;
             self.job_done = 0;
             self.job_total = 0;
             self.set_status("framing job bounds (laser off)…", false);
@@ -383,11 +408,22 @@ impl OrleansApp {
         }
     }
 
+    fn pause_is_safe(&self) -> bool {
+        self.job_uses_m4
+            && self
+                .settings
+                .as_ref()
+                .and_then(|settings| settings.laser_mode)
+                == Some(true)
+    }
+
     fn disconnect_machine(&mut self) {
         let _ = self.machine.disconnect();
         self.link = LinkState::Disconnected;
         self.reconnect_attempt = 0;
         self.machine_status = None;
+        self.settings = None;
+        self.job_paused = false;
         self.set_status("disconnected", false);
     }
 
@@ -460,15 +496,14 @@ impl OrleansApp {
                         ui.horizontal(|ui| {
                             ui.label("State");
                             if self.job_running {
-                                let label = if self.frame_job {
-                                    "Framing"
+                                let (label, color) = if self.job_paused {
+                                    ("Paused", Color32::from_rgb(120, 170, 240))
+                                } else if self.frame_job {
+                                    ("Framing", Color32::from_rgb(230, 190, 90))
                                 } else {
-                                    "Streaming"
+                                    ("Streaming", Color32::from_rgb(230, 190, 90))
                                 };
-                                ui.colored_label(
-                                    Color32::from_rgb(230, 190, 90),
-                                    RichText::new(label).strong(),
-                                );
+                                ui.colored_label(color, RichText::new(label).strong());
                             } else {
                                 ui.colored_label(
                                     state_color(&status.state),
@@ -477,7 +512,9 @@ impl OrleansApp {
                             }
                         });
                         if self.job_running {
-                            let note = if self.frame_job {
+                            let note = if self.job_paused {
+                                "feed hold active — press Resume"
+                            } else if self.frame_job {
                                 "live status paused while framing"
                             } else {
                                 "live status paused while sending"
@@ -513,6 +550,48 @@ impl OrleansApp {
                         };
                         ui.label(RichText::new(text).weak());
                     }
+                }
+
+                if let Some(settings) = &self.settings {
+                    let mut parts = Vec::new();
+                    if let Some(laser) = settings.laser_mode {
+                        parts.push(format!("$32={}", if laser { "1" } else { "0" }));
+                    }
+                    if let Some(max_s) = settings.max_s {
+                        parts.push(format!("$30={max_s}"));
+                    }
+                    if let Some(homing) = settings.homing {
+                        parts.push(format!("$22={}", if homing { "1" } else { "0" }));
+                    }
+                    if parts.is_empty() {
+                        ui.label(
+                            RichText::new("controller settings unavailable ($$)")
+                                .small()
+                                .weak(),
+                        );
+                    } else {
+                        ui.label(RichText::new(parts.join(" · ")).small().weak());
+                    }
+                    if settings.laser_mode == Some(false) {
+                        ui.colored_label(
+                            Color32::from_rgb(235, 120, 110),
+                            "laser mode is off ($32=0)",
+                        );
+                    }
+                    if let Some(max_s) = settings.max_s {
+                        if max_s != self.gcode_opts.max_s {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 190, 90),
+                                format!("Max S {} differs from $30={max_s}", self.gcode_opts.max_s),
+                            );
+                        }
+                    }
+                } else if self.link == LinkState::Connected {
+                    ui.label(
+                        RichText::new("controller settings unavailable ($$)")
+                            .small()
+                            .weak(),
+                    );
                 }
 
                 let connected = self.link == LinkState::Connected;
@@ -635,6 +714,37 @@ impl OrleansApp {
                             .show_percentage()
                             .text(format!("{} / {}", self.job_done, self.job_total)),
                     );
+                    ui.horizontal(|ui| {
+                        let pause_safe = self.frame_job || self.pause_is_safe();
+                        if ui
+                            .add_enabled(!self.job_paused && pause_safe, egui::Button::new("Pause"))
+                            .on_hover_text(if self.frame_job {
+                                "Pause the framing move"
+                            } else {
+                                "Feed hold. Requires M4 dynamic power and $32=1."
+                            })
+                            .clicked()
+                        {
+                            self.job_paused = true;
+                            self.machine.pause_job();
+                            self.set_status("pausing…", false);
+                        }
+                        if ui
+                            .add_enabled(self.job_paused, egui::Button::new("Resume"))
+                            .clicked()
+                        {
+                            self.job_paused = false;
+                            self.machine.resume_job();
+                            self.set_status("resuming…", false);
+                        }
+                    });
+                    if !self.frame_job && !self.pause_is_safe() {
+                        ui.label(
+                            RichText::new("Pause requires M4 + $32=1; use Stop.")
+                                .small()
+                                .weak(),
+                        );
+                    }
                     ui.add_space(2.0);
                 }
                 let can_send = self.can_send();
@@ -720,6 +830,7 @@ impl OrleansApp {
                 {
                     if self.job_running {
                         self.machine.stop_job();
+                        self.job_paused = false;
                         self.set_status("stopping job…", false);
                     } else if !self.machine.stop() {
                         self.set_status("machine thread stopped", true);
@@ -1010,7 +1121,11 @@ impl OrleansApp {
                     .changed();
 
                 let mut m4 = self.gcode_opts.laser_mode == LaserMode::M4;
-                if ui.checkbox(&mut m4, "Dynamic power (M4)").changed() {
+                if ui
+                    .checkbox(&mut m4, "Dynamic power (M4)")
+                    .on_hover_text("Velocity-scaled power. Required for a safe pause when $32=1.")
+                    .changed()
+                {
                     self.gcode_opts.laser_mode = if m4 { LaserMode::M4 } else { LaserMode::M3 };
                 }
 

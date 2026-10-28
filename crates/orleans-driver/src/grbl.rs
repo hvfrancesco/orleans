@@ -225,7 +225,8 @@ impl<T: Transport> GrblClient<T> {
         self.in_flight += line.len() + 1;
         let mut last_response = Instant::now();
         let never = AtomicBool::new(false);
-        self.wait_ack(&mut last_response, &never)
+        let mut held = false;
+        self.wait_ack(&mut last_response, &never, &never, &mut held)
     }
 
     /// Stream a whole G-code program, respecting the receive window.
@@ -243,7 +244,7 @@ impl<T: Transport> GrblClient<T> {
         F: FnMut(usize, usize),
     {
         let never = AtomicBool::new(false);
-        self.run_controlled(gcode, progress, &never)
+        self.run_pausable(gcode, progress, &never, &never)
     }
 
     /// Like [`Self::run_with_progress`], but aborts if `stop` becomes true.
@@ -251,13 +252,34 @@ impl<T: Transport> GrblClient<T> {
     pub fn run_controlled<F>(
         &mut self,
         gcode: &str,
-        mut progress: F,
+        progress: F,
         stop: &AtomicBool,
     ) -> Result<usize, DriverError>
     where
         F: FnMut(usize, usize),
     {
-        match self.run_inner(gcode, &mut progress, stop) {
+        let never = AtomicBool::new(false);
+        self.run_pausable(gcode, progress, stop, &never)
+    }
+
+    /// Stream G-code with both stop and pause controls.
+    ///
+    /// Pause sends feed hold (`!`) and continues to consume acknowledgements
+    /// until `pause` clears, then resumes (`~`). There is no timeout while
+    /// paused; `stop` is the way out. Callers must only use pause when the
+    /// laser is known to be off at standstill (M4 dynamic power with `$32=1`,
+    /// or a framing pass that holds `M5`).
+    pub fn run_pausable<F>(
+        &mut self,
+        gcode: &str,
+        mut progress: F,
+        stop: &AtomicBool,
+        pause: &AtomicBool,
+    ) -> Result<usize, DriverError>
+    where
+        F: FnMut(usize, usize),
+    {
+        match self.run_inner(gcode, &mut progress, stop, pause) {
             Ok(acks) => Ok(acks),
             Err(err) => {
                 // Never leave the laser enabled after an aborted stream. A
@@ -275,6 +297,7 @@ impl<T: Transport> GrblClient<T> {
         gcode: &str,
         progress: &mut F,
         stop: &AtomicBool,
+        pause: &AtomicBool,
     ) -> Result<usize, DriverError>
     where
         F: FnMut(usize, usize),
@@ -287,12 +310,16 @@ impl<T: Transport> GrblClient<T> {
             .collect();
         let total = lines.len();
         let mut last_response = Instant::now();
+        let mut held = false;
         progress(0, total);
 
         for line in lines {
             if stop.load(Ordering::Relaxed) {
                 return Err(DriverError::Stopped);
             }
+            self.handle_pause(stop, pause, &mut held, &mut last_response)?;
+            progress(self.acked, total);
+
             let bytes = line.len() + 1;
             if bytes > self.config.window {
                 return Err(DriverError::Controller(format!(
@@ -301,7 +328,7 @@ impl<T: Transport> GrblClient<T> {
                 )));
             }
             while self.in_flight + bytes > self.config.window {
-                self.wait_ack(&mut last_response, stop)?;
+                self.wait_ack(&mut last_response, stop, pause, &mut held)?;
                 progress(self.acked, total);
             }
             self.transport.write_line(line)?;
@@ -310,9 +337,13 @@ impl<T: Transport> GrblClient<T> {
         }
 
         while self.in_flight > 0 {
-            self.wait_ack(&mut last_response, stop)?;
+            self.wait_ack(&mut last_response, stop, pause, &mut held)?;
             progress(self.acked, total);
         }
+
+        // A pause can arrive just as the last acknowledgement lands.
+        self.handle_pause(stop, pause, &mut held, &mut last_response)?;
+        progress(self.acked, total);
         Ok(self.acked)
     }
 
@@ -322,10 +353,19 @@ impl<T: Transport> GrblClient<T> {
         &mut self,
         last_response: &mut Instant,
         stop: &AtomicBool,
+        pause: &AtomicBool,
+        held: &mut bool,
     ) -> Result<(), DriverError> {
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Err(DriverError::Stopped);
+            }
+            if pause.load(Ordering::Relaxed) {
+                if self.handle_pause(stop, pause, held, last_response)? {
+                    // An acknowledgement was consumed while paused.
+                    return Ok(());
+                }
+                continue;
             }
             if last_response.elapsed() > self.config.timeout {
                 return Err(DriverError::Timeout(self.config.timeout));
@@ -333,25 +373,71 @@ impl<T: Transport> GrblClient<T> {
             match self.transport.read_line()? {
                 Some(line) => {
                     *last_response = Instant::now();
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if line.starts_with("ok") {
-                        if let Some(bytes) = self.pending.pop_front() {
-                            self.in_flight = self.in_flight.saturating_sub(bytes);
-                        }
-                        self.acked += 1;
+                    if self.consume_line(&line)? {
                         return Ok(());
                     }
-                    if line.starts_with("error") || line.starts_with("ALARM") {
-                        return Err(DriverError::Controller(line.to_owned()));
-                    }
-                    // Banner and status reports are informational.
                 }
                 None => std::thread::sleep(Duration::from_millis(1)),
             }
         }
+    }
+
+    /// Hold the machine while `pause` is set. Returns true if any `ok` was
+    /// consumed while waiting, so the caller can re-evaluate its window.
+    fn handle_pause(
+        &mut self,
+        stop: &AtomicBool,
+        pause: &AtomicBool,
+        held: &mut bool,
+        last_response: &mut Instant,
+    ) -> Result<bool, DriverError> {
+        if !pause.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        if !*held {
+            self.feed_hold()?;
+            *held = true;
+        }
+        let mut consumed = false;
+        while pause.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) {
+                return Err(DriverError::Stopped);
+            }
+            match self.transport.read_line()? {
+                Some(line) => {
+                    *last_response = Instant::now();
+                    if self.consume_line(&line)? {
+                        consumed = true;
+                    }
+                }
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        if *held {
+            self.resume()?;
+            *held = false;
+        }
+        *last_response = Instant::now();
+        Ok(consumed)
+    }
+
+    /// Account for one response line. Returns true for `ok`.
+    fn consume_line(&mut self, line: &str) -> Result<bool, DriverError> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(false);
+        }
+        if line.starts_with("ok") {
+            if let Some(bytes) = self.pending.pop_front() {
+                self.in_flight = self.in_flight.saturating_sub(bytes);
+            }
+            self.acked += 1;
+            return Ok(true);
+        }
+        if line.starts_with("error") || line.starts_with("ALARM") {
+            return Err(DriverError::Controller(line.to_owned()));
+        }
+        Ok(false)
     }
 }
 
@@ -554,6 +640,35 @@ mod tests {
             .run(&program)
             .expect("responsive job over the timeout");
         assert_eq!(acks, 20);
+    }
+
+    #[test]
+    fn pause_holds_and_resumes() {
+        let mut client = GrblClient::with_config(
+            SlowAcks::new(),
+            GrblConfig {
+                window: 120,
+                timeout: Duration::from_secs(5),
+            },
+        );
+        let pause = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = AtomicBool::new(false);
+        let flag = pause.clone();
+        let pauser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            flag.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(150));
+            flag.store(false, Ordering::Relaxed);
+        });
+        let program: String = (0..100).map(|i| format!("G0 X{i} Y0\n")).collect();
+        let acks = client
+            .run_pausable(&program, |_, _| {}, &stop, &pause)
+            .expect("paused job should resume and finish");
+        pauser.join().expect("pauser");
+        assert_eq!(acks, 100);
+        let raw = &client.transport().raw;
+        assert!(raw.contains(&b'!'), "missing feed hold: {raw:?}");
+        assert!(raw.contains(&b'~'), "missing resume: {raw:?}");
     }
 
     #[test]
