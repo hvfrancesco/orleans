@@ -30,7 +30,29 @@ impl Theme {
     fn visuals(self) -> egui::Visuals {
         match self {
             Self::Dark => egui::Visuals::dark(),
-            Self::Light => egui::Visuals::light(),
+            Self::Light => {
+                // egui's light theme is almost white; soften the panels and
+                // controls a little so the canvas is not the only mid-tone.
+                let mut visuals = egui::Visuals::light();
+                visuals.panel_fill = Color32::from_gray(228);
+                visuals.window_fill = Color32::from_gray(236);
+                visuals.faint_bg_color = Color32::from_gray(218);
+                visuals.extreme_bg_color = Color32::from_gray(245);
+                visuals.code_bg_color = Color32::from_gray(222);
+                visuals.window_stroke = Stroke::new(1.0, Color32::from_gray(180));
+                visuals.hyperlink_color = Color32::from_rgb(0, 105, 190);
+                visuals.selection.bg_fill = Color32::from_rgb(170, 205, 235);
+                visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0, 80, 130));
+                visuals.widgets.noninteractive.bg_fill = Color32::from_gray(228);
+                visuals.widgets.noninteractive.weak_bg_fill = Color32::from_gray(228);
+                visuals.widgets.inactive.bg_fill = Color32::from_gray(214);
+                visuals.widgets.inactive.weak_bg_fill = Color32::from_gray(214);
+                visuals.widgets.hovered.bg_fill = Color32::from_gray(202);
+                visuals.widgets.hovered.weak_bg_fill = Color32::from_gray(202);
+                visuals.widgets.active.bg_fill = Color32::from_gray(182);
+                visuals.widgets.active.weak_bg_fill = Color32::from_gray(182);
+                visuals
+            }
         }
     }
 
@@ -88,16 +110,16 @@ impl CanvasPalette {
                 origin: Color32::from_rgb(230, 190, 90),
             },
             Theme::Light => Self {
-                background: Color32::from_rgb(248, 248, 244),
-                grid: Color32::from_gray(224),
-                axis_x: Color32::from_rgb(190, 90, 90),
-                axis_y: Color32::from_rgb(90, 150, 90),
-                page: Color32::from_gray(150),
-                travel: Color32::from_gray(190),
+                background: Color32::from_rgb(232, 232, 228),
+                grid: Color32::from_gray(214),
+                axis_x: Color32::from_rgb(180, 80, 80),
+                axis_y: Color32::from_rgb(80, 140, 80),
+                page: Color32::from_gray(138),
+                travel: Color32::from_gray(178),
                 bed_fill: Color32::from_rgba_unmultiplied(60, 100, 160, 20),
-                bed_stroke: Color32::from_rgb(70, 105, 160),
-                bed_text: Color32::from_rgb(70, 100, 145),
-                muted: Color32::from_gray(150),
+                bed_stroke: Color32::from_rgb(60, 95, 150),
+                bed_text: Color32::from_rgb(60, 90, 135),
+                muted: Color32::from_gray(140),
                 selection: Color32::from_rgb(190, 130, 0),
                 selection_bounds: Color32::from_rgb(205, 145, 20),
                 handle_fill: Color32::WHITE,
