@@ -4,7 +4,8 @@
 //! Geometry comes from the SVG, while the project stores the per-layer cutting
 //! parameters, the job-level options, shape transforms and node-edited paths.
 
-use orleans_core::{CutParams, Document, LayerMode};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use orleans_core::{CutParams, Document, Layer, LayerMode, RasterImage, RasterMode};
 use orleans_driver::gcode::LaserMode;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,11 @@ pub struct ProjectFile {
     pub optimize: bool,
     pub laser_mode: String,
     pub max_s: u32,
+    /// Document page size in millimetres.
+    #[serde(default = "default_page_size")]
+    pub width_mm: f64,
+    #[serde(default = "default_page_size")]
+    pub height_mm: f64,
     /// Affine edits applied to individual shapes in the editor.
     #[serde(default)]
     pub transforms: Vec<ShapeTransform>,
@@ -74,6 +80,9 @@ pub struct LayerSettings {
     pub fill_overlap: f64,
     #[serde(default = "default_true")]
     pub fill_alternate: bool,
+    /// Embedded grayscale raster image, if this is a raster layer.
+    #[serde(default)]
+    pub raster: Option<RasterSettings>,
     #[serde(default)]
     pub tab_count: u32,
     #[serde(default = "default_tab_width")]
@@ -92,6 +101,81 @@ fn default_fill_spacing() -> f64 {
 
 fn default_tab_width() -> f64 {
     orleans_core::TabParams::default().width
+}
+
+fn default_page_size() -> f64 {
+    0.0
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RasterSettings {
+    pub width: u32,
+    pub height: u32,
+    /// Base64-encoded row-major grayscale pixels, top row first.
+    pub pixels: String,
+    pub x: f64,
+    pub y: f64,
+    pub width_mm: f64,
+    pub height_mm: f64,
+    pub mode: String,
+    pub threshold: u8,
+    pub invert: bool,
+    pub line_interval: f64,
+    pub bidirectional: bool,
+}
+
+impl RasterSettings {
+    fn from_image(image: &RasterImage) -> Self {
+        Self {
+            width: image.width,
+            height: image.height,
+            pixels: STANDARD.encode(&image.grayscale),
+            x: image.x,
+            y: image.y,
+            width_mm: image.width_mm,
+            height_mm: image.height_mm,
+            mode: match image.mode {
+                RasterMode::Threshold => "Threshold",
+                RasterMode::Dither => "Dither",
+                RasterMode::Grayscale => "Grayscale",
+            }
+            .to_owned(),
+            threshold: image.threshold,
+            invert: image.invert,
+            line_interval: image.line_interval,
+            bidirectional: image.bidirectional,
+        }
+    }
+
+    fn to_image(&self) -> Option<RasterImage> {
+        if self.width == 0 || self.height == 0 || self.width_mm <= 0.0 || self.height_mm <= 0.0 {
+            return None;
+        }
+        let pixels = STANDARD.decode(&self.pixels).ok()?;
+        if pixels.len() != (self.width as usize).checked_mul(self.height as usize)? {
+            return None;
+        }
+        Some(RasterImage {
+            width: self.width,
+            height: self.height,
+            grayscale: pixels,
+            x: self.x,
+            y: self.y,
+            width_mm: self.width_mm,
+            height_mm: self.height_mm,
+            mode: if self.mode.eq_ignore_ascii_case("dither") {
+                RasterMode::Dither
+            } else if self.mode.eq_ignore_ascii_case("grayscale") {
+                RasterMode::Grayscale
+            } else {
+                RasterMode::Threshold
+            },
+            threshold: self.threshold,
+            invert: self.invert,
+            line_interval: self.line_interval,
+            bidirectional: self.bidirectional,
+        })
+    }
 }
 
 impl ProjectFile {
@@ -127,6 +211,7 @@ impl ProjectFile {
                     fill_angle: layer.fill.angle,
                     fill_overlap: layer.fill.overlap,
                     fill_alternate: layer.fill.alternate,
+                    raster: layer.raster.as_ref().map(RasterSettings::from_image),
                     tab_count: layer.tabs.count,
                     tab_width: layer.tabs.width,
                     tab_inner: layer.tabs.inner,
@@ -140,14 +225,41 @@ impl ProjectFile {
             }
             .to_owned(),
             max_s,
+            width_mm: doc.width.max(1.0),
+            height_mm: doc.height.max(1.0),
             transforms,
             edited_paths: Vec::new(),
         }
     }
 
     /// Apply the stored per-layer settings and cut order to a freshly imported
-    /// document.
+    /// document, adding any raster layers that are not present in the SVG.
     pub fn apply(&self, doc: &mut Document) {
+        // Saved raster layers have no SVG geometry, so create missing layers
+        // before ordering the final layer list.
+        for saved in &self.layers {
+            if doc.layers.iter().any(|layer| layer.index == saved.index) {
+                continue;
+            }
+            let mut layer = Layer::new(
+                saved.index,
+                saved.name.clone(),
+                saved.color,
+                CutParams::new(
+                    saved.speed.max(0.0),
+                    saved.power.clamp(0.0, 100.0),
+                    saved.passes,
+                ),
+            );
+            layer.visible = saved.visible;
+            layer.output = saved.output;
+            layer.mode = parse_mode(&saved.mode);
+            layer.fill = fill_from(saved);
+            layer.tabs = tabs_from(saved);
+            layer.raster = saved.raster.as_ref().and_then(RasterSettings::to_image);
+            doc.layers.push(layer);
+        }
+
         // The order of `layers` in the project is the cut order.
         let mut ordered = Vec::with_capacity(doc.layers.len());
         for saved in &self.layers {
@@ -168,28 +280,25 @@ impl ProjectFile {
                 layer.color = saved.color;
                 layer.visible = saved.visible;
                 layer.output = saved.output;
-                layer.mode = if saved.mode.eq_ignore_ascii_case("fill") {
-                    LayerMode::Fill
-                } else {
-                    LayerMode::Line
-                };
+                layer.mode = parse_mode(&saved.mode);
                 layer.cut = CutParams::new(
                     saved.speed.max(0.0),
                     saved.power.clamp(0.0, 100.0),
                     saved.passes,
                 );
-                layer.fill = orleans_core::FillParams {
-                    spacing: saved.fill_spacing.clamp(0.05, 10.0),
-                    angle: saved.fill_angle.clamp(0.0, 180.0),
-                    overlap: saved.fill_overlap.clamp(0.0, 5.0),
-                    alternate: saved.fill_alternate,
-                };
-                layer.tabs = orleans_core::TabParams {
-                    count: saved.tab_count.min(16),
-                    width: saved.tab_width.clamp(0.5, 20.0),
-                    inner: saved.tab_inner,
-                };
+                layer.fill = fill_from(saved);
+                layer.tabs = tabs_from(saved);
+                if let Some(raster) = &saved.raster {
+                    if let Some(image) = raster.to_image() {
+                        layer.raster = Some(image);
+                    }
+                }
             }
+        }
+
+        if self.width_mm > 0.0 && self.height_mm > 0.0 {
+            doc.width = self.width_mm;
+            doc.height = self.height_mm;
         }
 
         for transform in &self.transforms {
@@ -243,6 +352,33 @@ impl ProjectFile {
         } else {
             LaserMode::M3
         }
+    }
+}
+
+fn parse_mode(mode: &str) -> LayerMode {
+    if mode.eq_ignore_ascii_case("fill") {
+        LayerMode::Fill
+    } else if mode.eq_ignore_ascii_case("raster") {
+        LayerMode::Raster
+    } else {
+        LayerMode::Line
+    }
+}
+
+fn fill_from(saved: &LayerSettings) -> orleans_core::FillParams {
+    orleans_core::FillParams {
+        spacing: saved.fill_spacing.clamp(0.05, 10.0),
+        angle: saved.fill_angle.clamp(0.0, 180.0),
+        overlap: saved.fill_overlap.clamp(0.0, 5.0),
+        alternate: saved.fill_alternate,
+    }
+}
+
+fn tabs_from(saved: &LayerSettings) -> orleans_core::TabParams {
+    orleans_core::TabParams {
+        count: saved.tab_count.min(16),
+        width: saved.tab_width.clamp(0.5, 20.0),
+        inner: saved.tab_inner,
     }
 }
 
@@ -347,6 +483,54 @@ mod tests {
     }
 
     #[test]
+    fn raster_layers_round_trip_into_empty_documents() {
+        let mut doc = Document::new(20.0, 10.0);
+        let mut layer = Layer::new(0, "photo", [0, 0, 0], CutParams::new(900.0, 30.0, 1));
+        layer.mode = LayerMode::Raster;
+        layer.raster = Some(orleans_core::RasterImage {
+            width: 2,
+            height: 1,
+            grayscale: vec![0, 255],
+            x: 1.0,
+            y: 2.0,
+            width_mm: 10.0,
+            height_mm: 5.0,
+            mode: orleans_core::RasterMode::Dither,
+            threshold: 100,
+            invert: true,
+            line_interval: 0.2,
+            bidirectional: false,
+        });
+        doc.layers.push(layer);
+        let project = ProjectFile::new(
+            String::new(),
+            None,
+            &doc,
+            0.0,
+            true,
+            LaserMode::M4,
+            1000,
+            Vec::new(),
+        );
+        assert!(project.width_mm > 0.0);
+        let json = serde_json::to_string(&project).expect("serialise");
+        let back: ProjectFile = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back.layers[0].mode, "Raster");
+        let saved = back.layers[0].raster.as_ref().expect("raster settings");
+        assert_eq!(saved.width, 2);
+        assert_eq!(saved.height, 1);
+
+        let mut loaded = Document::new(1.0, 1.0);
+        back.apply(&mut loaded);
+        let raster = loaded.layers[0].raster.as_ref().expect("raster image");
+        assert_eq!(raster.grayscale, vec![0, 255]);
+        assert_eq!(raster.mode, orleans_core::RasterMode::Dither);
+        assert!(raster.invert);
+        assert!((raster.width_mm - 10.0).abs() < 1e-9);
+        assert!((loaded.width - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn old_projects_without_edited_paths_still_load() {
         let json = r#"{
             "format": 1,
@@ -439,6 +623,8 @@ mod tests {
             optimize: true,
             laser_mode: "M4".to_owned(),
             max_s: 1000,
+            width_mm: 100.0,
+            height_mm: 100.0,
             transforms: vec![ShapeTransform {
                 layer: 0,
                 shape: "line".to_owned(),
@@ -480,6 +666,8 @@ mod tests {
             optimize: true,
             laser_mode: "M4".to_owned(),
             max_s: 1000,
+            width_mm: 100.0,
+            height_mm: 100.0,
             transforms: vec![ShapeTransform {
                 layer: 0,
                 shape: "line".to_owned(),
@@ -514,6 +702,8 @@ mod tests {
             optimize: true,
             laser_mode: "M4".to_owned(),
             max_s: 1000,
+            width_mm: 100.0,
+            height_mm: 100.0,
             transforms: vec![ShapeTransform {
                 layer: 0,
                 shape: "line".to_owned(),
@@ -551,6 +741,7 @@ mod tests {
             fill_angle: 0.0,
             fill_overlap: 0.0,
             fill_alternate: true,
+            raster: None,
             tab_count: 0,
             tab_width: 3.0,
             tab_inner: false,
@@ -564,6 +755,8 @@ mod tests {
             optimize: true,
             laser_mode: "M4".to_owned(),
             max_s: 1000,
+            width_mm: 100.0,
+            height_mm: 100.0,
             transforms: Vec::new(),
             edited_paths: Vec::new(),
         };
@@ -600,6 +793,7 @@ mod tests {
                 fill_angle: 45.0,
                 fill_overlap: 0.1,
                 fill_alternate: false,
+                raster: None,
                 tab_count: 3,
                 tab_width: 1.5,
                 tab_inner: true,
@@ -608,6 +802,8 @@ mod tests {
             optimize: false,
             laser_mode: "M3".to_owned(),
             max_s: 500,
+            width_mm: 100.0,
+            height_mm: 80.0,
             transforms: Vec::new(),
             edited_paths: Vec::new(),
         };

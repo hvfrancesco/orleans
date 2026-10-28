@@ -7,4 +7,5 @@ edition.workspace = true
 kurbo.workspace = true
 usvg.workspace = true
 thiserror.workspace = true
+image.workspace = true
 orleans-core = { path = "../orleans-core" }

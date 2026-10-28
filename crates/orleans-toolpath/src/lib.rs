@@ -9,7 +9,9 @@
 //! * repeat each contour for multi-pass layers.
 
 use kurbo::Point;
-use orleans_core::{Document, Job, JobStats, LayerMode, Op};
+use orleans_core::{
+    CutParams, Document, Job, JobStats, Layer, LayerMode, Op, RasterImage, RasterMode,
+};
 use orleans_geom::{
     dedup, flatten_path, hatch_contours, offset_closed, point_in_polygon, split_tabs, Contour,
     HatchOptions,
@@ -58,6 +60,11 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
         if !layer.output || layer.is_empty() {
             continue;
         }
+        if let Some(raster) = &layer.raster {
+            plan_raster(layer, raster, &mut job, &mut stats, &mut pos);
+            continue;
+        }
+
         let contours: Vec<Contour> = layer
             .shapes
             .iter()
@@ -159,6 +166,195 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
     stats.seconds += stats.travel_mm / opt.rapid_speed.max(1.0) * 60.0;
     job.stats = stats;
     job
+}
+
+fn plan_raster(
+    layer: &Layer,
+    raster: &RasterImage,
+    job: &mut Job,
+    stats: &mut JobStats,
+    pos: &mut Point,
+) {
+    if raster.width == 0
+        || raster.height == 0
+        || raster.width_mm <= 0.0
+        || raster.height_mm <= 0.0
+        || raster.grayscale.len() < (raster.width * raster.height) as usize
+    {
+        return;
+    }
+    let interval = if raster.line_interval > 1e-6 {
+        raster.line_interval
+    } else {
+        raster.height_mm / f64::from(raster.height)
+    };
+    if !interval.is_finite() || interval <= 1e-6 {
+        return;
+    }
+    let rows = ((raster.height_mm / interval).ceil() as usize).min(1_000_000);
+    let dither = if raster.mode == RasterMode::Dither {
+        Some(dither_map(raster))
+    } else {
+        None
+    };
+    let pixel_width = raster.width_mm / f64::from(raster.width);
+    let threshold = f32::from(raster.threshold);
+
+    for row_index in 0..rows {
+        let y = raster.y + (row_index as f64 + 0.5) * interval;
+        if y >= raster.y + raster.height_mm {
+            continue;
+        }
+        let from_bottom = ((y - raster.y) / raster.height_mm * f64::from(raster.height))
+            .floor()
+            .clamp(0.0, f64::from(raster.height - 1)) as u32;
+        let source_row = raster.height - 1 - from_bottom;
+        let mut runs: Vec<(u32, u32, Option<CutParams>)> = Vec::new();
+        match raster.mode {
+            RasterMode::Threshold | RasterMode::Dither => {
+                let mut start = None;
+                for x in 0..raster.width {
+                    let active = if let Some(map) = &dither {
+                        map[(source_row * raster.width + x) as usize] != 0
+                    } else {
+                        darkness(raster, x, source_row) >= threshold
+                    };
+                    match (active, start) {
+                        (true, None) => start = Some(x),
+                        (false, Some(first)) => {
+                            runs.push((first, x, None));
+                            start = None;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(first) = start {
+                    runs.push((first, raster.width, None));
+                }
+            }
+            RasterMode::Grayscale => {
+                let mut start = None;
+                let mut level = 0u8;
+                for x in 0..raster.width {
+                    let current = grayscale_level(darkness(raster, x, source_row));
+                    let active = current > 0;
+                    if active {
+                        if start.is_none() {
+                            start = Some(x);
+                            level = current;
+                        } else if current != level {
+                            runs.push((
+                                start.expect("started"),
+                                x,
+                                Some(power_for_level(layer, level)),
+                            ));
+                            start = Some(x);
+                            level = current;
+                        }
+                    } else if let Some(first) = start.take() {
+                        if level > 0 {
+                            runs.push((first, x, Some(power_for_level(layer, level))));
+                        }
+                    }
+                }
+                if let Some(first) = start {
+                    if level > 0 {
+                        runs.push((first, raster.width, Some(power_for_level(layer, level))));
+                    }
+                }
+            }
+        }
+
+        if raster.bidirectional && row_index % 2 == 1 {
+            runs.reverse();
+        }
+        for (first, end, params) in runs {
+            let mut start = Point::new(raster.x + f64::from(first) * pixel_width, y);
+            let mut finish = Point::new(raster.x + f64::from(end) * pixel_width, y);
+            if raster.bidirectional && row_index % 2 == 1 {
+                std::mem::swap(&mut start, &mut finish);
+            }
+            let length = (finish - start).hypot();
+            if length <= 1e-9 {
+                continue;
+            }
+            let params = params.unwrap_or(layer.cut);
+            for _ in 0..layer.cut.passes.max(1) {
+                if (*pos - start).hypot() > 1e-6 {
+                    stats.travel_mm += (*pos - start).hypot();
+                    job.ops.push(Op::Rapid { to: start });
+                }
+                stats.cut_mm += length;
+                stats.seconds += length / layer.cut.speed.max(1.0) * 60.0;
+                job.ops.push(Op::Cut {
+                    polyline: vec![start, finish],
+                    params,
+                    layer: layer.index,
+                });
+                *pos = finish;
+            }
+        }
+    }
+}
+
+fn darkness(raster: &RasterImage, x: u32, y: u32) -> f32 {
+    let value = f32::from(raster.pixel(x, y));
+    if raster.invert {
+        value
+    } else {
+        255.0 - value
+    }
+}
+
+fn grayscale_level(darkness: f32) -> u8 {
+    ((darkness.max(0.0) / 255.0 * 16.0).round() as u8).min(16)
+}
+
+fn power_for_level(layer: &Layer, level: u8) -> CutParams {
+    let mut params = layer.cut;
+    params.power = layer.cut.power * f64::from(level) / 16.0;
+    params
+}
+
+fn dither_map(raster: &RasterImage) -> Vec<u8> {
+    let width = raster.width as usize;
+    let height = raster.height as usize;
+    let mut work: Vec<f32> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .map(|(x, y)| darkness(raster, x as u32, y as u32))
+        .collect();
+    let mut out = vec![0u8; work.len()];
+    let threshold = f32::from(raster.threshold);
+    let at = |x: isize, y: isize, width: usize, height: usize| -> Option<usize> {
+        if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
+            Some(y as usize * width + x as usize)
+        } else {
+            None
+        }
+    };
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            let old = work[index];
+            let new = if old >= threshold { 255.0 } else { 0.0 };
+            let error = old - new;
+            if new > 0.0 {
+                out[index] = 255;
+            }
+            work[index] = new;
+            for (dx, dy, weight) in [
+                (1isize, 0isize, 7.0f32),
+                (-1, 1, 3.0),
+                (0, 1, 5.0),
+                (1, 1, 1.0),
+            ] {
+                if let Some(target) = at(x as isize + dx, y as isize + dy, width, height) {
+                    work[target] += error * weight / 16.0;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// How many other contours contain each contour. 0 = outermost.
@@ -304,6 +500,60 @@ mod tests {
         // The hole is 4x4 and the outer contour 10x10.
         let hole_area = orleans_geom::signed_area(&cuts[0].0[..4]).abs();
         assert!((hole_area - 4.0).abs() < 1e-6);
+    }
+
+    fn raster_doc(mode: RasterMode, grayscale: Vec<u8>) -> Document {
+        let mut doc = doc_with(Vec::new());
+        doc.layers[0].mode = LayerMode::Raster;
+        doc.layers[0].raster = Some(RasterImage {
+            width: 4,
+            height: 2,
+            grayscale,
+            x: 0.0,
+            y: 0.0,
+            width_mm: 4.0,
+            height_mm: 2.0,
+            mode,
+            threshold: 128,
+            invert: false,
+            line_interval: 1.0,
+            bidirectional: false,
+        });
+        doc
+    }
+
+    #[test]
+    fn raster_threshold_emits_active_pixel_runs() {
+        let doc = raster_doc(RasterMode::Threshold, vec![0, 255, 255, 0, 255, 0, 0, 255]);
+        let job = plan(&doc, &PlanOptions::default());
+        let cuts: Vec<_> = job.cuts().collect();
+        assert_eq!(cuts.len(), 3);
+        assert!((job.stats.cut_mm - 4.0).abs() < 1e-6);
+        assert!((cuts[0].0[0].y - 0.5).abs() < 1e-9);
+        assert!((cuts[0].0[0].x - 1.0).abs() < 1e-9);
+        assert!((cuts[0].0[1].x - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn raster_grayscale_uses_power_levels() {
+        let doc = raster_doc(
+            RasterMode::Grayscale,
+            vec![0, 128, 255, 255, 255, 255, 255, 255],
+        );
+        let job = plan(&doc, &PlanOptions::default());
+        let cuts: Vec<_> = job.cuts().collect();
+        assert!(!cuts.is_empty());
+        assert!(cuts.iter().any(|(_, params, _)| params.power < 50.0));
+    }
+
+    #[test]
+    fn raster_dither_generates_marks() {
+        let doc = raster_doc(
+            RasterMode::Dither,
+            vec![128, 128, 128, 128, 128, 128, 128, 128],
+        );
+        let job = plan(&doc, &PlanOptions::default());
+        assert!(!job.is_empty());
     }
 
     #[test]

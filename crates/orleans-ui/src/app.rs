@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use kurbo::{Affine, Point};
-use orleans_core::{Document, Job, LayerMode, Op};
+use orleans_core::{Document, Job, LayerMode, Op, RasterMode};
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_geom::{flatten_path, hatch_contours, point_in_polygon, HatchOptions};
-use orleans_import::{import_svg, ImportOptions};
+use orleans_import::{import_image, import_svg, ImportOptions, DEFAULT_RASTER_DPI};
 use orleans_toolpath::{plan, PlanOptions};
 
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
@@ -347,9 +347,66 @@ impl OrleansApp {
         }
     }
 
+    fn load_image(&mut self, path: PathBuf) {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = Status::error(format!("reading {}: {err}", path.display()));
+                return;
+            }
+        };
+        match import_image(&bytes, DEFAULT_RASTER_DPI) {
+            Ok(mut doc) => {
+                let name = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Image".to_owned());
+                if let Some(layer) = doc.layers.first_mut() {
+                    layer.name = name;
+                }
+                self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
+                self.doc = doc;
+                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+                self.selected_shapes.clear();
+                self.shape_transforms.clear();
+                self.undo_stack.clear();
+                self.dragging_shape = false;
+                self.active_handle = None;
+                self.node_edit = None;
+                self.selected_node = None;
+                self.node_drag = None;
+                self.edited_paths.clear();
+                self.replan();
+                let (width, height) = self
+                    .doc
+                    .layers
+                    .first()
+                    .and_then(|layer| layer.raster.as_ref())
+                    .map(|raster| (raster.width, raster.height))
+                    .unwrap_or((0, 0));
+                self.status = Status::ok(format!(
+                    "{}: {width}×{height} px raster",
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string())
+                ));
+                self.path = Some(path);
+                self.project_path = None;
+                self.source_svg = None;
+                self.fit_pending = true;
+                self.dirty = false;
+            }
+            Err(err) => {
+                self.set_status(format!("importing image {}: {err}", path.display()), true);
+            }
+        }
+    }
+
     fn open_path(&mut self, path: PathBuf) {
         if is_project_path(&path) {
             self.load_project(path);
+        } else if is_image_path(&path) {
+            self.load_image(path);
         } else {
             self.load_svg(path);
         }
@@ -377,65 +434,71 @@ impl OrleansApp {
             );
             return;
         }
-        match import_svg(project.svg.as_bytes(), &ImportOptions::default()) {
-            Ok(mut doc) if !doc.is_empty() => {
-                project.apply(&mut doc);
-                self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
-                self.doc = doc;
-                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
-                self.selected_shapes.clear();
-                self.shape_transforms = project
-                    .transforms
-                    .iter()
-                    .map(|transform| {
-                        let affine = transform
-                            .matrix
-                            .map(Affine::new)
-                            .unwrap_or_else(|| Affine::translate((transform.dx, transform.dy)));
-                        ((transform.layer, transform.shape.clone()), affine)
-                    })
-                    .collect();
-                self.undo_stack.clear();
-                self.dragging_shape = false;
-                self.active_handle = None;
-                self.node_edit = None;
-                self.selected_node = None;
-                self.node_drag = None;
-                self.edited_paths = project
-                    .edited_paths
-                    .iter()
-                    .map(|edited| (edited.layer, edited.shape.clone()))
-                    .collect();
-                self.plan_opts.kerf = project.kerf;
-                self.plan_opts.optimize = project.optimize;
-                self.gcode_opts.laser_mode = project.laser_mode();
-                self.gcode_opts.max_s = project.max_s;
-                self.source_svg = Some(project.svg.clone());
-                self.project_path = Some(path.clone());
-                self.path = project
-                    .source
-                    .as_ref()
-                    .map(PathBuf::from)
-                    .filter(|source| source.exists());
-                self.replan();
-                self.fit_pending = true;
-                self.dirty = false;
-                self.set_status(format!("project: {}", path.display()), false);
+        let mut doc = if project.svg.trim().is_empty() {
+            Document::new(project.width_mm.max(1.0), project.height_mm.max(1.0))
+        } else {
+            match import_svg(project.svg.as_bytes(), &ImportOptions::default()) {
+                Ok(doc) if !doc.is_empty() => doc,
+                Ok(_) => {
+                    self.set_status(format!("{} contains no paths", path.display()), true);
+                    return;
+                }
+                Err(err) => {
+                    self.set_status(format!("importing project SVG: {err}"), true);
+                    return;
+                }
             }
-            Ok(_) => {
-                self.set_status(format!("{} contains no paths", path.display()), true);
-            }
-            Err(err) => {
-                self.set_status(format!("importing project SVG: {err}"), true);
-            }
+        };
+        project.apply(&mut doc);
+        if doc.is_empty() {
+            self.set_status(format!("{} contains no geometry", path.display()), true);
+            return;
         }
+        self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
+        self.doc = doc;
+        self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+        self.selected_shapes.clear();
+        self.shape_transforms = project
+            .transforms
+            .iter()
+            .map(|transform| {
+                let affine = transform
+                    .matrix
+                    .map(Affine::new)
+                    .unwrap_or_else(|| Affine::translate((transform.dx, transform.dy)));
+                ((transform.layer, transform.shape.clone()), affine)
+            })
+            .collect();
+        self.undo_stack.clear();
+        self.dragging_shape = false;
+        self.active_handle = None;
+        self.node_edit = None;
+        self.selected_node = None;
+        self.node_drag = None;
+        self.edited_paths = project
+            .edited_paths
+            .iter()
+            .map(|edited| (edited.layer, edited.shape.clone()))
+            .collect();
+        self.plan_opts.kerf = project.kerf;
+        self.plan_opts.optimize = project.optimize;
+        self.gcode_opts.laser_mode = project.laser_mode();
+        self.gcode_opts.max_s = project.max_s;
+        self.source_svg = Some(project.svg.clone());
+        self.project_path = Some(path.clone());
+        self.path = project
+            .source
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|source| source.exists());
+        self.replan();
+        self.fit_pending = true;
+        self.dirty = false;
+        self.set_status(format!("project: {}", path.display()), false);
     }
 
     fn save_project(&mut self) {
-        let Some(svg) = self.source_svg.clone() else {
-            self.set_status("open an SVG before saving a project", true);
-            return;
-        };
+        let svg = self.source_svg.clone().unwrap_or_default();
         let default_name = self
             .display_path()
             .and_then(|path| path.file_stem())
@@ -2204,7 +2267,7 @@ impl OrleansApp {
 
                 let mut changed = false;
                 if total == 0 {
-                    ui.label(RichText::new("No layers yet. Open an SVG or drop one here.").weak());
+                    ui.label(RichText::new("No layers yet. Open an SVG or image, or drop one here.").weak());
                 } else {
                     let transform_height = if self.selected_shapes.is_empty() {
                         0.0
@@ -2226,10 +2289,16 @@ impl OrleansApp {
                                 } else {
                                     layer.name.clone()
                                 };
-                                let shapes = layer.shapes.len();
+                                let detail = if let Some(raster) = &layer.raster {
+                                    format!("{}×{} px", raster.width, raster.height)
+                                } else {
+                                    let shapes = layer.shapes.len();
+                                    format!("{shapes} shape{}", if shapes == 1 { "" } else { "s" })
+                                };
                                 let mode = match layer.mode {
                                     LayerMode::Line => "line",
                                     LayerMode::Fill => "fill",
+                                    LayerMode::Raster => "raster",
                                 };
                                 let summary = format!(
                                     "{:.0} mm/min  ·  {:.0}%  ·  ×{}  ·  {mode}",
@@ -2276,12 +2345,7 @@ impl OrleansApp {
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
                                                     ui.label(
-                                                        RichText::new(format!(
-                                                            "{shapes} shape{}",
-                                                            if shapes == 1 { "" } else { "s" }
-                                                        ))
-                                                        .small()
-                                                        .weak(),
+                                                        RichText::new(detail.clone()).small().weak(),
                                                     );
                                                 },
                                             );
@@ -2402,48 +2466,159 @@ impl OrleansApp {
                                 .on_hover_text("Draw this layer in the editor")
                                 .changed();
                         });
-                        ui.horizontal(|ui| {
-                            ui.label("Mode");
-                            changed |= ui
-                                .selectable_value(&mut layer.mode, LayerMode::Line, "Line")
-                                .changed();
-                            changed |= ui
-                                .selectable_value(&mut layer.mode, LayerMode::Fill, "Fill")
-                                .changed();
-                        });
-                        if layer.mode == LayerMode::Line {
+                        if let Some(raster) = layer.raster.as_mut() {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Raster image · {}×{} px",
+                                    raster.width, raster.height
+                                ))
+                                .small()
+                                .weak(),
+                            );
                             ui.horizontal(|ui| {
-                                ui.label("Tabs");
-                                changed |= ui
-                                    .add(
-                                        egui::DragValue::new(&mut layer.tabs.count)
-                                            .speed(1.0)
-                                            .range(0..=16),
-                                    )
-                                    .on_hover_text(
-                                        "Number of holding tabs per outer contour; 0 disables",
-                                    )
-                                    .changed();
-                                if layer.tabs.count > 0 {
-                                    ui.label("Width");
+                                ui.label("Raster");
+                                egui::ComboBox::from_id_salt("raster-mode")
+                                    .selected_text(match raster.mode {
+                                        RasterMode::Threshold => "Threshold",
+                                        RasterMode::Dither => "Dither",
+                                        RasterMode::Grayscale => "Grayscale",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut raster.mode,
+                                                RasterMode::Threshold,
+                                                "Threshold",
+                                            )
+                                            .changed();
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut raster.mode,
+                                                RasterMode::Dither,
+                                                "Dither",
+                                            )
+                                            .changed();
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut raster.mode,
+                                                RasterMode::Grayscale,
+                                                "Grayscale",
+                                            )
+                                            .changed();
+                                    });
+                                if raster.mode != RasterMode::Grayscale {
+                                    ui.label("Threshold");
                                     changed |= ui
                                         .add(
-                                            egui::DragValue::new(&mut layer.tabs.width)
-                                                .speed(0.1)
-                                                .range(0.5..=20.0)
-                                                .suffix(" mm"),
+                                            egui::DragValue::new(&mut raster.threshold)
+                                                .speed(1.0)
+                                                .range(0..=255),
                                         )
-                                        .on_hover_text("Width of each uncut tab")
-                                        .changed();
-                                    changed |= ui
-                                        .checkbox(&mut layer.tabs.inner, "Holes")
-                                        .on_hover_text("Also place tabs on inner contours")
+                                        .on_hover_text("Darkness threshold; lower values burn more")
                                         .changed();
                                 }
                             });
-                        }
-                        if layer.mode == LayerMode::Fill {
-                            egui::Grid::new("layer-fill-params")
+                            ui.horizontal(|ui| {
+                                ui.label("Line interval");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut raster.line_interval)
+                                            .speed(0.01)
+                                            .range(0.05..=5.0)
+                                            .suffix(" mm"),
+                                    )
+                                    .on_hover_text("Distance between raster scan lines")
+                                    .changed();
+                                changed |= ui
+                                    .checkbox(&mut raster.invert, "Invert")
+                                    .on_hover_text("Engrave white instead of dark pixels")
+                                    .changed();
+                            });
+                            ui.horizontal(|ui| {
+                                changed |= ui
+                                    .checkbox(&mut raster.bidirectional, "Alternate rows")
+                                    .on_hover_text("Reverse alternate scan lines to reduce travel")
+                                    .changed();
+                                ui.label("Position");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut raster.x)
+                                            .speed(0.1)
+                                            .max_decimals(3)
+                                            .prefix("X "),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut raster.y)
+                                            .speed(0.1)
+                                            .max_decimals(3)
+                                            .prefix("Y "),
+                                    )
+                                    .changed();
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Size");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut raster.width_mm)
+                                            .speed(0.1)
+                                            .range(0.1..=100_000.0)
+                                            .suffix(" W"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut raster.height_mm)
+                                            .speed(0.1)
+                                            .range(0.1..=100_000.0)
+                                            .suffix(" H"),
+                                    )
+                                    .changed();
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label("Mode");
+                                changed |= ui
+                                    .selectable_value(&mut layer.mode, LayerMode::Line, "Line")
+                                    .changed();
+                                changed |= ui
+                                    .selectable_value(&mut layer.mode, LayerMode::Fill, "Fill")
+                                    .changed();
+                            });
+                            if layer.mode == LayerMode::Line {
+                                ui.horizontal(|ui| {
+                                    ui.label("Tabs");
+                                    changed |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut layer.tabs.count)
+                                                .speed(1.0)
+                                                .range(0..=16),
+                                        )
+                                        .on_hover_text(
+                                            "Number of holding tabs per outer contour; 0 disables",
+                                        )
+                                        .changed();
+                                    if layer.tabs.count > 0 {
+                                        ui.label("Width");
+                                        changed |= ui
+                                            .add(
+                                                egui::DragValue::new(&mut layer.tabs.width)
+                                                    .speed(0.1)
+                                                    .range(0.5..=20.0)
+                                                    .suffix(" mm"),
+                                            )
+                                            .on_hover_text("Width of each uncut tab")
+                                            .changed();
+                                        changed |= ui
+                                            .checkbox(&mut layer.tabs.inner, "Holes")
+                                            .on_hover_text("Also place tabs on inner contours")
+                                            .changed();
+                                    }
+                                });
+                            }
+                            if layer.mode == LayerMode::Fill {
+                                egui::Grid::new("layer-fill-params")
                                 .num_columns(2)
                                 .spacing([8.0, 4.0])
                                 .show(ui, |ui| {
@@ -2492,6 +2667,7 @@ impl OrleansApp {
                                         .changed();
                                     ui.end_row();
                                 });
+                            }
                         }
                         ui.horizontal(|ui| {
                             move_up = ui
@@ -2721,8 +2897,14 @@ impl OrleansApp {
                 if self.doc.is_empty() {
                     ui.label("No design loaded");
                 } else {
+                    let rasters = self.doc.raster_count();
+                    let images = if rasters > 0 {
+                        format!(" · {rasters} image{}", if rasters == 1 { "" } else { "s" })
+                    } else {
+                        String::new()
+                    };
                     ui.label(format!(
-                        "{} layers · {} shapes · {} cuts",
+                        "{} layers · {} shapes{images} · {} cuts",
                         self.doc.layers.len(),
                         self.doc.shape_count(),
                         self.job.cuts().count()
@@ -3130,6 +3312,56 @@ impl OrleansApp {
                     }
                 }
             }
+            if let Some(raster) = &layer.raster {
+                let rect = Rect::from_two_pos(
+                    self.view
+                        .world_to_screen(area, Point::new(raster.x, raster.y)),
+                    self.view.world_to_screen(
+                        area,
+                        Point::new(raster.x + raster.width_mm, raster.y + raster.height_mm),
+                    ),
+                );
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    Stroke::new(1.0, color.gamma_multiply(0.8)),
+                    StrokeKind::Inside,
+                );
+                if layer.output {
+                    for op in &self.job.ops {
+                        let Op::Cut {
+                            polyline,
+                            params,
+                            layer: cut_layer,
+                        } = op
+                        else {
+                            continue;
+                        };
+                        if *cut_layer != layer.index || polyline.len() < 2 {
+                            continue;
+                        }
+                        let strength = if layer.cut.power > 0.0 {
+                            (params.power / layer.cut.power).clamp(0.15, 1.0) as f32
+                        } else {
+                            1.0
+                        };
+                        let stroke = Stroke::new(0.8, color.gamma_multiply(strength));
+                        let points: Vec<Pos2> = polyline
+                            .iter()
+                            .map(|point| self.view.world_to_screen(area, *point))
+                            .collect();
+                        painter.add(egui::Shape::line(points, stroke));
+                    }
+                } else {
+                    painter.text(
+                        rect.left_top() + egui::vec2(4.0, 2.0),
+                        egui::Align2::LEFT_TOP,
+                        "image · not cut",
+                        egui::FontId::proportional(10.0),
+                        color,
+                    );
+                }
+            }
             let stroke = Stroke::new(width, color);
             for shape in &preview.shapes {
                 for contour in &shape.contours {
@@ -3388,6 +3620,17 @@ fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
     (point - projected).hypot()
 }
 
+fn is_image_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("png")
+                || extension.eq_ignore_ascii_case("jpg")
+                || extension.eq_ignore_ascii_case("jpeg")
+                || extension.eq_ignore_ascii_case("bmp")
+        })
+}
+
 fn is_project_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -3530,8 +3773,9 @@ impl eframe::App for OrleansApp {
             Some(Action::Open) => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("SVG", &["svg"])
+                    .add_filter("Image", &["png", "jpg", "jpeg", "bmp"])
                     .add_filter("Orleans project", &["orleans"])
-                    .set_title("Open design or project")
+                    .set_title("Open design, image or project")
                     .pick_file()
                 {
                     self.open_path(path);
@@ -3546,7 +3790,7 @@ impl eframe::App for OrleansApp {
                 if let Some(path) = self.project_path.clone() {
                     self.load_project(path);
                 } else if let Some(path) = self.path.clone() {
-                    self.load_svg(path);
+                    self.open_path(path);
                 } else {
                     self.status = Status::error("nothing to reload");
                 }

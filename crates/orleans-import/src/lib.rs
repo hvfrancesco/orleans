@@ -8,11 +8,14 @@
 use std::rc::Rc;
 
 use kurbo::{BezPath, Point};
-use orleans_core::{CutParams, Document, Layer, Shape};
+use orleans_core::{CutParams, Document, Layer, LayerMode, RasterImage, RasterMode, Shape};
 use usvg::tiny_skia_path::PathSegment;
 
 /// 96 CSS pixels per inch, the SVG/CSS reference resolution.
 pub const DEFAULT_DPI: f64 = 96.0;
+
+/// DPI used when importing a raster image without explicit physical metadata.
+pub const DEFAULT_RASTER_DPI: f64 = 96.0;
 
 /// Options controlling how an SVG becomes a [`Document`].
 #[derive(Clone, Debug)]
@@ -47,6 +50,62 @@ impl Default for ImportOptions {
 pub enum ImportError {
     #[error("could not parse SVG: {0}")]
     Parse(#[from] usvg::Error),
+    #[error("could not decode image: {0}")]
+    Image(#[from] image::ImageError),
+}
+
+/// Decode an image into a single raster layer at `dpi`.
+///
+/// The resulting layer is grayscale, fills the page and uses the image's
+/// physical pixel size as the default scanline interval.
+pub fn import_image(data: &[u8], dpi: f64) -> Result<Document, ImportError> {
+    let image = image::load_from_memory(data)?;
+    let rgba = image.to_rgba8();
+    let luma = image::DynamicImage::ImageRgba8(rgba.clone()).to_luma8();
+    let (width, height) = luma.dimensions();
+    if width == 0 || height == 0 {
+        return Err(
+            image::ImageError::Limits(image::error::LimitError::from_kind(
+                image::error::LimitErrorKind::DimensionError,
+            ))
+            .into(),
+        );
+    }
+    let dpi = if dpi.is_finite() && dpi > 0.0 {
+        dpi
+    } else {
+        DEFAULT_RASTER_DPI
+    };
+    let mm_per_px = 25.4 / dpi;
+    let width_mm = f64::from(width) * mm_per_px;
+    let height_mm = f64::from(height) * mm_per_px;
+    let line_interval = (height_mm / f64::from(height)).max(0.01);
+    let mut grayscale_data = Vec::with_capacity(luma.len());
+    for (index, pixel) in rgba.pixels().enumerate() {
+        let alpha = f32::from(pixel[3]) / 255.0;
+        let value = f32::from(luma.as_raw()[index]) * alpha + 255.0 * (1.0 - alpha);
+        grayscale_data.push(value.round().clamp(0.0, 255.0) as u8);
+    }
+
+    let mut doc = Document::new(width_mm, height_mm);
+    let mut layer = Layer::new(0, "Image", [0, 0, 0], CutParams::default());
+    layer.mode = LayerMode::Raster;
+    layer.raster = Some(RasterImage {
+        width,
+        height,
+        grayscale: grayscale_data,
+        x: 0.0,
+        y: 0.0,
+        width_mm,
+        height_mm,
+        mode: RasterMode::Threshold,
+        threshold: 128,
+        invert: false,
+        line_interval,
+        bidirectional: true,
+    });
+    doc.layers.push(layer);
+    Ok(doc)
 }
 
 /// Parse SVG bytes into a [`Document`] in millimetres, Y up.
@@ -169,6 +228,28 @@ mod tests {
 
     fn doc_for(svg: &str) -> Document {
         import_svg(svg.as_bytes(), &ImportOptions::default()).expect("import")
+    }
+
+    #[test]
+    fn imports_images_as_raster_layers() {
+        use image::{DynamicImage, GrayImage, ImageFormat};
+        use std::io::Cursor;
+
+        let gray = GrayImage::from_raw(2, 1, vec![0, 255]).expect("image");
+        let mut bytes = Vec::new();
+        DynamicImage::ImageLuma8(gray)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode");
+        let doc = import_image(&bytes, 96.0).expect("import");
+        assert_eq!(doc.layers.len(), 1);
+        let layer = &doc.layers[0];
+        assert_eq!(layer.mode, LayerMode::Raster);
+        let raster = layer.raster.as_ref().expect("raster");
+        assert_eq!((raster.width, raster.height), (2, 1));
+        assert_eq!(raster.grayscale, vec![0, 255]);
+        assert!((raster.width_mm - 2.0 * 25.4 / 96.0).abs() < 1e-9);
+        assert!((raster.height_mm - 25.4 / 96.0).abs() < 1e-9);
+        assert!((doc.bounds().expect("bounds").width() - raster.width_mm).abs() < 1e-9);
     }
 
     #[test]

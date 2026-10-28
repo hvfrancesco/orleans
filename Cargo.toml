@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.80"
+rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -20,3 +20,5 @@ serialport = "4"
 thiserror = "2"
 clipper2 = "0.6"
 usvg = "0.45"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+base64 = "0.22"

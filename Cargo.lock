@@ -1687,6 +1687,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2531,6 +2533,7 @@ dependencies = [
 name = "orleans-import"
 version = "0.1.0"
 dependencies = [
+ "image",
  "kurbo 0.11.3",
  "orleans-core",
  "thiserror 2.0.21",
@@ -2552,6 +2555,7 @@ name = "orleans-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "eframe",
  "kurbo 0.11.3",
  "orleans-core",

@@ -18,6 +18,8 @@ pub enum LayerMode {
     Line,
     /// Fill closed geometry with scanline hatching.
     Fill,
+    /// Engrave a raster image.
+    Raster,
 }
 
 /// Cutting parameters attached to a layer.
@@ -76,6 +78,57 @@ impl Default for FillParams {
     }
 }
 
+/// Raster engraving mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RasterMode {
+    #[default]
+    Threshold,
+    Dither,
+    Grayscale,
+}
+
+/// A grayscale image placed in document millimetres.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RasterImage {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major grayscale, top row first.
+    pub grayscale: Vec<u8>,
+    pub x: f64,
+    pub y: f64,
+    pub width_mm: f64,
+    pub height_mm: f64,
+    pub mode: RasterMode,
+    /// Darkness threshold, 0..=255.
+    pub threshold: u8,
+    pub invert: bool,
+    /// Spacing between engraved scan lines in millimetres.
+    pub line_interval: f64,
+    /// Reverse alternate scan lines to reduce travel.
+    pub bidirectional: bool,
+}
+
+impl RasterImage {
+    pub fn bounds(&self) -> Rect {
+        Rect::new(
+            self.x,
+            self.y,
+            self.x + self.width_mm,
+            self.y + self.height_mm,
+        )
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> u8 {
+        if x >= self.width || y >= self.height {
+            return 255;
+        }
+        self.grayscale
+            .get((y * self.width + x) as usize)
+            .copied()
+            .unwrap_or(255)
+    }
+}
+
 /// Holding tabs left uncut around closed contours.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabParams {
@@ -108,6 +161,7 @@ pub struct Layer {
     pub cut: CutParams,
     pub fill: FillParams,
     pub tabs: TabParams,
+    pub raster: Option<RasterImage>,
     pub shapes: Vec<Shape>,
     /// Whether the layer is drawn in the editor.
     pub visible: bool,
@@ -125,6 +179,7 @@ impl Layer {
             cut,
             fill: FillParams::default(),
             tabs: TabParams::default(),
+            raster: None,
             shapes: Vec::new(),
             visible: true,
             output: true,
@@ -133,7 +188,7 @@ impl Layer {
 
     /// True when the layer has geometry that can be cut.
     pub fn is_empty(&self) -> bool {
-        self.shapes.is_empty()
+        self.shapes.is_empty() && self.raster.is_none()
     }
 }
 
@@ -191,20 +246,26 @@ impl Document {
 
     fn bounds_for(&self, include: impl Fn(&Layer) -> bool) -> Option<Rect> {
         let mut bounds: Option<Rect> = None;
-        for shape in self
-            .layers
-            .iter()
-            .filter(|layer| include(layer))
-            .flat_map(|layer| layer.shapes.iter())
-        {
-            if shape.path.elements().is_empty() {
-                continue;
+        for layer in self.layers.iter().filter(|layer| include(layer)) {
+            if let Some(raster) = &layer.raster {
+                if raster.width_mm > 0.0 && raster.height_mm > 0.0 {
+                    let b = raster.bounds();
+                    bounds = Some(match bounds {
+                        Some(current) => current.union(b),
+                        None => b,
+                    });
+                }
             }
-            let b = shape.bounds();
-            bounds = Some(match bounds {
-                Some(cur) => cur.union(b),
-                None => b,
-            });
+            for shape in &layer.shapes {
+                if shape.path.elements().is_empty() {
+                    continue;
+                }
+                let b = shape.bounds();
+                bounds = Some(match bounds {
+                    Some(current) => current.union(b),
+                    None => b,
+                });
+            }
         }
         // `BezPath::bounding_box` returns an empty rect for empty paths, which
         // would poison the union.
@@ -215,8 +276,15 @@ impl Document {
         self.layers.iter().map(|l| l.shapes.len()).sum()
     }
 
+    pub fn raster_count(&self) -> usize {
+        self.layers
+            .iter()
+            .filter(|layer| layer.raster.is_some())
+            .count()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.shape_count() == 0
+        self.layers.iter().all(Layer::is_empty)
     }
 }
 

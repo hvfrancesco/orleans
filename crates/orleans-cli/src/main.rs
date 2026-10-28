@@ -41,7 +41,7 @@ enum Command {
     /// Open the visual editor.
     #[cfg(feature = "gui")]
     Gui {
-        /// SVG design or .orleans project to open at startup.
+        /// SVG, raster image or .orleans project to open at startup.
         input: Option<PathBuf>,
         /// Machine endpoint to prefill, e.g. tcp://192.168.1.10.
         #[arg(long)]

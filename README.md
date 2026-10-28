@@ -18,6 +18,7 @@ was decompiled or copied.
 | Capability | Status |
 |---|---|
 | SVG import (shapes→paths, transforms, CSS, physical units) | ✅ |
+| Image import (PNG/JPEG/BMP) | ✅ |
 | Colours → layers, per-layer speed/power/passes | ✅ |
 | Kerf compensation via Clipper2 (outer shrinks, holes grow) | ✅ |
 | Boolean ops (union / difference / intersection) | ✅ |
@@ -29,7 +30,7 @@ was decompiled or copied.
 | USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
 | Hardware-free GRBL simulator | ✅ |
 | DXF / PDF / AI import | ❌ |
-| Raster engraving and dithering | ❌ |
+| Raster engraving (threshold, dither, grayscale) | ✅ |
 | Tabs/bridges on contour cuts | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
@@ -46,7 +47,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-112 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+117 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -57,8 +58,11 @@ from source).
 ```bash
 cargo build --release
 
-# Open the visual editor (the SVG is optional)
+# Open the visual editor (the input is optional)
 cargo run -q -- gui examples/coaster.svg --url tcp://192.168.1.10
+
+# Open a PNG/JPEG/BMP as a raster-engraving layer
+cargo run -q -- gui photo.png
 
 # Inspect a design: size, layers, cut length, time estimate
 cargo run -q -- info examples/coaster.svg
@@ -113,6 +117,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   previews the fill. Open contours are ignored by fill mode. Line mode adds
   **Tabs**: count and width of uncut holding bridges per contour, with an
   optional **Holes** setting for inner contours;
+* **Open…** also accepts PNG/JPEG/BMP images. An image opens as a raster layer
+  with threshold, Floyd–Steinberg dithering or grayscale power levels, plus
+  line interval, invert, alternate rows, position and physical size. Opening an
+  image replaces the current design. Raster scan lines are horizontal; use a
+  separate vector layer for outlines;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
   (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
@@ -132,9 +141,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   jobs select G54. The position readout shows `WPos` when the controller
   reports it, otherwise `MPos`;
 * **Save project…** (`Ctrl+S`) writes a self-contained `.orleans` JSON file
-  with the SVG, layer parameters, job settings, per-shape transforms and
-  node-edited paths.
-  **Open…** accepts both SVG and `.orleans`; **Reload** reloads whichever is
+  with the SVG, layer parameters, job settings, per-shape transforms,
+  node-edited paths and embedded raster image data.
+  **Open…** accepts SVG, images and `.orleans`; **Reload** reloads whichever is
   current;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
   homing `$22`, and the raw `$$` list. **Apply** writes the changed settings
@@ -284,6 +293,10 @@ concept of a line and some bridges emit negotiation on connect.
   a separate Line layer/colour if you need both. It supports scanline hatching
   of closed contours with even-odd holes; cross-hatch and offset fill are not
   implemented yet.
+* Raster import assumes 96 DPI and scans horizontally; image rotation/angle and
+  more dithering algorithms are not implemented. Raster layers with Cut disabled
+  show only a boundary placeholder; enable Cut to see the engraved scan lines.
+  Select raster layers from the layer list; canvas hit-testing remains vector-only.
 * Tabs are distributed evenly by arc length and start at the contour seam; there
   is no manual tab placement yet.
 * Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
@@ -301,8 +314,8 @@ concept of a line and some bridges emit negotiation on connect.
    node-editing refinements such as join/break and snapping to geometry.
 2. **Fill refinements and manual tabs** — cross-hatch, offset fill and
    manual tab placement.
-3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
-   PWM mapping, run-length output.
+3. **Raster refinements** — image rotation/angle, richer previews and more
+   dithering algorithms.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
 5. **Second driver** — Marlin, then Ruida over UDP.
 6. **Job control extras** — feed/power overrides, rotary setup.
