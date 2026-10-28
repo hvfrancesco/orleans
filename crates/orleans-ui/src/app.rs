@@ -516,6 +516,7 @@ enum Action {
     SaveProject,
     Undo,
     Redo,
+    Duplicate,
     ExitNodes,
     DeleteNode,
     DeleteObjects,
@@ -550,6 +551,10 @@ pub struct OrleansApp {
     transform_scale: f64,
     transform_angle: f64,
     move_anchor: SelectionAnchor,
+    array_cols: u32,
+    array_rows: u32,
+    array_spacing_x: f64,
+    array_spacing_y: f64,
     move_to_x: f64,
     move_to_y: f64,
     move_sync: Option<(BTreeSet<ShapeRef>, SelectionAnchor, Option<[u64; 2]>)>,
@@ -635,6 +640,10 @@ impl OrleansApp {
             transform_scale: 1.0,
             transform_angle: 0.0,
             move_anchor: SelectionAnchor::BottomLeft,
+            array_cols: 2,
+            array_rows: 1,
+            array_spacing_x: 10.0,
+            array_spacing_y: 10.0,
             move_to_x: 0.0,
             move_to_y: 0.0,
             move_sync: None,
@@ -1699,6 +1708,133 @@ impl OrleansApp {
         self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
         self.dirty = true;
         self.set_status(format!("deleted layer #{index}"), false);
+    }
+
+    /// Copy the selected shapes at each offset and select the copies. Groups
+    /// are copied once per offset, preserving their relative membership.
+    fn duplicate_selected(&mut self, offsets: &[(f64, f64)]) {
+        if self.selected_shapes.is_empty() {
+            self.set_status("select objects to duplicate", true);
+            return;
+        }
+        if offsets.is_empty() {
+            return;
+        }
+        let sources: Vec<ShapeRef> = self.selected_shapes.iter().cloned().collect();
+        let mut templates = Vec::new();
+        for source in sources {
+            if let Some(shape) = self.shape_by_ref(&source) {
+                templates.push((source, shape.clone()));
+            }
+        }
+        if templates.is_empty() {
+            return;
+        }
+        let groups = self.groups.clone();
+        self.push_structure_undo();
+
+        let mut used: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+        for (source, _) in &templates {
+            used.entry(source.layer).or_insert_with(|| {
+                self.doc
+                    .layers
+                    .iter()
+                    .find(|layer| layer.index == source.layer)
+                    .map(|layer| layer.shapes.iter().map(|shape| shape.id.clone()).collect())
+                    .unwrap_or_default()
+            });
+        }
+
+        let mut next_group = self.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+        let mut copies = BTreeSet::new();
+        for &(dx, dy) in offsets {
+            let mut mapping = BTreeMap::new();
+            for (source, template) in &templates {
+                let Some(position) = self
+                    .doc
+                    .layers
+                    .iter()
+                    .position(|layer| layer.index == source.layer)
+                else {
+                    continue;
+                };
+                let Some(used_ids) = used.get_mut(&source.layer) else {
+                    continue;
+                };
+                let id = unique_shape_id(&template.id, used_ids);
+                let mut shape = template.clone();
+                shape.id = id.clone();
+                shape.path.apply_affine(Affine::translate((dx, dy)));
+                self.doc.layers[position].shapes.push(shape);
+                let new_ref = ShapeRef {
+                    layer: source.layer,
+                    shape: id,
+                };
+                self.extra_shapes
+                    .insert((source.layer, new_ref.shape.clone()));
+                mapping.insert(source.clone(), new_ref.clone());
+                copies.insert(new_ref);
+            }
+            for group in &groups {
+                let members: BTreeSet<ShapeRef> = group
+                    .members
+                    .iter()
+                    .filter_map(|member| mapping.get(member).cloned())
+                    .collect();
+                if members.is_empty() {
+                    continue;
+                }
+                let name = if group.name.is_empty() {
+                    "Group copy".to_owned()
+                } else {
+                    format!("{} copy", group.name)
+                };
+                self.groups.push(ShapeGroup {
+                    id: next_group,
+                    name,
+                    members,
+                });
+                next_group += 1;
+            }
+        }
+
+        if copies.is_empty() {
+            return;
+        }
+        self.selected_shapes = copies;
+        self.selected_layer = self.selected_shapes.iter().next().map(|shape| shape.layer);
+        self.selected_nodes.clear();
+        self.node_drag = None;
+        self.node_edit = None;
+        self.selected_raster = None;
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.dirty = true;
+        let count = self.selected_shapes.len();
+        if offsets.len() == 1 && offsets[0] == (0.0, 0.0) {
+            self.set_status(format!("duplicated {count} object(s)"), false);
+        } else {
+            self.set_status(format!("created {count} array copies"), false);
+        }
+    }
+
+    fn create_array(&mut self) {
+        if !self.array_spacing_x.is_finite() || !self.array_spacing_y.is_finite() {
+            self.set_status("array spacing must be a finite number", true);
+            return;
+        }
+        let cols = self.array_cols.clamp(1, 100);
+        let rows = self.array_rows.clamp(1, 100);
+        let positions = u64::from(cols) * u64::from(rows);
+        if positions <= 1 {
+            self.set_status("an array needs at least two positions", true);
+            return;
+        }
+        if positions > 500 {
+            self.set_status("array is too large (maximum 500 positions)", true);
+            return;
+        }
+        let offsets = array_offsets(cols, rows, self.array_spacing_x, self.array_spacing_y);
+        self.duplicate_selected(&offsets);
     }
 
     /// Move or copy the selected shapes to `target_layer`, keeping groups,
@@ -4747,6 +4883,56 @@ impl OrleansApp {
                         }
                     });
                     ui.horizontal(|ui| {
+                        if ui
+                            .button("Duplicate")
+                            .on_hover_text("Duplicate the selected objects in place (Ctrl+D)")
+                            .clicked()
+                        {
+                            self.duplicate_selected(&[(0.0, 0.0)]);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Array").on_hover_text(
+                            "Keep the original and add copies on a grid of columns and rows",
+                        );
+                        ui.label("Cols");
+                        ui.add(
+                            egui::DragValue::new(&mut self.array_cols)
+                                .speed(1.0)
+                                .range(1..=100),
+                        );
+                        ui.label("dx");
+                        ui.add(
+                            egui::DragValue::new(&mut self.array_spacing_x)
+                                .speed(0.5)
+                                .range(-1000.0..=1000.0)
+                                .suffix(" mm"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(32.0);
+                        ui.label("Rows");
+                        ui.add(
+                            egui::DragValue::new(&mut self.array_rows)
+                                .speed(1.0)
+                                .range(1..=100),
+                        );
+                        ui.label("dy");
+                        ui.add(
+                            egui::DragValue::new(&mut self.array_spacing_y)
+                                .speed(0.5)
+                                .range(-1000.0..=1000.0)
+                                .suffix(" mm"),
+                        );
+                        if ui
+                            .button("Create")
+                            .on_hover_text("Create the array and select its copies")
+                            .clicked()
+                        {
+                            self.create_array();
+                        }
+                    });
+                    ui.horizontal(|ui| {
                         ui.label("Move");
                         ui.label("X");
                         ui.add(
@@ -5957,6 +6143,20 @@ fn layer_color(rgb: [u8; 3], light: bool) -> Color32 {
     Color32::from_rgb(darken(r), darken(g), darken(b))
 }
 
+/// Offsets for every array position except the original at the origin.
+fn array_offsets(cols: u32, rows: u32, dx: f64, dy: f64) -> Vec<(f64, f64)> {
+    let mut offsets = Vec::new();
+    for row in 0..rows.max(1) {
+        for col in 0..cols.max(1) {
+            if row == 0 && col == 0 {
+                continue;
+            }
+            offsets.push((f64::from(col) * dx, f64::from(row) * dy));
+        }
+    }
+    offsets
+}
+
 /// Return `base`, or the first free `base-copy[-n]` suffix.
 fn unique_shape_id(base: &str, used: &mut BTreeSet<String>) -> String {
     if used.insert(base.to_owned()) {
@@ -6050,6 +6250,9 @@ impl eframe::App for OrleansApp {
             if i.modifiers.command && i.key_pressed(egui::Key::S) {
                 action = Some(Action::SaveProject);
             }
+            if i.modifiers.command && !keyboard_input && i.key_pressed(egui::Key::D) {
+                action = Some(Action::Duplicate);
+            }
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 action = Some(if i.modifiers.shift {
                     Action::Redo
@@ -6104,6 +6307,7 @@ impl eframe::App for OrleansApp {
             Some(Action::SaveProject) => self.save_project(),
             Some(Action::Undo) => self.undo_edit(),
             Some(Action::Redo) => self.redo_edit(),
+            Some(Action::Duplicate) => self.duplicate_selected(&[(0.0, 0.0)]),
             Some(Action::ExitNodes) => self.exit_node_edit(),
             Some(Action::DeleteNode) => self.delete_selected_node(),
             Some(Action::DeleteObjects) => self.delete_selected_objects(),
@@ -6369,6 +6573,16 @@ mod tests {
         assert_eq!(format_duration(42.4), "42s");
         assert_eq!(format_duration(61.0), "1m 01s");
         assert_eq!(format_duration(3725.0), "1h 02m");
+    }
+
+    #[test]
+    fn array_offsets_skip_the_original_position() {
+        assert_eq!(array_offsets(2, 1, 10.0, 10.0), vec![(10.0, 0.0)]);
+        assert_eq!(
+            array_offsets(2, 2, 10.0, 20.0),
+            vec![(10.0, 0.0), (0.0, 20.0), (10.0, 20.0)]
+        );
+        assert!(array_offsets(1, 1, 10.0, 10.0).is_empty());
     }
 
     #[test]

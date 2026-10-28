@@ -35,6 +35,7 @@ was decompiled or copied.
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | New layers; move/copy/delete objects between layers; delete empty layers | ✅ |
+| Duplicate selected objects and rectangular arrays | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
@@ -50,7 +51,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-137 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+138 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -126,7 +127,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   shapes that follow the destination layer's cut settings. Raster layers cannot
   be destinations. **Delete** in the Selection panel or the `Delete` key removes
   the selected objects; an empty selected layer has its own **Delete** button
-  next to **Up**/**Down**;
+  next to **Up**/**Down**. **Duplicate** (`Ctrl+D`) copies the selection in
+  place and selects the copies. The **Array** rows keep the original and create
+  a grid of copies from column/row counts and `dx`/`dy` spacing; groups are
+  duplicated as groups;
 * choose **Line** or **Fill** for each layer. Fill mode adds **Fill spacing**,
   **Angle**, **Overlap** and **Alternate**; it hatches closed contours and
   previews the fill. Open contours are ignored by fill mode. Line mode adds
@@ -318,6 +322,9 @@ concept of a line and some bridges emit negotiation on connect.
   around the selection centre. There is no non-uniform/skewed scaling.
 * Only empty vector layers can be deleted. Delete all their objects first; a
   raster layer disappears only when the design is replaced.
+* Arrays are rectangular only: there is no polar/circular array, and copies
+  follow fixed `dx`/`dy` spacing. Duplicate places copies exactly on top of the
+  originals, ready to be dragged away.
 * Groups contain vector shapes only and cannot be nested; grouping a selection
   that already touches groups merges them. Ungroup before node-editing a
   member. Align/distribute treat each group as one object, and distribution
