@@ -44,6 +44,18 @@ pub struct ProjectFile {
     /// Shapes created by copying, with no source in the embedded SVG.
     #[serde(default)]
     pub extra_shapes: Vec<ExtraShape>,
+    /// Original SVG shapes removed from the document.
+    #[serde(default)]
+    pub removed_shapes: Vec<RemovedShape>,
+    /// Layers deleted in the editor, including empty layers imported from SVG.
+    #[serde(default)]
+    pub deleted_layers: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemovedShape {
+    pub layer: usize,
+    pub shape: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -283,6 +295,8 @@ impl ProjectFile {
             groups: Vec::new(),
             moved_shapes: Vec::new(),
             extra_shapes: Vec::new(),
+            removed_shapes: Vec::new(),
+            deleted_layers: Vec::new(),
         }
     }
 
@@ -399,6 +413,16 @@ impl ProjectFile {
             }
         }
 
+        for removed in &self.removed_shapes {
+            if let Some(layer) = doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == removed.layer)
+            {
+                layer.shapes.retain(|shape| shape.id != removed.shape);
+            }
+        }
+
         // Move shapes after transforms and node edits, so their stored final
         // path and target layer win over the original SVG geometry.
         for moved in &self.moved_shapes {
@@ -458,6 +482,12 @@ impl ProjectFile {
                     .shapes
                     .push(Shape::new(extra.shape.clone(), path, extra.is_fill));
             }
+        }
+
+        // Remove deleted layers last, after shape overrides have run.
+        if !self.deleted_layers.is_empty() {
+            doc.layers
+                .retain(|layer| !self.deleted_layers.contains(&layer.index));
         }
     }
 
@@ -668,6 +698,54 @@ mod tests {
     }
 
     #[test]
+    fn apply_removes_deleted_shapes_and_layers() {
+        use kurbo::BezPath;
+
+        let mut doc = Document::new(100.0, 100.0);
+        let mut first = Layer::new(0, "first", [0, 0, 0], CutParams::default());
+        for id in ["keep", "gone"] {
+            first.shapes.push(Shape::new(
+                id,
+                BezPath::from_svg("M0,0 L10,0").expect("path"),
+                false,
+            ));
+        }
+        let mut second = Layer::new(1, "second", [255, 0, 0], CutParams::default());
+        second.shapes.push(Shape::new(
+            "other",
+            BezPath::from_svg("M0,0 L5,0").expect("path"),
+            false,
+        ));
+        doc.layers.push(first);
+        doc.layers.push(second);
+
+        let mut project = ProjectFile::new(
+            "<svg/>".to_owned(),
+            None,
+            &doc,
+            0.0,
+            true,
+            LaserMode::M3,
+            1000,
+            Vec::new(),
+        );
+        project.removed_shapes = vec![RemovedShape {
+            layer: 0,
+            shape: "gone".to_owned(),
+        }];
+        project.deleted_layers = vec![1];
+
+        let json = serde_json::to_string(&project).expect("serialise");
+        let project: ProjectFile = serde_json::from_str(&json).expect("deserialise");
+        let mut loaded = doc.clone();
+        project.apply(&mut loaded);
+        assert_eq!(loaded.layers.len(), 1);
+        assert_eq!(loaded.layers[0].index, 0);
+        assert_eq!(loaded.layers[0].shapes.len(), 1);
+        assert_eq!(loaded.layers[0].shapes[0].id, "keep");
+    }
+
+    #[test]
     fn json_round_trip_keeps_affine_matrix() {
         use kurbo::{Affine, Point};
         let affine = Affine::translate((5.0, 3.0)) * Affine::rotate(0.5) * Affine::scale(2.0);
@@ -866,6 +944,8 @@ mod tests {
             groups: Vec::new(),
             moved_shapes: Vec::new(),
             extra_shapes: Vec::new(),
+            removed_shapes: Vec::new(),
+            deleted_layers: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -908,6 +988,8 @@ mod tests {
             groups: Vec::new(),
             moved_shapes: Vec::new(),
             extra_shapes: Vec::new(),
+            removed_shapes: Vec::new(),
+            deleted_layers: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -947,6 +1029,8 @@ mod tests {
             groups: Vec::new(),
             moved_shapes: Vec::new(),
             extra_shapes: Vec::new(),
+            removed_shapes: Vec::new(),
+            deleted_layers: Vec::new(),
         };
         project.apply(&mut doc);
         let bounds = doc.layers[0].shapes[0].path.bounding_box();
@@ -997,6 +1081,8 @@ mod tests {
             groups: Vec::new(),
             moved_shapes: Vec::new(),
             extra_shapes: Vec::new(),
+            removed_shapes: Vec::new(),
+            deleted_layers: Vec::new(),
         };
         project.apply(&mut doc);
         assert_eq!(
@@ -1047,6 +1133,8 @@ mod tests {
             groups: Vec::new(),
             moved_shapes: Vec::new(),
             extra_shapes: Vec::new(),
+            removed_shapes: Vec::new(),
+            deleted_layers: Vec::new(),
         };
         project.apply(&mut doc);
         let layer = &doc.layers[0];

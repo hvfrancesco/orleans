@@ -16,8 +16,8 @@ use crate::machine::{Event as MachineEvent, Machine, Settings, Status as Machine
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
 use crate::project::{
-    EditedPath, ExtraShape, GroupMember, GroupSettings, MovedShape, ProjectFile, ShapeTransform,
-    FORMAT,
+    EditedPath, ExtraShape, GroupMember, GroupSettings, MovedShape, ProjectFile, RemovedShape,
+    ShapeTransform, FORMAT,
 };
 use crate::viewport::Viewport;
 
@@ -228,6 +228,8 @@ struct StructureSnapshot {
     groups: Vec<ShapeGroup>,
     moved_shapes: BTreeMap<(usize, String), (usize, String)>,
     extra_shapes: BTreeSet<(usize, String)>,
+    removed_shapes: BTreeSet<(usize, String)>,
+    deleted_layers: BTreeSet<usize>,
     transforms: ShapeTransforms,
     edited_paths: BTreeSet<(usize, String)>,
 }
@@ -516,6 +518,7 @@ enum Action {
     Redo,
     ExitNodes,
     DeleteNode,
+    DeleteObjects,
 }
 
 pub struct OrleansApp {
@@ -529,6 +532,10 @@ pub struct OrleansApp {
     moved_shapes: BTreeMap<(usize, String), (usize, String)>,
     /// Shapes created by copying, which have no SVG source.
     extra_shapes: BTreeSet<(usize, String)>,
+    /// Original SVG shapes deleted from the document.
+    removed_shapes: BTreeSet<(usize, String)>,
+    /// Layer indices deleted from the editor.
+    deleted_layers: BTreeSet<usize>,
     /// Destination chosen in the move/copy row.
     transfer_layer: Option<usize>,
     shape_transforms: ShapeTransforms,
@@ -614,6 +621,8 @@ impl OrleansApp {
             groups: Vec::new(),
             moved_shapes: BTreeMap::new(),
             extra_shapes: BTreeSet::new(),
+            removed_shapes: BTreeSet::new(),
+            deleted_layers: BTreeSet::new(),
             transfer_layer: None,
             shape_transforms: ShapeTransforms::new(),
             undo_stack: Vec::new(),
@@ -731,6 +740,8 @@ impl OrleansApp {
                 self.groups.clear();
                 self.moved_shapes.clear();
                 self.extra_shapes.clear();
+                self.removed_shapes.clear();
+                self.deleted_layers.clear();
                 self.transfer_layer = None;
                 self.shape_transforms.clear();
                 self.clear_undo();
@@ -793,6 +804,8 @@ impl OrleansApp {
                 self.groups.clear();
                 self.moved_shapes.clear();
                 self.extra_shapes.clear();
+                self.removed_shapes.clear();
+                self.deleted_layers.clear();
                 self.transfer_layer = None;
                 self.shape_transforms.clear();
                 self.clear_undo();
@@ -947,6 +960,12 @@ impl OrleansApp {
             .iter()
             .map(|extra| (extra.layer, extra.shape.clone()))
             .collect();
+        self.removed_shapes = project
+            .removed_shapes
+            .iter()
+            .map(|removed| (removed.layer, removed.shape.clone()))
+            .collect();
+        self.deleted_layers = project.deleted_layers.iter().copied().collect();
         self.transfer_layer = None;
         self.clear_undo();
         self.dragging_shape = false;
@@ -1094,6 +1113,15 @@ impl OrleansApp {
                 })
             })
             .collect();
+        project.removed_shapes = self
+            .removed_shapes
+            .iter()
+            .map(|(layer, shape)| RemovedShape {
+                layer: *layer,
+                shape: shape.clone(),
+            })
+            .collect();
+        project.deleted_layers = self.deleted_layers.iter().copied().collect();
         let json = match serde_json::to_string_pretty(&project) {
             Ok(json) => json,
             Err(err) => {
@@ -1544,6 +1572,8 @@ impl OrleansApp {
             groups: self.groups.clone(),
             moved_shapes: self.moved_shapes.clone(),
             extra_shapes: self.extra_shapes.clone(),
+            removed_shapes: self.removed_shapes.clone(),
+            deleted_layers: self.deleted_layers.clone(),
             transforms: self.shape_transforms.clone(),
             edited_paths: self.edited_paths.clone(),
         }
@@ -1580,11 +1610,95 @@ impl OrleansApp {
         let color = NEW_LAYER_COLORS[self.doc.layers.len() % NEW_LAYER_COLORS.len()];
         let layer = Layer::new(index, name, color, orleans_core::CutParams::default());
         self.doc.layers.push(layer);
+        self.deleted_layers.remove(&index);
         self.selected_layer = Some(index);
         self.transfer_layer = Some(index);
         self.selected_raster = None;
         self.dirty = true;
         self.set_status(format!("created layer #{index}"), false);
+    }
+
+    fn delete_selected_objects(&mut self) {
+        if self.selected_shapes.is_empty() {
+            self.set_status("select objects to delete", true);
+            return;
+        }
+        let refs = self.selected_shapes.clone();
+        self.push_structure_undo();
+        for source in &refs {
+            if let Some(layer) = self
+                .doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == source.layer)
+            {
+                layer.shapes.retain(|shape| shape.id != source.shape);
+            }
+            let key = (source.layer, source.shape.clone());
+            if let Some(origin) = self.moved_shapes.remove(&key) {
+                self.removed_shapes.insert(origin);
+            } else if !self.extra_shapes.remove(&key) {
+                self.removed_shapes.insert(key.clone());
+            }
+            self.shape_transforms.remove(&key);
+            self.edited_paths.remove(&key);
+        }
+        for group in &mut self.groups {
+            group.members.retain(|member| !refs.contains(member));
+        }
+        self.groups.retain(|group| !group.members.is_empty());
+        self.selected_shapes.clear();
+        self.selected_nodes.clear();
+        self.node_drag = None;
+        self.node_edit = None;
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.dirty = true;
+        self.set_status(format!("deleted {} object(s)", refs.len()), false);
+    }
+
+    fn delete_selected_layer(&mut self) {
+        let Some(index) = self.selected_layer else {
+            self.set_status("select a layer to delete", true);
+            return;
+        };
+        let Some(position) = self
+            .doc
+            .layers
+            .iter()
+            .position(|layer| layer.index == index)
+        else {
+            return;
+        };
+        if !self.doc.layers[position].is_empty() {
+            self.set_status("only empty layers can be deleted", true);
+            return;
+        }
+        self.push_structure_undo();
+        self.doc.layers.remove(position);
+        self.deleted_layers.insert(index);
+        self.moved_shapes.retain(|(layer, _), _| *layer != index);
+        self.extra_shapes.retain(|(layer, _)| *layer != index);
+        self.removed_shapes.retain(|(layer, _)| *layer != index);
+        self.shape_transforms
+            .retain(|(layer, _), _| *layer != index);
+        self.edited_paths.retain(|(layer, _)| *layer != index);
+        for group in &mut self.groups {
+            group.members.retain(|member| member.layer != index);
+        }
+        self.groups.retain(|group| !group.members.is_empty());
+        if self.transfer_layer == Some(index) {
+            self.transfer_layer = None;
+        }
+        let next = self
+            .doc
+            .layers
+            .get(position.min(self.doc.layers.len().saturating_sub(1)))
+            .map(|layer| layer.index);
+        self.selected_layer = next;
+        self.selected_raster = None;
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.dirty = true;
+        self.set_status(format!("deleted layer #{index}"), false);
     }
 
     /// Move or copy the selected shapes to `target_layer`, keeping groups,
@@ -1649,6 +1763,7 @@ impl OrleansApp {
                 let key = (source.layer, source.shape.clone());
                 self.moved_shapes.remove(&key);
                 self.extra_shapes.remove(&key);
+                self.removed_shapes.remove(&key);
                 self.shape_transforms.remove(&key);
                 self.edited_paths.remove(&key);
             }
@@ -2121,6 +2236,8 @@ impl OrleansApp {
             self.groups = structure.groups;
             self.moved_shapes = structure.moved_shapes;
             self.extra_shapes = structure.extra_shapes;
+            self.removed_shapes = structure.removed_shapes;
+            self.deleted_layers = structure.deleted_layers;
             self.shape_transforms = structure.transforms;
             self.edited_paths = structure.edited_paths;
             if let Some(target) = self.node_edit.clone() {
@@ -4085,6 +4202,7 @@ impl OrleansApp {
                     let layer_count = self.doc.layers.len();
                     let mut move_up = false;
                     let mut move_down = false;
+                    let mut delete_layer = false;
                     // Name and colour do not affect the toolpath, so they are
                     // undoable without forcing a replan on every keystroke.
                     let mut display_changed = false;
@@ -4399,15 +4517,20 @@ impl OrleansApp {
                                 .add_enabled(pos + 1 < layer_count, egui::Button::new("Down"))
                                 .on_hover_text("Cut later")
                                 .clicked();
+                            delete_layer = ui
+                                .add_enabled(layer.is_empty(), egui::Button::new("Delete"))
+                                .on_hover_text("Delete this empty layer")
+                                .clicked();
                             ui.label(RichText::new("cut order").small().weak());
                         });
                     }
                     self.settings_edit_changed |= display_changed;
-                    if move_up {
+                    if delete_layer {
+                        self.delete_selected_layer();
+                    } else if move_up {
                         self.doc.layers.swap(pos, pos - 1);
                         changed = true;
-                    }
-                    if move_down {
+                    } else if move_down {
                         self.doc.layers.swap(pos, pos + 1);
                         changed = true;
                     }
@@ -4603,6 +4726,13 @@ impl OrleansApp {
                             if let Some(target) = target {
                                 self.transfer_selection(target, true);
                             }
+                        }
+                        if ui
+                            .button("Delete")
+                            .on_hover_text("Delete the selected objects (Del)")
+                            .clicked()
+                        {
+                            self.delete_selected_objects();
                         }
                         if let Some((_, name)) = target
                             .and_then(|target| {
@@ -5939,8 +6069,12 @@ impl eframe::App for OrleansApp {
             if node_editing && !keyboard_input && i.key_pressed(egui::Key::Escape) {
                 action = Some(Action::ExitNodes);
             }
-            if node_editing && !keyboard_input && i.key_pressed(egui::Key::Delete) {
-                action = Some(Action::DeleteNode);
+            if !keyboard_input && i.key_pressed(egui::Key::Delete) {
+                action = Some(if node_editing {
+                    Action::DeleteNode
+                } else {
+                    Action::DeleteObjects
+                });
             }
         });
 
@@ -5972,6 +6106,7 @@ impl eframe::App for OrleansApp {
             Some(Action::Redo) => self.redo_edit(),
             Some(Action::ExitNodes) => self.exit_node_edit(),
             Some(Action::DeleteNode) => self.delete_selected_node(),
+            Some(Action::DeleteObjects) => self.delete_selected_objects(),
             Some(Action::Reload) => {
                 if let Some(path) = self.project_path.clone() {
                     self.load_project(path);

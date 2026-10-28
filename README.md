@@ -34,7 +34,7 @@ was decompiled or copied.
 | Tabs/bridges on contour cuts | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
-| New layers; move/copy objects between layers | ✅ |
+| New layers; move/copy/delete objects between layers; delete empty layers | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
@@ -50,7 +50,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-136 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+137 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -124,7 +124,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   press **Move** or **Copy**; transfers are undoable. Groups move with their
   members, copied grouped objects get their own group, and copies are ordinary
   shapes that follow the destination layer's cut settings. Raster layers cannot
-  be destinations, and layers cannot be deleted yet;
+  be destinations. **Delete** in the Selection panel or the `Delete` key removes
+  the selected objects; an empty selected layer has its own **Delete** button
+  next to **Up**/**Down**;
 * choose **Line** or **Fill** for each layer. Fill mode adds **Fill spacing**,
   **Angle**, **Overlap** and **Alternate**; it hatches closed contours and
   previews the fill. Open contours are ignored by fill mode. Line mode adds
@@ -159,8 +161,8 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   reports it, otherwise `MPos`;
 * **Save project…** (`Ctrl+S`) writes a self-contained `.orleans` JSON file
   with the SVG, layer parameters, job settings, per-shape transforms,
-  node-edited paths, groups, objects moved or copied between layers, and
-  embedded raster image data.
+  node-edited paths, groups, objects moved, copied or deleted between layers,
+  deleted layers, and embedded raster image data.
   **Open…** accepts SVG, images and `.orleans`; **Reload** reloads whichever is
   current;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
@@ -314,6 +316,8 @@ concept of a line and some bridges emit negotiation on connect.
   that the settings landed on the right layers.
 * Interactive handles scale uniformly around the opposite corner and rotate
   around the selection centre. There is no non-uniform/skewed scaling.
+* Only empty vector layers can be deleted. Delete all their objects first; a
+  raster layer disappears only when the design is replaced.
 * Groups contain vector shapes only and cannot be nested; grouping a selection
   that already touches groups merges them. Ungroup before node-editing a
   member. Align/distribute treat each group as one object, and distribution
