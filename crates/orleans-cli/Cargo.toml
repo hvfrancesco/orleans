@@ -7,6 +7,10 @@ edition.workspace = true
 name = "orleans"
 path = "src/main.rs"
 
+[features]
+default = ["gui"]
+gui = ["dep:orleans-ui"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
@@ -16,3 +20,4 @@ orleans-geom = { path = "../orleans-geom" }
 orleans-import = { path = "../orleans-import" }
 orleans-toolpath = { path = "../orleans-toolpath" }
 orleans-driver = { path = "../orleans-driver" }
+orleans-ui = { path = "../orleans-ui", optional = true }

@@ -1,0 +1,16 @@
+[package]
+name = "orleans-ui"
+version.workspace = true
+edition.workspace = true
+description = "Desktop editor for orleans: SVG viewer, layer settings, G-code export"
+
+[dependencies]
+anyhow.workspace = true
+eframe.workspace = true
+kurbo.workspace = true
+rfd.workspace = true
+orleans-core = { path = "../orleans-core" }
+orleans-driver = { path = "../orleans-driver" }
+orleans-geom = { path = "../orleans-geom" }
+orleans-import = { path = "../orleans-import" }
+orleans-toolpath = { path = "../orleans-toolpath" }

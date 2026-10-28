@@ -29,11 +29,12 @@ was decompiled or copied.
 | Hardware-free GRBL simulator | ✅ |
 | DXF / PDF / AI import | ❌ |
 | Raster engraving, dithering, fill/hatch | ❌ |
-| GUI canvas / node editing | ❌ |
+| GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
+| Selection, transforms, node editing | ❌ |
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-38 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+50 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -43,6 +44,9 @@ from source).
 
 ```bash
 cargo build --release
+
+# Open the visual editor (the SVG is optional)
+cargo run -q -- gui examples/coaster.svg
 
 # Inspect a design: size, layers, cut length, time estimate
 cargo run -q -- info examples/coaster.svg
@@ -67,9 +71,28 @@ cargo run -q -- status --port /dev/ttyUSB0
 cargo run -q -- status --url tcp://192.168.1.50
 ```
 
-Installed as a binary, the commands are `orleans info`, `orleans gcode`, `orleans run`,
-`orleans status`. `--url` accepts `tcp://host[:port]`, `telnet://host[:port]` or a
-bare `host[:port]`.
+Installed as a binary, the commands are `orleans gui`, `orleans info`,
+`orleans gcode`, `orleans run` and `orleans status`. `--url` accepts
+`tcp://host[:port]`, `telnet://host[:port]` or a bare `host[:port]`.
+
+The GUI is behind the `gui` Cargo feature, which is on by default. Build with
+`--no-default-features` for a headless binary without the windowing stack.
+
+## GUI
+
+`orleans gui [design.svg]` opens the editor:
+
+* wheel to zoom at the cursor, drag to pan, `F` or double-click to fit;
+* every SVG colour becomes a layer; edit speed, power and passes in the left
+  panel and the job statistics update immediately;
+* kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel;
+* **Export G-code…** writes a `.gcode` file of your choosing;
+* `Ctrl+O` opens, `Ctrl+E` exports, and dropping an SVG onto the window loads it.
+
+The canvas shows the design geometry; kerf compensation is applied to the
+toolpath, so it affects the exported G-code and the statistics rather than the
+outline drawing, as in LightBurn. The GUI does not stream jobs to the laser yet:
+use `orleans run` with the exported file.
 
 ## Architecture
 
@@ -147,10 +170,15 @@ concept of a line and some bridges emit negotiation on connect.
 * Text in SVG needs a font database wired into `usvg::Options`; without it,
   text elements are dropped.
 * The simulator is protocol-level, not a motion model.
+* The GUI is a viewer with layer settings for now: no selection, transforms or
+  node editing, and no job control yet.
+* Large designs are redrawn as polylines every frame; a spatial index and
+  level-of-detail rendering will be needed for very complex files.
 
 ## Roadmap
 
-1. **Editing canvas** — `egui`/`wgpu`, selection, transforms, node editing, undo.
+1. **Finish the editor** — selection, transforms, node editing, undo, then
+   send-to-laser from the GUI with a confirmation step, progress and pause.
 2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.

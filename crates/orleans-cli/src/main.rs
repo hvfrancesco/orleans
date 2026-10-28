@@ -3,6 +3,7 @@
 //! Three commands are enough to be useful end to end:
 //!
 //! ```text
+//! orleans gui   design.svg
 //! orleans info  design.svg
 //! orleans gcode design.svg -o design.gcode
 //! orleans run   design.svg --url tcp://192.168.1.50   # WiFi / Telnet
@@ -36,6 +37,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the visual editor.
+    #[cfg(feature = "gui")]
+    Gui {
+        /// Design to open at startup.
+        input: Option<PathBuf>,
+    },
     /// Inspect a design and the job it would produce.
     Info(Common),
     /// Convert a design to G-code.
@@ -164,6 +171,8 @@ impl Common {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        #[cfg(feature = "gui")]
+        Command::Gui { input } => orleans_ui::run(input),
         Command::Info(cmd) => info(&cmd),
         Command::Gcode {
             common,
