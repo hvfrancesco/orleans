@@ -32,7 +32,13 @@ pub struct ProjectFile {
 pub struct ShapeTransform {
     pub layer: usize,
     pub shape: String,
+    /// Full 2D affine from the imported shape to the edited shape.
+    #[serde(default)]
+    pub matrix: Option<[f64; 6]>,
+    /// Legacy translation fields, used when `matrix` is absent.
+    #[serde(default)]
     pub dx: f64,
+    #[serde(default)]
     pub dy: f64,
 }
 
@@ -145,9 +151,11 @@ impl ProjectFile {
                     .iter_mut()
                     .find(|shape| shape.id == transform.shape)
                 {
-                    shape
-                        .path
-                        .apply_affine(kurbo::Affine::translate((transform.dx, transform.dy)));
+                    let affine = transform
+                        .matrix
+                        .map(kurbo::Affine::new)
+                        .unwrap_or_else(|| kurbo::Affine::translate((transform.dx, transform.dy)));
+                    shape.path.apply_affine(affine);
                 }
             }
         }
@@ -185,6 +193,7 @@ mod tests {
             vec![ShapeTransform {
                 layer: 0,
                 shape: "line".to_owned(),
+                matrix: None,
                 dx: 1.5,
                 dy: -2.0,
             }],
@@ -201,6 +210,39 @@ mod tests {
         assert_eq!(back.transforms.len(), 1);
         assert_eq!(back.transforms[0].dx, 1.5);
         assert_eq!(back.transforms[0].dy, -2.0);
+    }
+
+    #[test]
+    fn apply_matrix_transforms() {
+        use kurbo::{Line, Shape as _};
+        let mut doc = Document::new(100.0, 100.0);
+        let mut layer = Layer::new(0, "C00", [0, 0, 0], CutParams::default());
+        layer.shapes.push(Shape::new(
+            "line",
+            Line::new((0.0, 0.0), (10.0, 0.0)).into_path(0.01),
+            false,
+        ));
+        doc.layers.push(layer);
+        let project = ProjectFile {
+            format: FORMAT,
+            svg: "<svg/>".to_owned(),
+            source: None,
+            layers: Vec::new(),
+            kerf: 0.0,
+            optimize: true,
+            laser_mode: "M4".to_owned(),
+            max_s: 1000,
+            transforms: vec![ShapeTransform {
+                layer: 0,
+                shape: "line".to_owned(),
+                matrix: Some(kurbo::Affine::scale(2.0).as_coeffs()),
+                dx: 0.0,
+                dy: 0.0,
+            }],
+        };
+        project.apply(&mut doc);
+        let bounds = doc.layers[0].shapes[0].path.bounding_box();
+        assert!((bounds.x1 - 20.0).abs() < 1e-6);
     }
 
     #[test]
@@ -226,6 +268,7 @@ mod tests {
             transforms: vec![ShapeTransform {
                 layer: 0,
                 shape: "line".to_owned(),
+                matrix: None,
                 dx: 5.0,
                 dy: 2.0,
             }],

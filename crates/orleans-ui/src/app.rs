@@ -1,6 +1,6 @@
 //! The main application window: toolbar, layer panel, canvas, status bar.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -40,19 +40,17 @@ impl Status {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ShapeRef {
     layer: usize,
     shape: String,
 }
 
-type ShapeTranslations = BTreeMap<(usize, String), (f64, f64)>;
+type ShapeTransforms = BTreeMap<(usize, String), Affine>;
 
 struct UndoSnapshot {
-    layer: usize,
-    shape: String,
-    path: kurbo::BezPath,
-    transforms: ShapeTranslations,
+    shapes: Vec<(usize, String, kurbo::BezPath)>,
+    transforms: ShapeTransforms,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,10 +76,14 @@ pub struct OrleansApp {
     doc: Document,
     preview: Preview,
     selected_layer: Option<usize>,
-    selected_shape: Option<ShapeRef>,
-    shape_transforms: ShapeTranslations,
+    selected_shapes: BTreeSet<ShapeRef>,
+    shape_transforms: ShapeTransforms,
     undo_stack: Vec<UndoSnapshot>,
     dragging_shape: bool,
+    transform_dx: f64,
+    transform_dy: f64,
+    transform_scale: f64,
+    transform_angle: f64,
     job: Job,
     path: Option<PathBuf>,
     view: Viewport,
@@ -135,10 +137,14 @@ impl OrleansApp {
             doc: Document::new(100.0, 100.0),
             preview: Preview::default(),
             selected_layer: None,
-            selected_shape: None,
-            shape_transforms: ShapeTranslations::new(),
+            selected_shapes: BTreeSet::new(),
+            shape_transforms: ShapeTransforms::new(),
             undo_stack: Vec::new(),
             dragging_shape: false,
+            transform_dx: 0.0,
+            transform_dy: 0.0,
+            transform_scale: 1.0,
+            transform_angle: 0.0,
             job: Job::default(),
             path: None,
             view: Viewport::default(),
@@ -204,7 +210,7 @@ impl OrleansApp {
                 self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
                 self.doc = doc;
                 self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
-                self.selected_shape = None;
+                self.selected_shapes.clear();
                 self.shape_transforms.clear();
                 self.undo_stack.clear();
                 self.dragging_shape = false;
@@ -266,15 +272,16 @@ impl OrleansApp {
                 self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
                 self.doc = doc;
                 self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
-                self.selected_shape = None;
+                self.selected_shapes.clear();
                 self.shape_transforms = project
                     .transforms
                     .iter()
                     .map(|transform| {
-                        (
-                            (transform.layer, transform.shape.clone()),
-                            (transform.dx, transform.dy),
-                        )
+                        let affine = transform
+                            .matrix
+                            .map(Affine::new)
+                            .unwrap_or_else(|| Affine::translate((transform.dx, transform.dy)));
+                        ((transform.layer, transform.shape.clone()), affine)
                     })
                     .collect();
                 self.undo_stack.clear();
@@ -325,11 +332,12 @@ impl OrleansApp {
         let transforms = self
             .shape_transforms
             .iter()
-            .map(|((layer, shape), (dx, dy))| ShapeTransform {
+            .map(|((layer, shape), affine)| ShapeTransform {
                 layer: *layer,
                 shape: shape.clone(),
-                dx: *dx,
-                dy: *dy,
+                matrix: Some(affine.as_coeffs()),
+                dx: 0.0,
+                dy: 0.0,
             })
             .collect();
         let project = ProjectFile::new(
@@ -671,73 +679,6 @@ impl OrleansApp {
         Some(kurbo::Rect::new(-ox, -oy, width - ox, height - oy))
     }
 
-    fn push_shape_undo(&mut self, selected: &ShapeRef) {
-        let Some(layer) = self
-            .doc
-            .layers
-            .iter()
-            .find(|layer| layer.index == selected.layer)
-        else {
-            return;
-        };
-        let Some(shape) = layer.shapes.iter().find(|shape| shape.id == selected.shape) else {
-            return;
-        };
-        self.undo_stack.push(UndoSnapshot {
-            layer: selected.layer,
-            shape: selected.shape.clone(),
-            path: shape.path.clone(),
-            transforms: self.shape_transforms.clone(),
-        });
-        if self.undo_stack.len() > 30 {
-            self.undo_stack.remove(0);
-        }
-    }
-
-    fn undo_shape_move(&mut self) {
-        let Some(snapshot) = self.undo_stack.pop() else {
-            self.set_status("nothing to undo", false);
-            return;
-        };
-        if let Some(layer) = self
-            .doc
-            .layers
-            .iter_mut()
-            .find(|layer| layer.index == snapshot.layer)
-        {
-            if let Some(shape) = layer
-                .shapes
-                .iter_mut()
-                .find(|shape| shape.id == snapshot.shape)
-            {
-                shape.path = snapshot.path;
-            }
-        }
-        self.shape_transforms = snapshot.transforms;
-        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
-        self.replan();
-        self.dirty = false;
-
-        let exists = self.selected_shape.as_ref().is_some_and(|selected| {
-            self.doc
-                .layers
-                .iter()
-                .find(|layer| layer.index == selected.layer)
-                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == selected.shape))
-                .is_some()
-        });
-        if !exists {
-            self.selected_shape = None;
-        }
-        if let Some(index) = self.selected_layer {
-            if !self.doc.layers.iter().any(|layer| layer.index == index) {
-                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
-            }
-        }
-        self.dragging_shape = false;
-        self.set_status("undid shape move", false);
-    }
-
     fn hit_test(&self, p: Point) -> Option<ShapeRef> {
         let tolerance = (6.0 / f64::from(self.view.zoom)).max(0.25);
         for layer in self.doc.layers.iter().rev() {
@@ -773,67 +714,203 @@ impl OrleansApp {
         None
     }
 
-    /// Prefer the current selection's bounding box for dragging: after the
-    /// outline has been clicked, the user can grab anywhere inside the object.
-    fn drag_target(&self, point: Point) -> Option<ShapeRef> {
-        if let Some(selected) = &self.selected_shape {
-            if let Some(layer) = self
+    fn selection_bounds(&self) -> Option<kurbo::Rect> {
+        let mut bounds: Option<kurbo::Rect> = None;
+        for selected in &self.selected_shapes {
+            let Some(shape) = self
                 .doc
                 .layers
                 .iter()
                 .find(|layer| layer.index == selected.layer)
+                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == selected.shape))
+            else {
+                continue;
+            };
+            let shape_bounds = shape.bounds();
+            bounds = Some(match bounds {
+                Some(current) => current.union(shape_bounds),
+                None => shape_bounds,
+            });
+        }
+        bounds
+    }
+
+    fn press_on_selection(&self, point: Point) -> bool {
+        self.selected_shapes.iter().any(|selected| {
+            self.doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == selected.layer)
+                .filter(|layer| layer.visible)
+                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == selected.shape))
+                .map(|shape| shape.bounds().contains(point))
+                .unwrap_or(false)
+        })
+    }
+
+    fn push_selection_undo(&mut self) {
+        let mut shapes = Vec::new();
+        for selected in &self.selected_shapes {
+            if let Some(shape) = self
+                .doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == selected.layer)
+                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == selected.shape))
             {
-                if layer.visible {
-                    if let Some(shape) =
-                        layer.shapes.iter().find(|shape| shape.id == selected.shape)
-                    {
-                        if shape.bounds().contains(point) {
-                            return Some(selected.clone());
-                        }
+                shapes.push((selected.layer, selected.shape.clone(), shape.path.clone()));
+            }
+        }
+        if shapes.is_empty() {
+            return;
+        }
+        self.undo_stack.push(UndoSnapshot {
+            shapes,
+            transforms: self.shape_transforms.clone(),
+        });
+        if self.undo_stack.len() > 30 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn undo_shape_move(&mut self) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            self.set_status("nothing to undo", false);
+            return;
+        };
+        for (layer_index, shape_id, path) in snapshot.shapes {
+            if let Some(shape) = self
+                .doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == layer_index)
+                .and_then(|layer| layer.shapes.iter_mut().find(|shape| shape.id == shape_id))
+            {
+                shape.path = path;
+            }
+        }
+        self.shape_transforms = snapshot.transforms;
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.replan();
+        self.dirty = false;
+
+        let existing: BTreeSet<(usize, String)> = self
+            .doc
+            .layers
+            .iter()
+            .flat_map(|layer| {
+                layer
+                    .shapes
+                    .iter()
+                    .map(move |shape| (layer.index, shape.id.clone()))
+            })
+            .collect();
+        self.selected_shapes
+            .retain(|selected| existing.contains(&(selected.layer, selected.shape.clone())));
+
+        if let Some(index) = self.selected_layer {
+            if !self.doc.layers.iter().any(|layer| layer.index == index) {
+                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+            }
+        }
+        self.dragging_shape = false;
+        self.set_status("undid selection edit", false);
+    }
+
+    fn apply_affine_to_selection(&mut self, affine: Affine) {
+        let selected: Vec<ShapeRef> = self.selected_shapes.iter().cloned().collect();
+        for selection in selected {
+            {
+                let Some(layer) = self
+                    .doc
+                    .layers
+                    .iter_mut()
+                    .find(|layer| layer.index == selection.layer)
+                else {
+                    continue;
+                };
+                let Some(shape) = layer
+                    .shapes
+                    .iter_mut()
+                    .find(|shape| shape.id == selection.shape)
+                else {
+                    continue;
+                };
+                shape.path.apply_affine(affine);
+            }
+            let entry = self
+                .shape_transforms
+                .entry((selection.layer, selection.shape.clone()))
+                .or_insert(Affine::IDENTITY);
+            *entry = affine * *entry;
+            if let Some(preview) = self.preview.shape_mut(selection.layer, &selection.shape) {
+                for contour in &mut preview.contours {
+                    for point in &mut contour.points {
+                        *point = affine * *point;
                     }
                 }
             }
         }
-        self.hit_test(point)
+        self.dirty = true;
     }
 
-    fn translate_selected_shape(&mut self, dx: f64, dy: f64) {
-        let Some(selected) = self.selected_shape.clone() else {
+    fn translate_selection(&mut self, dx: f64, dy: f64) {
+        if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+            return;
+        }
+        self.apply_affine_to_selection(Affine::translate((dx, dy)));
+    }
+
+    fn move_selection(&mut self) {
+        let dx = self.transform_dx;
+        let dy = self.transform_dy;
+        if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+            return;
+        }
+        self.push_selection_undo();
+        self.translate_selection(dx, dy);
+        self.transform_dx = 0.0;
+        self.transform_dy = 0.0;
+        let count = self.selected_shapes.len();
+        self.set_status(format!("moved {count} shape(s)"), false);
+    }
+
+    fn scale_selection(&mut self) {
+        let factor = self.transform_scale;
+        if !factor.is_finite() || factor <= 0.0 || (factor - 1.0).abs() < 1e-9 {
+            return;
+        }
+        let Some(bounds) = self.selection_bounds() else {
             return;
         };
-        {
-            let Some(layer) = self
-                .doc
-                .layers
-                .iter_mut()
-                .find(|layer| layer.index == selected.layer)
-            else {
-                return;
-            };
-            let Some(shape) = layer
-                .shapes
-                .iter_mut()
-                .find(|shape| shape.id == selected.shape)
-            else {
-                return;
-            };
-            shape.path.apply_affine(Affine::translate((dx, dy)));
+        let center = bounds.center();
+        let affine = Affine::translate((center.x, center.y))
+            * Affine::scale(factor)
+            * Affine::translate((-center.x, -center.y));
+        self.push_selection_undo();
+        self.apply_affine_to_selection(affine);
+        self.transform_scale = 1.0;
+        let count = self.selected_shapes.len();
+        self.set_status(format!("scaled {count} shape(s) ×{factor:.2}"), false);
+    }
+
+    fn rotate_selection(&mut self) {
+        let degrees = self.transform_angle;
+        if !degrees.is_finite() || degrees.abs() < 1e-9 {
+            return;
         }
-        let entry = self
-            .shape_transforms
-            .entry((selected.layer, selected.shape.clone()))
-            .or_insert((0.0, 0.0));
-        entry.0 += dx;
-        entry.1 += dy;
-        if let Some(preview) = self.preview.shape_mut(selected.layer, &selected.shape) {
-            for contour in &mut preview.contours {
-                for point in &mut contour.points {
-                    point.x += dx;
-                    point.y += dy;
-                }
-            }
-        }
-        self.dirty = true;
+        let Some(bounds) = self.selection_bounds() else {
+            return;
+        };
+        let center = bounds.center();
+        let affine = Affine::translate((center.x, center.y))
+            * Affine::rotate(degrees.to_radians())
+            * Affine::translate((-center.x, -center.y));
+        self.push_selection_undo();
+        self.apply_affine_to_selection(affine);
+        self.transform_angle = 0.0;
+        let count = self.selected_shapes.len();
+        self.set_status(format!("rotated {count} shape(s) by {degrees:.1}°"), false);
     }
 
     fn pause_is_safe(&self) -> bool {
@@ -1565,7 +1642,7 @@ impl OrleansApp {
                 }
                 if ui
                     .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("Undo"))
-                    .on_hover_text("Undo shape move (Ctrl+Z)")
+                    .on_hover_text("Undo selection edit (Ctrl+Z)")
                     .clicked()
                 {
                     *action = Some(Action::Undo);
@@ -1615,7 +1692,13 @@ impl OrleansApp {
                 if total == 0 {
                     ui.label(RichText::new("No layers yet. Open an SVG or drop one here.").weak());
                 } else {
-                    let list_height = (ui.available_height() - 350.0).clamp(100.0, 360.0);
+                    let transform_height = if self.selected_shapes.is_empty() {
+                        0.0
+                    } else {
+                        104.0
+                    };
+                    let list_height =
+                        (ui.available_height() - 350.0 - transform_height).clamp(80.0, 360.0);
                     let mut pick = None;
                     let mut output_changed = false;
                     egui::ScrollArea::vertical()
@@ -1704,8 +1787,12 @@ impl OrleansApp {
                             }
                         });
                     if let Some(index) = pick {
-                        if self.selected_shape.as_ref().map(|shape| shape.layer) != Some(index) {
-                            self.selected_shape = None;
+                        if !self
+                            .selected_shapes
+                            .iter()
+                            .any(|shape| shape.layer == index)
+                        {
+                            self.selected_shapes.clear();
                         }
                         self.selected_layer = Some(index);
                     }
@@ -1822,15 +1909,60 @@ impl OrleansApp {
                     ui.label(RichText::new("Select a layer to edit it.").weak());
                 }
 
+                let selected_count = self.selected_shapes.len();
                 ui.label(
-                    RichText::new(if self.selected_shape.is_some() {
-                        "Shape selected — drag to move · Ctrl+Z to undo"
+                    RichText::new(if selected_count == 0 {
+                        "Click a shape · Ctrl/Shift-click for multiple · drag to move · right-drag to pan"
                     } else {
-                        "Click a shape to select · drag to move · right-drag to pan"
+                        "Drag any selected shape to move the selection · Ctrl+Z to undo"
                     })
                     .small()
                     .weak(),
                 );
+
+                if selected_count > 0 {
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("Selection ({selected_count})"));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Move");
+                        ui.label("X");
+                        ui.add(
+                            egui::DragValue::new(&mut self.transform_dx)
+                                .speed(0.1)
+                                .suffix(" mm"),
+                        );
+                        ui.label("Y");
+                        ui.add(
+                            egui::DragValue::new(&mut self.transform_dy)
+                                .speed(0.1)
+                                .suffix(" mm"),
+                        );
+                        if ui.button("Move").clicked() {
+                            self.move_selection();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Scale");
+                        ui.add(
+                            egui::DragValue::new(&mut self.transform_scale)
+                                .speed(0.01)
+                                .range(0.05..=10.0),
+                        );
+                        if ui.button("Scale").clicked() {
+                            self.scale_selection();
+                        }
+                        ui.label("Rotate");
+                        ui.add(
+                            egui::DragValue::new(&mut self.transform_angle)
+                                .speed(1.0)
+                                .suffix("°"),
+                        );
+                        if ui.button("Rotate").clicked() {
+                            self.rotate_selection();
+                        }
+                    });
+                }
 
                 ui.separator();
                 ui.heading("Job");
@@ -1946,12 +2078,24 @@ impl OrleansApp {
         self.draw_selected_shape(&painter, area);
         self.draw_origin(&painter, area);
 
+        let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
+
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some(position) = response.interact_pointer_pos() {
                 let world = self.view.screen_to_world(area, position);
-                self.selected_shape = self.hit_test(world);
-                if let Some(selected) = &self.selected_shape {
-                    self.selected_layer = Some(selected.layer);
+                let hit = self.hit_test(world);
+                if let Some(hit) = hit {
+                    if additive {
+                        if !self.selected_shapes.remove(&hit) {
+                            self.selected_shapes.insert(hit.clone());
+                        }
+                    } else {
+                        self.selected_shapes.clear();
+                        self.selected_shapes.insert(hit.clone());
+                    }
+                    self.selected_layer = Some(hit.layer);
+                } else if !additive {
+                    self.selected_shapes.clear();
                 }
             }
         }
@@ -1961,12 +2105,24 @@ impl OrleansApp {
                 .ctx()
                 .input(|input| input.pointer.press_origin())
                 .or_else(|| response.interact_pointer_pos());
-            let hit = origin
-                .and_then(|position| self.drag_target(self.view.screen_to_world(area, position)));
-            if let Some(selected) = hit {
-                self.push_shape_undo(&selected);
-                self.selected_layer = Some(selected.layer);
-                self.selected_shape = Some(selected);
+            let world = origin.map(|position| self.view.screen_to_world(area, position));
+            let mut drag = false;
+            if let Some(world) = world {
+                if self.press_on_selection(world) {
+                    drag = true;
+                } else if let Some(hit) = self.hit_test(world) {
+                    if additive {
+                        self.selected_shapes.insert(hit.clone());
+                    } else {
+                        self.selected_shapes.clear();
+                        self.selected_shapes.insert(hit.clone());
+                    }
+                    self.selected_layer = Some(hit.layer);
+                    drag = true;
+                }
+            }
+            if drag {
+                self.push_selection_undo();
                 self.dragging_shape = true;
             } else {
                 self.dragging_shape = false;
@@ -1984,10 +2140,7 @@ impl OrleansApp {
             if self.dragging_shape {
                 let delta = response.drag_delta();
                 let zoom = f64::from(self.view.zoom);
-                self.translate_selected_shape(
-                    f64::from(delta.x) / zoom,
-                    -f64::from(delta.y) / zoom,
-                );
+                self.translate_selection(f64::from(delta.x) / zoom, -f64::from(delta.y) / zoom);
             } else {
                 self.view.pan(response.drag_delta());
             }
@@ -2161,56 +2314,73 @@ impl OrleansApp {
     }
 
     fn draw_selected_shape(&self, painter: &egui::Painter, area: Rect) {
-        let Some(selected) = &self.selected_shape else {
-            return;
-        };
-        let Some(layer) = self
-            .doc
-            .layers
-            .iter()
-            .find(|layer| layer.index == selected.layer)
-        else {
-            return;
-        };
-        if !layer.visible {
-            return;
-        }
-        let Some(shape) = layer.shapes.iter().find(|shape| shape.id == selected.shape) else {
-            return;
-        };
-        let Some(preview) = self.preview.shape(selected.layer, &selected.shape) else {
-            return;
-        };
-
-        let stroke = Stroke::new(2.4, Color32::from_rgb(255, 214, 90));
-        for contour in &preview.contours {
-            let mut points: Vec<Pos2> = contour
-                .points
+        for selected in &self.selected_shapes {
+            let Some(layer) = self
+                .doc
+                .layers
                 .iter()
-                .map(|point| self.view.world_to_screen(area, *point))
-                .collect();
-            if contour.closed && points.len() > 1 {
-                points.push(points[0]);
+                .find(|layer| layer.index == selected.layer)
+            else {
+                continue;
+            };
+            if !layer.visible {
+                continue;
             }
-            if points.len() >= 2 {
-                painter.add(egui::Shape::line(points, stroke));
+            let Some(shape) = layer.shapes.iter().find(|shape| shape.id == selected.shape) else {
+                continue;
+            };
+            let Some(preview) = self.preview.shape(selected.layer, &selected.shape) else {
+                continue;
+            };
+
+            let stroke = Stroke::new(2.4, Color32::from_rgb(255, 214, 90));
+            for contour in &preview.contours {
+                let mut points: Vec<Pos2> = contour
+                    .points
+                    .iter()
+                    .map(|point| self.view.world_to_screen(area, *point))
+                    .collect();
+                if contour.closed && points.len() > 1 {
+                    points.push(points[0]);
+                }
+                if points.len() >= 2 {
+                    painter.add(egui::Shape::line(points, stroke));
+                }
             }
+
+            let bounds = shape.bounds();
+            let rect = Rect::from_two_pos(
+                self.view
+                    .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
+                self.view
+                    .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
+            )
+            .expand(4.0);
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
+                StrokeKind::Inside,
+            );
         }
 
-        let bounds = shape.bounds();
-        let rect = Rect::from_two_pos(
-            self.view
-                .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
-            self.view
-                .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
-        )
-        .expand(4.0);
-        painter.rect_stroke(
-            rect,
-            0.0,
-            Stroke::new(1.0, Color32::from_rgb(220, 185, 70)),
-            StrokeKind::Inside,
-        );
+        if self.selected_shapes.len() > 1 {
+            if let Some(bounds) = self.selection_bounds() {
+                let rect = Rect::from_two_pos(
+                    self.view
+                        .world_to_screen(area, Point::new(bounds.x0, bounds.y0)),
+                    self.view
+                        .world_to_screen(area, Point::new(bounds.x1, bounds.y1)),
+                )
+                .expand(8.0);
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    Stroke::new(1.0, Color32::from_rgb(255, 230, 150)),
+                    StrokeKind::Inside,
+                );
+            }
+        }
     }
 
     fn draw_origin(&self, painter: &egui::Painter, area: Rect) {
