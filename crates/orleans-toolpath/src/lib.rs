@@ -52,7 +52,7 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
     let mut stats = JobStats::default();
 
     for layer in &doc.layers {
-        if !layer.visible || layer.is_empty() {
+        if !layer.output || layer.is_empty() {
             continue;
         }
         let contours: Vec<Contour> = layer
@@ -254,11 +254,19 @@ mod tests {
     }
 
     #[test]
-    fn hidden_layers_are_not_planned() {
+    fn non_output_layers_are_not_planned() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
+        doc.layers[0].output = false;
+        let job = plan(&doc, &PlanOptions::default());
+        assert!(job.is_empty());
+    }
+
+    #[test]
+    fn hidden_layers_still_cut_if_output_is_enabled() {
         let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
         doc.layers[0].visible = false;
         let job = plan(&doc, &PlanOptions::default());
-        assert!(job.is_empty());
+        assert_eq!(job.cuts().count(), 1);
     }
 
     #[test]

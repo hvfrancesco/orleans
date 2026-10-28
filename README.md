@@ -30,7 +30,7 @@ was decompiled or copied.
 | DXF / PDF / AI import | ❌ |
 | Raster engraving, dithering, fill/hatch | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
-| Layer list: selection, visibility, rename, colour, cut-order reorder | ✅ |
+| Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | Project save/load (`.orleans`, embedded SVG + layer/job settings) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -43,7 +43,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-70 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+72 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -101,9 +101,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 * wheel to zoom at the cursor, drag to pan, `F` or double-click to fit;
 * every SVG colour becomes a layer. The left panel is a compact, scrollable
   layer list; select one layer to edit its name, colour, speed, power and
-  passes. Toggle visibility, move layers in cut order, and the selected layer
-  is highlighted on the canvas. Hidden layers are excluded from the preview,
-  frame, job and statistics;
+  passes. **Cut** decides whether the layer is planned, framed and sent;
+  **Show** controls whether it is drawn. A visible layer with Cut off remains
+  as a grey reference, while a hidden layer with Cut on still cuts. Move layers
+  in cut order, and the selected layer is highlighted on the canvas;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
   (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
@@ -242,7 +243,8 @@ concept of a line and some bridges emit negotiation on connect.
 * The simulator is protocol-level, not a motion model.
 * The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
   assumes work zero coincides with machine zero.
-* Project layer settings, visibility and cut order are matched by layer index.
+* Project layer settings, Show/Cut state and cut order are matched by layer
+  index.
   If the SVG's colour grouping changes after saving, check that the settings
   landed on the right layers.
 * The GUI has no selection, transforms or node editing. Pause is restricted to

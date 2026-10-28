@@ -61,8 +61,10 @@ pub struct Layer {
     pub mode: LayerMode,
     pub cut: CutParams,
     pub shapes: Vec<Shape>,
-    /// Whether the layer participates in previews, job planning and framing.
+    /// Whether the layer is drawn in the editor.
     pub visible: bool,
+    /// Whether the layer is planned, framed and sent to the machine.
+    pub output: bool,
 }
 
 impl Layer {
@@ -75,6 +77,7 @@ impl Layer {
             cut,
             shapes: Vec::new(),
             visible: true,
+            output: true,
         }
     }
 
@@ -126,13 +129,22 @@ impl Document {
         }
     }
 
-    /// Bounding box of all geometry, if the document is not empty.
+    /// Bounding box of all visible geometry, if the document is not empty.
     pub fn bounds(&self) -> Option<Rect> {
+        self.bounds_for(|layer| layer.visible)
+    }
+
+    /// Bounding box of the geometry that will actually be cut or framed.
+    pub fn output_bounds(&self) -> Option<Rect> {
+        self.bounds_for(|layer| layer.output)
+    }
+
+    fn bounds_for(&self, include: impl Fn(&Layer) -> bool) -> Option<Rect> {
         let mut bounds: Option<Rect> = None;
         for shape in self
             .layers
             .iter()
-            .filter(|layer| layer.visible)
+            .filter(|layer| include(layer))
             .flat_map(|layer| layer.shapes.iter())
         {
             if shape.path.elements().is_empty() {
@@ -271,6 +283,34 @@ mod tests {
         assert_eq!(bounds.y0, 0.0);
         assert_eq!(bounds.x1, 5.0);
         assert_eq!(bounds.y1, 5.0);
+    }
+
+    #[test]
+    fn output_bounds_ignore_non_output_layers() {
+        let mut doc = Document::new(100.0, 100.0);
+        let mut reference = Layer::new(0, "reference", [0, 0, 0], CutParams::default());
+        reference.output = false;
+        reference.shapes.push(Shape::new(
+            "reference",
+            Line::new((40.0, 40.0), (60.0, 60.0)).into_path(0.01),
+            false,
+        ));
+        doc.layers.push(reference);
+
+        let mut cut = Layer::new(1, "cut", [0, 0, 0], CutParams::default());
+        cut.shapes.push(Shape::new(
+            "cut",
+            Line::new((0.0, 0.0), (5.0, 5.0)).into_path(0.01),
+            false,
+        ));
+        doc.layers.push(cut);
+
+        let visible = doc.bounds().expect("visible bounds");
+        assert_eq!(visible.x0, 0.0);
+        assert_eq!(visible.x1, 60.0);
+        let output = doc.output_bounds().expect("output bounds");
+        assert_eq!(output.x0, 0.0);
+        assert_eq!(output.x1, 5.0);
     }
 
     #[test]

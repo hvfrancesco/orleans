@@ -492,6 +492,7 @@ impl OrleansApp {
             && !self.job_running
             && !self.homing
             && !self.doc.is_empty()
+            && !self.job.is_empty()
             && !self
                 .home_pending_until
                 .map(|until| until > Instant::now())
@@ -541,8 +542,8 @@ impl OrleansApp {
             );
             return;
         }
-        let Some(bounds) = self.doc.bounds() else {
-            self.set_status("nothing to frame", true);
+        let Some(bounds) = self.doc.output_bounds() else {
+            self.set_status("nothing to frame: no layers are set to Cut", true);
             return;
         };
         let program = frame_program(bounds, FRAME_FEED);
@@ -1369,12 +1370,13 @@ impl OrleansApp {
                 ui.add_space(6.0);
                 let total = self.doc.layers.len();
                 let visible = self.doc.layers.iter().filter(|layer| layer.visible).count();
+                let cutting = self.doc.layers.iter().filter(|layer| layer.output).count();
                 ui.horizontal(|ui| {
                     ui.heading("Layers");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if total > 0 {
                             ui.label(
-                                RichText::new(format!("{visible}/{total} shown"))
+                                RichText::new(format!("{cutting} cut · {visible} shown"))
                                     .small()
                                     .weak(),
                             );
@@ -1389,7 +1391,7 @@ impl OrleansApp {
                 } else {
                     let list_height = (ui.available_height() - 350.0).clamp(100.0, 360.0);
                     let mut pick = None;
-                    let mut visibility_changed = false;
+                    let mut output_changed = false;
                     egui::ScrollArea::vertical()
                         .id_salt("layer-list")
                         .max_height(list_height)
@@ -1418,11 +1420,11 @@ impl OrleansApp {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             if ui
-                                                .checkbox(&mut layer.visible, "")
-                                                .on_hover_text("Show/hide layer")
+                                                .checkbox(&mut layer.output, "Cut")
+                                                .on_hover_text("Include this layer in the job")
                                                 .changed()
                                             {
-                                                visibility_changed = true;
+                                                output_changed = true;
                                             }
                                             let (chip, _) = ui.allocate_exact_size(
                                                 egui::vec2(10.0, 10.0),
@@ -1431,7 +1433,7 @@ impl OrleansApp {
                                             ui.painter().rect_filled(
                                                 chip,
                                                 2.0,
-                                                if layer.visible {
+                                                if layer.output {
                                                     display_color(layer.color)
                                                 } else {
                                                     Color32::from_gray(90)
@@ -1459,7 +1461,7 @@ impl OrleansApp {
                                         });
                                         ui.horizontal(|ui| {
                                             ui.add_space(30.0);
-                                            let text = if layer.visible {
+                                            let text = if layer.visible && layer.output {
                                                 RichText::new(summary).small().weak()
                                             } else {
                                                 RichText::new(summary)
@@ -1478,7 +1480,7 @@ impl OrleansApp {
                     if let Some(index) = pick {
                         self.selected_layer = Some(index);
                     }
-                    changed |= visibility_changed;
+                    changed |= output_changed;
                     if self.selected_layer.is_none() {
                         self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
                     }
@@ -1557,7 +1559,14 @@ impl OrleansApp {
                                 ui.end_row();
                             });
                         ui.horizontal(|ui| {
-                            changed |= ui.checkbox(&mut layer.visible, "Visible").changed();
+                            changed |= ui
+                                .checkbox(&mut layer.output, "Cut")
+                                .on_hover_text("Include this layer in the job and frame")
+                                .changed();
+                            changed |= ui
+                                .checkbox(&mut layer.visible, "Show")
+                                .on_hover_text("Draw this layer in the editor")
+                                .changed();
                             ui.label(RichText::new("· Line").small().weak());
                         });
                         ui.horizontal(|ui| {
@@ -1839,7 +1848,11 @@ impl OrleansApp {
             let Some(preview) = self.preview.layer(layer.index) else {
                 continue;
             };
-            let color = display_color(layer.color);
+            let color = if layer.output {
+                display_color(layer.color)
+            } else {
+                Color32::from_gray(85)
+            };
             let width = if self.selected_layer == Some(layer.index) {
                 2.4
             } else {

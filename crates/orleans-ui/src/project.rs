@@ -36,6 +36,8 @@ pub struct LayerSettings {
     pub passes: u32,
     #[serde(default = "default_true")]
     pub visible: bool,
+    #[serde(default = "default_true")]
+    pub output: bool,
 }
 
 fn default_true() -> bool {
@@ -69,6 +71,7 @@ impl ProjectFile {
                     power: layer.cut.power,
                     passes: layer.cut.passes,
                     visible: layer.visible,
+                    output: layer.output,
                 })
                 .collect(),
             kerf,
@@ -104,6 +107,7 @@ impl ProjectFile {
                 layer.name = saved.name.clone();
                 layer.color = saved.color;
                 layer.visible = saved.visible;
+                layer.output = saved.output;
                 layer.mode = if saved.mode.eq_ignore_ascii_case("fill") {
                     LayerMode::Fill
                 } else {
@@ -175,6 +179,7 @@ mod tests {
             power: 20.0,
             passes: 1,
             visible: true,
+            output: true,
         };
         let project = ProjectFile {
             format: FORMAT,
@@ -214,6 +219,7 @@ mod tests {
                 power: 12.5,
                 passes: 3,
                 visible: false,
+                output: true,
             }],
             kerf: 0.1,
             optimize: false,
@@ -228,5 +234,6 @@ mod tests {
         assert_eq!(layer.cut.power, 12.5);
         assert_eq!(layer.cut.passes, 3);
         assert!(!layer.visible);
+        assert!(layer.output);
     }
 }
