@@ -11,6 +11,9 @@ use kurbo::{BezPath, Point};
 use orleans_core::{CutParams, Document, Layer, LayerMode, RasterImage, RasterMode, Shape};
 use usvg::tiny_skia_path::PathSegment;
 
+mod dxf;
+pub use dxf::import_dxf;
+
 /// 96 CSS pixels per inch, the SVG/CSS reference resolution.
 pub const DEFAULT_DPI: f64 = 96.0;
 
@@ -52,6 +55,8 @@ pub enum ImportError {
     Parse(#[from] usvg::Error),
     #[error("could not decode image: {0}")]
     Image(#[from] image::ImageError),
+    #[error("could not parse DXF: {0}")]
+    Dxf(String),
 }
 
 /// Decode an image into a single raster layer at `dpi`.

@@ -6,6 +6,8 @@
 //! orleans gui   design.svg
 //! orleans info  design.svg
 //! orleans gcode design.svg -o design.gcode
+//! orleans info  drawing.dxf
+//! orleans gcode drawing.dxf -o drawing.gcode
 //! orleans run   design.svg --url tcp://192.168.1.50   # WiFi / Telnet
 //! orleans run   design.svg --port /dev/ttyUSB0        # USB serial
 //! orleans run   design.svg --mock                     # simulator
@@ -22,7 +24,7 @@ use orleans_core::Document;
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_driver::net::{parse_endpoint, TcpTransport};
 use orleans_driver::{GrblClient, GrblConfig, SimulatedGrbl, Transport};
-use orleans_import::{import_svg, ImportOptions};
+use orleans_import::{import_dxf, import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
 #[derive(Parser)]
@@ -167,8 +169,17 @@ impl Common {
             default_cut: orleans_core::CutParams::new(self.speed, self.power, self.passes),
             group_by_color: true,
         };
-        let doc = import_svg(&bytes, &opt)
-            .with_context(|| format!("importing {}", self.input.display()))?;
+        let is_dxf = self
+            .input
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("dxf"));
+        let doc = if is_dxf {
+            import_dxf(&bytes, &opt)
+        } else {
+            import_svg(&bytes, &opt)
+        }
+        .with_context(|| format!("importing {}", self.input.display()))?;
         if doc.is_empty() {
             bail!("{} contains no paths", self.input.display());
         }

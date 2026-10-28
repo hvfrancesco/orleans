@@ -29,7 +29,8 @@ was decompiled or copied.
 | GRBL streaming: character-counting flow control, `ok`/`error`, progress, status, feed hold, resume, soft reset, automatic stop on failure | ✅ |
 | USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
 | Hardware-free GRBL simulator | ✅ |
-| DXF / PDF / AI import | ❌ |
+| DXF import (common 2D entities) | ✅ |
+| PDF / AI import | ❌ |
 | Raster engraving (threshold, Floyd–Steinberg/Atkinson/Bayer dither, grayscale, crop) | ✅ |
 | Tabs/bridges on contour cuts, automatic or manual, with canvas markers | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
@@ -51,7 +52,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-149 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+153 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -64,6 +65,9 @@ cargo build --release
 
 # Open the visual editor (the input is optional)
 cargo run -q -- gui examples/coaster.svg --url tcp://192.168.1.10
+
+# Open a DXF drawing
+cargo run -q -- gui drawing.dxf
 
 # Open a PNG/JPEG/BMP as a raster-engraving layer
 cargo run -q -- gui photo.png
@@ -154,6 +158,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   an image on the canvas or select its layer to show handles: drag inside to
   move, drag a corner to resize and drag the top handle to rotate. Use a
   separate vector layer for outlines;
+* DXF files open as one layer per DXF layer, using the layer's ACI or true
+  colour. `LINE`, `LWPOLYLINE`/`POLYLINE` (including bulges), `CIRCLE`, `ARC`,
+  `ELLIPSE` and `SPLINE` are read; `$INSUNITS` sets the millimetre scale.
+  Blocks/`INSERT`, `HATCH`, text, dimensions and binary DXF are not expanded;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
   (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
@@ -176,8 +184,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   with the SVG, layer parameters, job settings, per-shape transforms,
   node-edited paths, groups, objects moved, copied or deleted between layers,
   deleted layers, and embedded raster image data.
-  **Open…** accepts SVG, images and `.orleans`; **Reload** reloads whichever is
-  current;
+  **Open…** accepts SVG, DXF, images and `.orleans`; **Reload** reloads whichever
+  is current. Projects saved from a DXF import are not supported yet, because
+  the project format embeds SVG geometry;
 * **Settings…** opens the controller settings: laser mode `$32`, max S `$30`,
   homing `$22`, and the raw `$$` list. **Apply** writes the changed settings
   to EEPROM; editing is blocked while cutting or homing;
@@ -239,7 +248,7 @@ remains available. Framing can always be paused because it holds `M5`.
 crates/
   orleans-core/      document model: Document → Layer → Shape, CutParams, Job
   orleans-geom/      flattening, area, containment, Clipper2 offsets/booleans
-  orleans-import/    SVG → Document (via usvg)
+  orleans-import/    SVG → Document (via usvg), ASCII DXF, raster images
   orleans-toolpath/  Document → Job: nesting, ordering, passes, time estimate
   orleans-driver/    Job → G-code, Transport trait, serial/TCP, GRBL client, simulator
   orleans-cli/       the `orleans` binary
@@ -329,6 +338,10 @@ concept of a line and some bridges emit negotiation on connect.
   that the settings landed on the right layers.
 * Interactive handles scale uniformly around the opposite corner and rotate
   around the selection centre. There is no non-uniform/skewed scaling.
+* DXF import covers ASCII files and the listed entities only. Blocks,
+  `INSERT`, `HATCH`, text, dimensions, meshes and binary DXF are skipped, and a
+  DXF-imported design cannot be saved as a `.orleans` project yet because the
+  project format embeds SVG geometry.
 * Only empty vector layers can be deleted. Delete all their objects first; a
   raster layer disappears only when the design is replaced.
 * Arrays are rectangular only: there is no polar/circular array, and copies
@@ -372,7 +385,7 @@ concept of a line and some bridges emit negotiation on connect.
 ## Roadmap
 
 1. **Finish the editor** — job history for the streaming panel.
-2. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.
+2. **More importers** — PDF, AI; LBRN2 read/write from community specs.
 3. **Second driver** — Marlin, then Ruida over UDP.
 4. **Job control extras** — feed/power overrides, rotary setup.
 

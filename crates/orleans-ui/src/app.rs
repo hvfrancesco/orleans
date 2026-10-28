@@ -14,7 +14,7 @@ use orleans_geom::{
     flatten_path, hatch_contours, nearest_along_closed, offset_region, point_at_fraction,
     point_in_polygon, tab_span_polylines, HatchOptions,
 };
-use orleans_import::{import_image, import_svg, ImportOptions, DEFAULT_RASTER_DPI};
+use orleans_import::{import_dxf, import_image, import_svg, ImportOptions, DEFAULT_RASTER_DPI};
 use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
@@ -807,6 +807,64 @@ impl OrleansApp {
         }
     }
 
+    fn load_dxf(&mut self, path: PathBuf) {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = Status::error(format!("reading {}: {err}", path.display()));
+                return;
+            }
+        };
+        match import_dxf(&bytes, &ImportOptions::default()) {
+            Ok(doc) if doc.is_empty() => {
+                self.status =
+                    Status::error(format!("{} contains no supported entities", path.display()));
+            }
+            Ok(doc) => {
+                self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
+                self.doc = doc;
+                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+                self.selected_raster = None;
+                self.selected_shapes.clear();
+                self.groups.clear();
+                self.moved_shapes.clear();
+                self.extra_shapes.clear();
+                self.removed_shapes.clear();
+                self.deleted_layers.clear();
+                self.transfer_layer = None;
+                self.shape_transforms.clear();
+                self.clear_undo();
+                self.dragging_shape = false;
+                self.active_handle = None;
+                self.node_edit = None;
+                self.selected_nodes.clear();
+                self.node_drag = None;
+                self.tab_edit_layer = None;
+                self.edited_paths.clear();
+                self.raster_textures.clear();
+                self.raster_texture_keys.clear();
+                self.replan();
+                self.status = Status::ok(format!(
+                    "{}: {} layers, {} shapes, {} contours",
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string()),
+                    self.doc.layers.len(),
+                    self.doc.shape_count(),
+                    self.preview.contour_count()
+                ));
+                self.path = Some(path);
+                self.project_path = None;
+                self.source_svg = None;
+                self.fit_pending = true;
+                self.dirty = false;
+            }
+            Err(err) => {
+                self.status = Status::error(format!("importing {}: {err}", path.display()));
+            }
+        }
+    }
+
     fn load_image(&mut self, path: PathBuf) {
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -881,6 +939,8 @@ impl OrleansApp {
             self.load_project(path);
         } else if is_image_path(&path) {
             self.load_image(path);
+        } else if is_dxf_path(&path) {
+            self.load_dxf(path);
         } else {
             self.load_svg(path);
         }
@@ -1032,6 +1092,10 @@ impl OrleansApp {
     }
 
     fn save_project(&mut self) {
+        if self.source_svg.is_none() && self.doc.shape_count() > 0 {
+            self.set_status("project save is not supported for DXF imports yet", true);
+            return;
+        }
         let svg = self.source_svg.clone().unwrap_or_default();
         let default_name = self
             .display_path()
@@ -6630,6 +6694,13 @@ fn is_image_path(path: &std::path::Path) -> bool {
         })
 }
 
+fn is_dxf_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("dxf"))
+        .unwrap_or(false)
+}
+
 fn is_project_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -6860,9 +6931,10 @@ impl eframe::App for OrleansApp {
             Some(Action::Open) => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("SVG", &["svg"])
+                    .add_filter("DXF", &["dxf"])
                     .add_filter("Image", &["png", "jpg", "jpeg", "bmp"])
                     .add_filter("Orleans project", &["orleans"])
-                    .set_title("Open design, image or project")
+                    .set_title("Open design, DXF, image or project")
                     .pick_file()
                 {
                     self.open_path(path);
