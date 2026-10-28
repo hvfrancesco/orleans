@@ -4641,6 +4641,22 @@ impl OrleansApp {
                                         .on_hover_text("Alternate hatch direction to reduce travel")
                                         .changed();
                                     ui.end_row();
+
+                                    ui.label("Cross");
+                                    changed |= ui
+                                        .checkbox(&mut layer.fill.cross, "Second pass at 90°")
+                                        .on_hover_text("Hatch again across the first pass")
+                                        .changed();
+                                    ui.end_row();
+
+                                    ui.label("Outline");
+                                    changed |= ui
+                                        .checkbox(&mut layer.fill.outline, "Cut contour")
+                                        .on_hover_text(
+                                            "Trace the closed contours after filling them",
+                                        )
+                                        .changed();
+                                    ui.end_row();
                                 });
                             }
                         }
@@ -5586,7 +5602,7 @@ impl OrleansApp {
                         .iter()
                         .flat_map(|shape| flatten_path(&shape.path, DISPLAY_TOLERANCE))
                         .collect();
-                    let segments = hatch_contours(
+                    let mut segments = hatch_contours(
                         &contours,
                         &HatchOptions {
                             spacing: layer.fill.spacing,
@@ -5595,6 +5611,17 @@ impl OrleansApp {
                             alternate: layer.fill.alternate,
                         },
                     );
+                    if layer.fill.cross {
+                        segments.extend(hatch_contours(
+                            &contours,
+                            &HatchOptions {
+                                spacing: layer.fill.spacing,
+                                angle_deg: layer.fill.angle + 90.0,
+                                overlap: layer.fill.overlap,
+                                alternate: layer.fill.alternate,
+                            },
+                        ));
+                    }
                     for segment in segments {
                         if segment.len() < 2 {
                             continue;

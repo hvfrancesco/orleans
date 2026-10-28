@@ -76,7 +76,7 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
         }
 
         if layer.mode == LayerMode::Fill {
-            let segments = hatch_contours(
+            let mut segments = hatch_contours(
                 &contours,
                 &HatchOptions {
                     spacing: layer.fill.spacing,
@@ -85,87 +85,124 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
                     alternate: layer.fill.alternate,
                 },
             );
-            for segment in segments {
-                if segment.len() < 2 {
-                    continue;
-                }
-                let start = segment[0];
-                if (start - pos).hypot() > 1e-6 {
-                    stats.travel_mm += (start - pos).hypot();
-                    job.ops.push(Op::Rapid { to: start });
-                }
-                let length = orleans_geom::polyline_length(&segment);
-                if length <= 1e-9 {
-                    continue;
-                }
-                for pass in 0..layer.cut.passes.max(1) {
-                    if pass > 0 {
-                        let last = *segment.last().expect("non-empty");
-                        if (last - start).hypot() > 1e-6 {
-                            stats.travel_mm += (last - start).hypot();
-                            job.ops.push(Op::Rapid { to: start });
-                        }
-                    }
-                    stats.cut_mm += length;
-                    stats.seconds += length / layer.cut.speed.max(1.0) * 60.0;
-                    job.ops.push(Op::Cut {
-                        polyline: segment.clone(),
-                        params: layer.cut,
-                        layer: layer.index,
-                    });
-                }
-                pos = *segment.last().expect("non-empty");
+            if layer.fill.cross {
+                segments.extend(hatch_contours(
+                    &contours,
+                    &HatchOptions {
+                        spacing: layer.fill.spacing,
+                        angle_deg: layer.fill.angle + 90.0,
+                        overlap: layer.fill.overlap,
+                        alternate: layer.fill.alternate,
+                    },
+                ));
+            }
+            plan_hatch(layer, segments, &mut job, &mut stats, &mut pos);
+            if layer.fill.outline {
+                plan_contours(layer, &contours, opt, false, &mut job, &mut stats, &mut pos);
             }
             continue;
         }
 
-        let depths = nesting_depths(&contours);
-        let ordered = order_contours(&contours, &depths, pos, opt.optimize);
-
-        for (contour_idx, points) in ordered {
-            let points = apply_kerf(points, depths[contour_idx], opt.kerf);
-            if points.len() < 2 {
-                continue;
-            }
-            let parts = if layer.tabs.count > 0
-                && contours[contour_idx].closed
-                && (layer.tabs.inner || depths[contour_idx].is_multiple_of(2))
-            {
-                split_tabs(&points, layer.tabs.count, layer.tabs.width)
-            } else {
-                vec![points]
-            };
-
-            for _ in 0..layer.cut.passes.max(1) {
-                for part in &parts {
-                    if part.len() < 2 {
-                        continue;
-                    }
-                    let start = part[0];
-                    if (start - pos).hypot() > 1e-6 {
-                        stats.travel_mm += (start - pos).hypot();
-                        job.ops.push(Op::Rapid { to: start });
-                    }
-                    let length = orleans_geom::polyline_length(part);
-                    if length <= 1e-9 {
-                        continue;
-                    }
-                    stats.cut_mm += length;
-                    stats.seconds += length / layer.cut.speed.max(1.0) * 60.0;
-                    job.ops.push(Op::Cut {
-                        polyline: part.clone(),
-                        params: layer.cut,
-                        layer: layer.index,
-                    });
-                    pos = *part.last().expect("non-empty");
-                }
-            }
-        }
+        plan_contours(layer, &contours, opt, true, &mut job, &mut stats, &mut pos);
     }
 
     stats.seconds += stats.travel_mm / opt.rapid_speed.max(1.0) * 60.0;
     job.stats = stats;
     job
+}
+
+fn plan_hatch(
+    layer: &Layer,
+    segments: Vec<Vec<Point>>,
+    job: &mut Job,
+    stats: &mut JobStats,
+    pos: &mut Point,
+) {
+    for segment in segments {
+        if segment.len() < 2 {
+            continue;
+        }
+        let start = segment[0];
+        if (start - *pos).hypot() > 1e-6 {
+            stats.travel_mm += (start - *pos).hypot();
+            job.ops.push(Op::Rapid { to: start });
+        }
+        let length = orleans_geom::polyline_length(&segment);
+        if length <= 1e-9 {
+            continue;
+        }
+        for pass in 0..layer.cut.passes.max(1) {
+            if pass > 0 {
+                let last = *segment.last().expect("non-empty");
+                if (last - start).hypot() > 1e-6 {
+                    stats.travel_mm += (last - start).hypot();
+                    job.ops.push(Op::Rapid { to: start });
+                }
+            }
+            stats.cut_mm += length;
+            stats.seconds += length / layer.cut.speed.max(1.0) * 60.0;
+            job.ops.push(Op::Cut {
+                polyline: segment.clone(),
+                params: layer.cut,
+                layer: layer.index,
+            });
+        }
+        *pos = *segment.last().expect("non-empty");
+    }
+}
+
+fn plan_contours(
+    layer: &Layer,
+    contours: &[Contour],
+    opt: &PlanOptions,
+    use_tabs: bool,
+    job: &mut Job,
+    stats: &mut JobStats,
+    pos: &mut Point,
+) {
+    let depths = nesting_depths(contours);
+    let ordered = order_contours(contours, &depths, *pos, opt.optimize);
+
+    for (contour_idx, points) in ordered {
+        let points = apply_kerf(points, depths[contour_idx], opt.kerf);
+        if points.len() < 2 {
+            continue;
+        }
+        let parts = if use_tabs
+            && layer.tabs.count > 0
+            && contours[contour_idx].closed
+            && (layer.tabs.inner || depths[contour_idx].is_multiple_of(2))
+        {
+            split_tabs(&points, layer.tabs.count, layer.tabs.width)
+        } else {
+            vec![points]
+        };
+
+        for _ in 0..layer.cut.passes.max(1) {
+            for part in &parts {
+                if part.len() < 2 {
+                    continue;
+                }
+                let start = part[0];
+                if (start - *pos).hypot() > 1e-6 {
+                    stats.travel_mm += (start - *pos).hypot();
+                    job.ops.push(Op::Rapid { to: start });
+                }
+                let length = orleans_geom::polyline_length(part);
+                if length <= 1e-9 {
+                    continue;
+                }
+                stats.cut_mm += length;
+                stats.seconds += length / layer.cut.speed.max(1.0) * 60.0;
+                job.ops.push(Op::Cut {
+                    polyline: part.clone(),
+                    params: layer.cut,
+                    layer: layer.index,
+                });
+                *pos = *part.last().expect("non-empty");
+            }
+        }
+    }
 }
 
 fn plan_raster(
@@ -622,6 +659,48 @@ mod tests {
             assert_eq!(polyline.len(), 2);
             assert!((polyline[0].y - polyline[1].y).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn cross_fill_adds_a_perpendicular_pass() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
+        doc.layers[0].mode = LayerMode::Fill;
+        doc.layers[0].fill.spacing = 2.0;
+        doc.layers[0].fill.alternate = false;
+        doc.layers[0].fill.cross = true;
+
+        let job = plan(&doc, &PlanOptions::default());
+        let cuts: Vec<_> = job.cuts().collect();
+        assert_eq!(cuts.len(), 10);
+        let horizontal = cuts
+            .iter()
+            .filter(|(line, _, _)| (line[0].y - line[1].y).abs() < 1e-9)
+            .count();
+        let vertical = cuts
+            .iter()
+            .filter(|(line, _, _)| (line[0].x - line[1].x).abs() < 1e-9)
+            .count();
+        assert_eq!(horizontal, 5);
+        assert_eq!(vertical, 5);
+    }
+
+    #[test]
+    fn fill_outline_traces_the_closed_contour() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
+        doc.layers[0].mode = LayerMode::Fill;
+        doc.layers[0].fill.spacing = 2.0;
+        doc.layers[0].fill.alternate = false;
+        doc.layers[0].fill.outline = true;
+
+        let job = plan(&doc, &PlanOptions::default());
+        let cuts: Vec<_> = job.cuts().collect();
+        assert_eq!(cuts.len(), 6);
+        let outline = cuts
+            .iter()
+            .find(|(line, _, _)| line.len() > 2)
+            .expect("filled contour");
+        assert_eq!(outline.0.first(), outline.0.last());
+        assert!((orleans_geom::polyline_length(outline.0) - 40.0).abs() < 1e-6);
     }
 
     #[test]

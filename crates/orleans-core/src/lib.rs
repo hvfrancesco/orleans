@@ -65,6 +65,10 @@ pub struct FillParams {
     pub overlap: f64,
     /// Reverse alternate scan lines to reduce travel.
     pub alternate: bool,
+    /// Add a second hatch pass at 90° to the first.
+    pub cross: bool,
+    /// Also cut the closed contours after filling them.
+    pub outline: bool,
 }
 
 impl Default for FillParams {
@@ -74,6 +78,8 @@ impl Default for FillParams {
             angle: 0.0,
             overlap: 0.0,
             alternate: true,
+            cross: false,
+            outline: false,
         }
     }
 }
