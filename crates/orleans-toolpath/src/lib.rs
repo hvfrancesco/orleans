@@ -9,8 +9,10 @@
 //! * repeat each contour for multi-pass layers.
 
 use kurbo::Point;
-use orleans_core::{Document, Job, JobStats, Op};
-use orleans_geom::{dedup, flatten_path, offset_closed, point_in_polygon, Contour};
+use orleans_core::{Document, Job, JobStats, LayerMode, Op};
+use orleans_geom::{
+    dedup, flatten_path, hatch_contours, offset_closed, point_in_polygon, Contour, HatchOptions,
+};
 
 /// Knobs for [`plan`].
 #[derive(Clone, Debug)]
@@ -62,6 +64,50 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
             .filter(|c| c.points.len() >= 2)
             .collect();
         if contours.is_empty() {
+            continue;
+        }
+
+        if layer.mode == LayerMode::Fill {
+            let segments = hatch_contours(
+                &contours,
+                &HatchOptions {
+                    spacing: layer.fill.spacing,
+                    angle_deg: layer.fill.angle,
+                    overlap: layer.fill.overlap,
+                    alternate: layer.fill.alternate,
+                },
+            );
+            for segment in segments {
+                if segment.len() < 2 {
+                    continue;
+                }
+                let start = segment[0];
+                if (start - pos).hypot() > 1e-6 {
+                    stats.travel_mm += (start - pos).hypot();
+                    job.ops.push(Op::Rapid { to: start });
+                }
+                let length = orleans_geom::polyline_length(&segment);
+                if length <= 1e-9 {
+                    continue;
+                }
+                for pass in 0..layer.cut.passes.max(1) {
+                    if pass > 0 {
+                        let last = *segment.last().expect("non-empty");
+                        if (last - start).hypot() > 1e-6 {
+                            stats.travel_mm += (last - start).hypot();
+                            job.ops.push(Op::Rapid { to: start });
+                        }
+                    }
+                    stats.cut_mm += length;
+                    stats.seconds += length / layer.cut.speed.max(1.0) * 60.0;
+                    job.ops.push(Op::Cut {
+                        polyline: segment.clone(),
+                        params: layer.cut,
+                        layer: layer.index,
+                    });
+                }
+                pos = *segment.last().expect("non-empty");
+            }
             continue;
         }
 
@@ -251,6 +297,55 @@ mod tests {
         // The hole is 4x4 and the outer contour 10x10.
         let hole_area = orleans_geom::signed_area(&cuts[0].0[..4]).abs();
         assert!((hole_area - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fill_layers_emit_scan_lines_instead_of_outlines() {
+        let mut doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0)]);
+        doc.layers[0].mode = LayerMode::Fill;
+        doc.layers[0].fill.spacing = 2.0;
+        doc.layers[0].fill.angle = 0.0;
+        doc.layers[0].fill.alternate = false;
+
+        let job = plan(&doc, &PlanOptions::default());
+        assert_eq!(job.cuts().count(), 5);
+        assert!((job.stats.cut_mm - 50.0).abs() < 1e-6);
+        for (polyline, _, _) in job.cuts() {
+            assert_eq!(polyline.len(), 2);
+            assert!((polyline[0].y - polyline[1].y).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn fill_layers_respect_holes_with_opposite_winding() {
+        let path =
+            BezPath::from_svg("M0,0 L10,0 L10,10 L0,10 Z M2,2 L2,8 L8,8 L8,2 Z").expect("path");
+        let mut doc = doc_with(vec![path]);
+        doc.layers[0].mode = LayerMode::Fill;
+        doc.layers[0].fill.spacing = 2.0;
+        doc.layers[0].fill.alternate = false;
+
+        let job = plan(&doc, &PlanOptions::default());
+        let middle: Vec<_> = job
+            .cuts()
+            .filter(|(polyline, _, _)| (polyline[0].y - 5.0).abs() < 1e-6)
+            .collect();
+        assert_eq!(middle.len(), 2);
+        assert!((middle[0].0[0].x - 0.0).abs() < 1e-9);
+        assert!((middle[0].0[1].x - 2.0).abs() < 1e-9);
+        assert!((middle[1].0[0].x - 8.0).abs() < 1e-9);
+        assert!((middle[1].0[1].x - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fill_layers_ignore_open_contours() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((10.0, 0.0));
+        let mut doc = doc_with(vec![path]);
+        doc.layers[0].mode = LayerMode::Fill;
+        let job = plan(&doc, &PlanOptions::default());
+        assert!(job.is_empty());
     }
 
     #[test]

@@ -23,12 +23,14 @@ was decompiled or copied.
 | Boolean ops (union / difference / intersection) | ✅ |
 | Inside-out ordering + nearest-neighbour travel optimisation | ✅ |
 | Multi-pass cutting | ✅ |
+| Fill/hatch layers (angle, spacing, overlap, alternate) | ✅ |
 | G-code for GRBL / GrblHAL / FluidNC / Marlin-laser (`M3`, `M4`) | ✅ |
 | GRBL streaming: character-counting flow control, `ok`/`error`, progress, status, feed hold, resume, soft reset, automatic stop on failure | ✅ |
 | USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
 | Hardware-free GRBL simulator | ✅ |
 | DXF / PDF / AI import | ❌ |
-| Raster engraving, dithering, fill/hatch | ❌ |
+| Raster engraving and dithering | ❌ |
+| Tabs/bridges | ❌ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo | ✅ |
@@ -44,7 +46,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-100 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+108 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -106,6 +108,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   **Show** controls whether it is drawn. A visible layer with Cut off remains
   as a grey reference, while a hidden layer with Cut on still cuts. Move layers
   in cut order, and the selected layer is highlighted on the canvas;
+* choose **Line** or **Fill** for each layer. Fill mode adds **Fill spacing**,
+  **Angle**, **Overlap** and **Alternate**; it hatches closed contours and
+  previews the fill. Open contours are ignored by fill mode;
 * kerf, `max S` (`$30`), travel optimisation and `M3`/`M4` live in the Job panel
   (GUI jobs default to M4);
 * **Export G-code…** writes a `.gcode` file of your choosing;
@@ -273,6 +278,10 @@ concept of a line and some bridges emit negotiation on connect.
   Deleting an anchor reconnects the remaining segments directly; there is no
   join/break or smoothing, and nodes do not snap to other geometry yet. Undo
   covers transforms and node edits.
+* Fill mode emits hatch strokes only, not the shape outline; put the outline on
+  a separate Line layer/colour if you need both. It supports scanline hatching
+  of closed contours with even-odd holes; cross-hatch, offset fill and tabs are
+  not implemented yet.
 * Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
   Framing uses a fixed 3000 mm/min and the design bounds, with no margin
   setting.
@@ -286,7 +295,8 @@ concept of a line and some bridges emit negotiation on connect.
 
 1. **Finish the editor** — job history for the streaming panel, plus
    node-editing refinements such as join/break and snapping to geometry.
-2. **Hatch fills and tabs** — Clipper2 booleans are wired and ready for them.
+2. **Tabs/bridges and fill refinements** — hold-down tabs, cross-hatch and
+   offset fill.
 3. **Raster engraving** — threshold/dither (Floyd–Steinberg, Stucki, Jarvis),
    PWM mapping, run-length output.
 4. **More importers** — DXF, PDF, AI; LBRN2 read/write from community specs.

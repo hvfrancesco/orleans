@@ -16,7 +16,7 @@ pub type Mm = f64;
 pub enum LayerMode {
     /// Follow the outlines of the geometry.
     Line,
-    /// Fill the geometry with a scan pattern (not implemented yet).
+    /// Fill closed geometry with scanline hatching.
     Fill,
 }
 
@@ -51,6 +51,31 @@ impl CutParams {
     }
 }
 
+/// Scanline fill settings for a layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FillParams {
+    /// Distance between hatch lines in millimetres.
+    pub spacing: f64,
+    /// Hatch angle in degrees. 0 is horizontal, 90 is vertical.
+    pub angle: f64,
+    /// Extra distance added to both ends of every hatch segment, in
+    /// millimetres. Useful for closing gaps at the boundary.
+    pub overlap: f64,
+    /// Reverse alternate scan lines to reduce travel.
+    pub alternate: bool,
+}
+
+impl Default for FillParams {
+    fn default() -> Self {
+        Self {
+            spacing: 0.25,
+            angle: 0.0,
+            overlap: 0.0,
+            alternate: true,
+        }
+    }
+}
+
 /// A group of shapes sharing cutting parameters, equivalent to a LightBurn layer.
 #[derive(Clone, Debug)]
 pub struct Layer {
@@ -60,6 +85,7 @@ pub struct Layer {
     pub color: [u8; 3],
     pub mode: LayerMode,
     pub cut: CutParams,
+    pub fill: FillParams,
     pub shapes: Vec<Shape>,
     /// Whether the layer is drawn in the editor.
     pub visible: bool,
@@ -75,6 +101,7 @@ impl Layer {
             color,
             mode: LayerMode::Line,
             cut,
+            fill: FillParams::default(),
             shapes: Vec::new(),
             visible: true,
             output: true,

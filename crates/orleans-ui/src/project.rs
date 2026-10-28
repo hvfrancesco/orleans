@@ -66,10 +66,22 @@ pub struct LayerSettings {
     pub visible: bool,
     #[serde(default = "default_true")]
     pub output: bool,
+    #[serde(default = "default_fill_spacing")]
+    pub fill_spacing: f64,
+    #[serde(default)]
+    pub fill_angle: f64,
+    #[serde(default)]
+    pub fill_overlap: f64,
+    #[serde(default = "default_true")]
+    pub fill_alternate: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_fill_spacing() -> f64 {
+    orleans_core::FillParams::default().spacing
 }
 
 impl ProjectFile {
@@ -101,6 +113,10 @@ impl ProjectFile {
                     passes: layer.cut.passes,
                     visible: layer.visible,
                     output: layer.output,
+                    fill_spacing: layer.fill.spacing,
+                    fill_angle: layer.fill.angle,
+                    fill_overlap: layer.fill.overlap,
+                    fill_alternate: layer.fill.alternate,
                 })
                 .collect(),
             kerf,
@@ -149,6 +165,12 @@ impl ProjectFile {
                     saved.power.clamp(0.0, 100.0),
                     saved.passes,
                 );
+                layer.fill = orleans_core::FillParams {
+                    spacing: saved.fill_spacing.clamp(0.05, 10.0),
+                    angle: saved.fill_angle.clamp(0.0, 180.0),
+                    overlap: saved.fill_overlap.clamp(0.0, 5.0),
+                    alternate: saved.fill_alternate,
+                };
             }
         }
 
@@ -215,7 +237,13 @@ mod tests {
     fn json_round_trip_keeps_layer_settings() {
         let mut doc = Document::new(100.0, 80.0);
         let mut layer = Layer::new(0, "C00", [10, 20, 30], CutParams::new(1200.0, 35.0, 2));
-        layer.mode = LayerMode::Line;
+        layer.mode = LayerMode::Fill;
+        layer.fill = orleans_core::FillParams {
+            spacing: 0.4,
+            angle: 45.0,
+            overlap: 0.1,
+            alternate: false,
+        };
         doc.layers.push(layer);
 
         let project = ProjectFile::new(
@@ -243,6 +271,11 @@ mod tests {
         assert_eq!(back.layers[0].speed, 1200.0);
         assert_eq!(back.layers[0].power, 35.0);
         assert_eq!(back.layers[0].passes, 2);
+        assert_eq!(back.layers[0].mode, "Fill");
+        assert!((back.layers[0].fill_spacing - 0.4).abs() < 1e-9);
+        assert!((back.layers[0].fill_angle - 45.0).abs() < 1e-9);
+        assert!((back.layers[0].fill_overlap - 0.1).abs() < 1e-9);
+        assert!(!back.layers[0].fill_alternate);
         assert_eq!(back.transforms.len(), 1);
         assert_eq!(back.transforms[0].dx, 1.5);
         assert_eq!(back.transforms[0].dy, -2.0);
@@ -301,6 +334,35 @@ mod tests {
         let project: ProjectFile = serde_json::from_str(json).expect("deserialise");
         assert!(project.transforms.is_empty());
         assert!(project.edited_paths.is_empty());
+    }
+
+    #[test]
+    fn old_layer_settings_get_fill_defaults() {
+        let json = r#"{
+            "format": 1,
+            "svg": "<svg/>",
+            "layers": [{
+                "index": 0,
+                "name": "old",
+                "color": [0, 0, 0],
+                "mode": "Fill",
+                "speed": 1000.0,
+                "power": 20.0,
+                "passes": 1
+            }],
+            "kerf": 0.0,
+            "optimize": true,
+            "laser_mode": "M4",
+            "max_s": 1000
+        }"#;
+        let project: ProjectFile = serde_json::from_str(json).expect("deserialise");
+        let layer = &project.layers[0];
+        assert!(layer.visible);
+        assert!(layer.output);
+        assert!((layer.fill_spacing - 0.25).abs() < 1e-9);
+        assert!((layer.fill_angle).abs() < 1e-9);
+        assert!((layer.fill_overlap).abs() < 1e-9);
+        assert!(layer.fill_alternate);
     }
 
     #[test]
@@ -456,6 +518,10 @@ mod tests {
             passes: 1,
             visible: true,
             output: true,
+            fill_spacing: 0.25,
+            fill_angle: 0.0,
+            fill_overlap: 0.0,
+            fill_alternate: true,
         };
         let project = ProjectFile {
             format: FORMAT,
@@ -498,6 +564,10 @@ mod tests {
                 passes: 3,
                 visible: false,
                 output: true,
+                fill_spacing: 0.4,
+                fill_angle: 45.0,
+                fill_overlap: 0.1,
+                fill_alternate: false,
             }],
             kerf: 0.1,
             optimize: false,
@@ -513,6 +583,10 @@ mod tests {
         assert_eq!(layer.cut.speed, 800.0);
         assert_eq!(layer.cut.power, 12.5);
         assert_eq!(layer.cut.passes, 3);
+        assert!((layer.fill.spacing - 0.4).abs() < 1e-9);
+        assert!((layer.fill.angle - 45.0).abs() < 1e-9);
+        assert!((layer.fill.overlap - 0.1).abs() < 1e-9);
+        assert!(!layer.fill.alternate);
         assert!(!layer.visible);
         assert!(layer.output);
     }

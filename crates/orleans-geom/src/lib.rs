@@ -187,6 +187,125 @@ pub fn offset_closed(points: &[Point], distance: f64, miter_limit: f64) -> Vec<P
         .unwrap_or_default()
 }
 
+/// Options for scanline filling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HatchOptions {
+    /// Spacing between hatch lines in millimetres.
+    pub spacing: f64,
+    /// Hatch angle in degrees. 0 is horizontal, 90 is vertical.
+    pub angle_deg: f64,
+    /// Extend each hatch segment by this distance at both ends, in
+    /// millimetres.
+    pub overlap: f64,
+    /// Reverse alternate scan lines to reduce travel.
+    pub alternate: bool,
+}
+
+impl Default for HatchOptions {
+    fn default() -> Self {
+        Self {
+            spacing: 0.25,
+            angle_deg: 0.0,
+            overlap: 0.0,
+            alternate: true,
+        }
+    }
+}
+
+/// Generate scanline hatch segments clipped to a set of closed rings.
+///
+/// The rings should already be unioned if overlapping shapes should not cancel.
+/// An even-odd scanline rule handles nested holes; ring winding is irrelevant.
+/// Each returned segment is `[start, end]` in millimetres.
+pub fn hatch(rings: &[Vec<Point>], options: &HatchOptions) -> Vec<Vec<Point>> {
+    let step = options.spacing;
+    if !step.is_finite() || step <= 1e-6 || rings.is_empty() {
+        return Vec::new();
+    }
+    let angle = options.angle_deg.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let overlap = options.overlap.max(0.0);
+
+    let rotated: Vec<Vec<Point>> = rings
+        .iter()
+        .filter(|ring| ring.len() >= 3)
+        .map(|ring| {
+            ring.iter()
+                .map(|point| {
+                    Point::new(
+                        point.x * cos + point.y * sin,
+                        -point.x * sin + point.y * cos,
+                    )
+                })
+                .collect()
+        })
+        .filter(|ring: &Vec<Point>| ring.len() >= 3)
+        .collect();
+    if rotated.is_empty() {
+        return Vec::new();
+    }
+
+    let (min_y, max_y) = rotated.iter().flat_map(|ring| ring.iter()).fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(min_y, max_y), point| (min_y.min(point.y), max_y.max(point.y)),
+    );
+    if !(min_y.is_finite() && max_y.is_finite()) || max_y <= min_y {
+        return Vec::new();
+    }
+
+    let mut segments = Vec::new();
+    let mut line = 0usize;
+    let mut y = (min_y / step).ceil() * step + step * 0.5;
+    let max_lines = (((max_y - min_y) / step).ceil() as usize).saturating_add(2);
+    while y < max_y - 1e-9 && line < max_lines {
+        let mut crossings = Vec::new();
+        for ring in &rotated {
+            let mut previous = ring[ring.len() - 1];
+            for &point in ring {
+                if (previous.y > y) != (point.y > y) {
+                    let t = (y - previous.y) / (point.y - previous.y);
+                    crossings.push(previous.x + t * (point.x - previous.x));
+                }
+                previous = point;
+            }
+        }
+        crossings.sort_by(f64::total_cmp);
+
+        let mut line_segments = Vec::new();
+        let (pairs, _) = crossings.as_chunks::<2>();
+        for pair in pairs {
+            let x0 = pair[0] - overlap;
+            let x1 = pair[1] + overlap;
+            if x1 - x0 <= 1e-9 {
+                continue;
+            }
+            let start = Point::new(x0 * cos - y * sin, x0 * sin + y * cos);
+            let end = Point::new(x1 * cos - y * sin, x1 * sin + y * cos);
+            line_segments.push(vec![start, end]);
+        }
+        if options.alternate && line % 2 == 1 {
+            line_segments.reverse();
+            for segment in &mut line_segments {
+                segment.swap(0, 1);
+            }
+        }
+        segments.extend(line_segments);
+        y += step;
+        line += 1;
+    }
+    segments
+}
+
+/// Fill closed contours with scan lines, unioning them first.
+pub fn hatch_contours(contours: &[Contour], options: &HatchOptions) -> Vec<Vec<Point>> {
+    let rings: Vec<Vec<Point>> = contours
+        .iter()
+        .filter(|contour| contour.closed)
+        .map(|contour| contour.points.clone())
+        .collect();
+    hatch(&union(&rings), options)
+}
+
 /// Union of a set of rings (even-odd holes are preserved by Clipper).
 pub fn union(rings: &[Vec<Point>]) -> Vec<Vec<Point>> {
     to_clipper(rings)
@@ -308,6 +427,85 @@ mod tests {
         let mut cw = square(10.0);
         cw.reverse();
         assert!((signed_area(&cw) + 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hatch_fills_a_square_with_scan_lines() {
+        let options = HatchOptions {
+            spacing: 2.0,
+            angle_deg: 0.0,
+            overlap: 0.0,
+            alternate: false,
+        };
+        let segments = hatch(&[square(10.0)], &options);
+        assert_eq!(segments.len(), 5);
+        for (index, segment) in segments.iter().enumerate() {
+            assert_eq!(segment.len(), 2);
+            assert!((segment[0].x - 0.0).abs() < 1e-9);
+            assert!((segment[1].x - 10.0).abs() < 1e-9);
+            let expected_y = 1.0 + index as f64 * 2.0;
+            assert!((segment[0].y - expected_y).abs() < 1e-9);
+            assert!((segment[1].y - expected_y).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn hatch_uses_even_odd_holes() {
+        let outer = square(10.0);
+        let hole = vec![
+            Point::new(4.0, 4.0),
+            Point::new(6.0, 4.0),
+            Point::new(6.0, 6.0),
+            Point::new(4.0, 6.0),
+        ];
+        let options = HatchOptions {
+            spacing: 2.0,
+            angle_deg: 0.0,
+            overlap: 0.0,
+            alternate: false,
+        };
+        let segments = hatch(&[outer, hole], &options);
+        assert_eq!(segments.len(), 6);
+        let middle: Vec<_> = segments
+            .iter()
+            .filter(|segment| (segment[0].y - 5.0).abs() < 1e-9)
+            .collect();
+        assert_eq!(middle.len(), 2);
+        assert!((middle[0][0].x - 0.0).abs() < 1e-9);
+        assert!((middle[0][1].x - 4.0).abs() < 1e-9);
+        assert!((middle[1][0].x - 6.0).abs() < 1e-9);
+        assert!((middle[1][1].x - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hatch_angle_and_overlap_are_applied() {
+        let options = HatchOptions {
+            spacing: 2.0,
+            angle_deg: 90.0,
+            overlap: 0.5,
+            alternate: false,
+        };
+        let segments = hatch(&[square(10.0)], &options);
+        assert_eq!(segments.len(), 5);
+        for segment in &segments {
+            assert!((segment[0].x - segment[1].x).abs() < 1e-9);
+            assert!((segment[0].y + 0.5).abs() < 1e-9);
+            assert!((segment[1].y - 10.5).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn hatch_alternates_line_direction() {
+        let options = HatchOptions {
+            spacing: 2.0,
+            angle_deg: 0.0,
+            overlap: 0.0,
+            alternate: true,
+        };
+        let segments = hatch(&[square(10.0)], &options);
+        assert_eq!(segments.len(), 5);
+        assert!(segments[0][0].x < segments[0][1].x);
+        assert!(segments[1][0].x > segments[1][1].x);
     }
 
     #[test]

@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use kurbo::{Affine, Point};
-use orleans_core::{Document, Job, Op};
+use orleans_core::{Document, Job, LayerMode, Op};
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
-use orleans_geom::point_in_polygon;
+use orleans_geom::{flatten_path, hatch_contours, point_in_polygon, HatchOptions};
 use orleans_import::{import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
@@ -2227,8 +2227,12 @@ impl OrleansApp {
                                     layer.name.clone()
                                 };
                                 let shapes = layer.shapes.len();
+                                let mode = match layer.mode {
+                                    LayerMode::Line => "line",
+                                    LayerMode::Fill => "fill",
+                                };
                                 let summary = format!(
-                                    "{:.0} mm/min  ·  {:.0}%  ·  ×{}",
+                                    "{:.0} mm/min  ·  {:.0}%  ·  ×{}  ·  {mode}",
                                     layer.cut.speed, layer.cut.power, layer.cut.passes
                                 );
                                 let row = egui::Frame::new()
@@ -2397,8 +2401,67 @@ impl OrleansApp {
                                 .checkbox(&mut layer.visible, "Show")
                                 .on_hover_text("Draw this layer in the editor")
                                 .changed();
-                            ui.label(RichText::new("· Line").small().weak());
                         });
+                        ui.horizontal(|ui| {
+                            ui.label("Mode");
+                            changed |= ui
+                                .selectable_value(&mut layer.mode, LayerMode::Line, "Line")
+                                .changed();
+                            changed |= ui
+                                .selectable_value(&mut layer.mode, LayerMode::Fill, "Fill")
+                                .changed();
+                        });
+                        if layer.mode == LayerMode::Fill {
+                            egui::Grid::new("layer-fill-params")
+                                .num_columns(2)
+                                .spacing([8.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label("Fill spacing");
+                                    changed |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut layer.fill.spacing)
+                                                .speed(0.05)
+                                                .range(0.05..=10.0)
+                                                .suffix(" mm"),
+                                        )
+                                        .on_hover_text("Distance between hatch lines")
+                                        .changed();
+                                    ui.end_row();
+
+                                    ui.label("Angle");
+                                    changed |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut layer.fill.angle)
+                                                .speed(1.0)
+                                                .range(0.0..=180.0)
+                                                .suffix("°"),
+                                        )
+                                        .on_hover_text("0° is horizontal, 90° is vertical")
+                                        .changed();
+                                    ui.end_row();
+
+                                    ui.label("Overlap");
+                                    changed |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut layer.fill.overlap)
+                                                .speed(0.05)
+                                                .range(0.0..=5.0)
+                                                .suffix(" mm"),
+                                        )
+                                        .on_hover_text(
+                                            "Extend each hatch line at both ends by this distance",
+                                        )
+                                        .changed();
+                                    ui.end_row();
+
+                                    ui.label("Alternate");
+                                    changed |= ui
+                                        .checkbox(&mut layer.fill.alternate, "Reverse each line")
+                                        .on_hover_text("Alternate hatch direction to reduce travel")
+                                        .changed();
+                                    ui.end_row();
+                                });
+                        }
                         ui.horizontal(|ui| {
                             move_up = ui
                                 .add_enabled(pos > 0, egui::Button::new("Up"))
@@ -2986,6 +3049,56 @@ impl OrleansApp {
             } else {
                 1.4
             };
+            if layer.mode == LayerMode::Fill {
+                let fill_stroke = Stroke::new(0.8, color.gamma_multiply(0.72));
+                if layer.output {
+                    for op in &self.job.ops {
+                        let Op::Cut {
+                            polyline,
+                            layer: cut_layer,
+                            ..
+                        } = op
+                        else {
+                            continue;
+                        };
+                        if *cut_layer != layer.index || polyline.len() < 2 {
+                            continue;
+                        }
+                        let points: Vec<Pos2> = polyline
+                            .iter()
+                            .map(|point| self.view.world_to_screen(area, *point))
+                            .collect();
+                        painter.add(egui::Shape::line(points, fill_stroke));
+                    }
+                } else {
+                    // Keep the fill visible when Cut is disabled; the job does
+                    // not contain toolpaths for this layer.
+                    let contours: Vec<_> = layer
+                        .shapes
+                        .iter()
+                        .flat_map(|shape| flatten_path(&shape.path, DISPLAY_TOLERANCE))
+                        .collect();
+                    let segments = hatch_contours(
+                        &contours,
+                        &HatchOptions {
+                            spacing: layer.fill.spacing,
+                            angle_deg: layer.fill.angle,
+                            overlap: layer.fill.overlap,
+                            alternate: layer.fill.alternate,
+                        },
+                    );
+                    for segment in segments {
+                        if segment.len() < 2 {
+                            continue;
+                        }
+                        let points: Vec<Pos2> = segment
+                            .iter()
+                            .map(|point| self.view.world_to_screen(area, *point))
+                            .collect();
+                        painter.add(egui::Shape::line(points, fill_stroke));
+                    }
+                }
+            }
             let stroke = Stroke::new(width, color);
             for shape in &preview.shapes {
                 for contour in &shape.contours {
