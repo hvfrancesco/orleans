@@ -34,7 +34,7 @@ was decompiled or copied.
 | Tabs/bridges on contour cuts | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
-| Canvas: selection, drag-move, handles, live size/position, undo | ✅ |
+| Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Project save/load (`.orleans`, embedded SVG + settings/path edits) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
@@ -47,7 +47,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-120 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+121 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -169,8 +169,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   the path; double-click a segment to insert an anchor; select an anchor and
   press `Delete` or **Delete node** to remove it; enable **Snap** to snap node
   drags to the canvas grid. Use **Done** or `Esc` to leave node mode.
-  **Undo**/`Ctrl+Z` reverses the last transform, node drag, insertion or
-  deletion; right-drag pans;
+  **Undo**/`Ctrl+Z` reverses the last transform, node drag, insertion,
+  deletion, raster move or layer/job setting change; `Ctrl+Shift+Z` (or
+  `Ctrl+Y`) redoes it. Right-drag pans;
 * **Send to laser** streams the current job with a progress bar, Pause/Resume
   and a per-job Stop button (feed hold + soft reset). Sending is only enabled
   when the controller is connected, idle and the laser is off; `Ctrl+Enter`
@@ -292,7 +293,8 @@ concept of a line and some bridges emit negotiation on connect.
   on segments, deleting anchors, and optional grid snapping while dragging.
   Deleting an anchor reconnects the remaining segments directly; there is no
   join/break or smoothing, and nodes do not snap to other geometry yet. Undo
-  covers transforms and node edits.
+  and redo cover transforms, node edits, raster placement, layer settings and
+  job settings.
 * Fill mode emits hatch strokes only, not the shape outline; put the outline on
   a separate Line layer/colour if you need both. It supports scanline hatching
   of closed contours with even-odd holes; cross-hatch and offset fill are not

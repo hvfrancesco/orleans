@@ -49,11 +49,17 @@ struct ShapeRef {
 
 type ShapeTransforms = BTreeMap<(usize, String), Affine>;
 
+const UNDO_LIMIT: usize = 30;
+
+/// Editable state captured before a geometry edit. `settings` is `None` for
+/// transforms and node edits, while a settings-only entry has no geometry.
+#[derive(Default)]
 struct UndoSnapshot {
     shapes: Vec<(usize, String, kurbo::BezPath)>,
-    transforms: ShapeTransforms,
-    edited_paths: BTreeSet<(usize, String)>,
+    transforms: Option<ShapeTransforms>,
+    edited_paths: Option<BTreeSet<(usize, String)>>,
     rasters: Vec<RasterSnapshot>,
+    settings: Option<SettingsSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +70,121 @@ struct RasterSnapshot {
     width_mm: f64,
     height_mm: f64,
     angle: f64,
+}
+
+/// Display and cutting parameters of one layer. The geometry and raster pixels
+/// are deliberately left out: those are captured separately from the edit that
+/// changes them.
+#[derive(Clone, Debug)]
+struct LayerSettingsSnapshot {
+    index: usize,
+    name: String,
+    color: [u8; 3],
+    mode: LayerMode,
+    cut: orleans_core::CutParams,
+    fill: orleans_core::FillParams,
+    tabs: orleans_core::TabParams,
+    visible: bool,
+    output: bool,
+    raster: Option<RasterSettingsSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RasterSettingsSnapshot {
+    x: f64,
+    y: f64,
+    width_mm: f64,
+    height_mm: f64,
+    angle: f64,
+    mode: RasterMode,
+    threshold: u8,
+    invert: bool,
+    line_interval: f64,
+    bidirectional: bool,
+}
+
+/// Everything the side panel can change: per-layer settings, cut order and the
+/// job options. Cheap to clone because no path or pixel data is included.
+#[derive(Clone, Debug)]
+struct SettingsSnapshot {
+    layers: Vec<LayerSettingsSnapshot>,
+    order: Vec<usize>,
+    plan: PlanOptions,
+    gcode: GcodeOptions,
+}
+
+impl SettingsSnapshot {
+    fn capture(doc: &Document, plan: &PlanOptions, gcode: &GcodeOptions) -> Self {
+        Self {
+            layers: doc
+                .layers
+                .iter()
+                .map(|layer| LayerSettingsSnapshot {
+                    index: layer.index,
+                    name: layer.name.clone(),
+                    color: layer.color,
+                    mode: layer.mode,
+                    cut: layer.cut,
+                    fill: layer.fill,
+                    tabs: layer.tabs,
+                    visible: layer.visible,
+                    output: layer.output,
+                    raster: layer.raster.as_ref().map(|raster| RasterSettingsSnapshot {
+                        x: raster.x,
+                        y: raster.y,
+                        width_mm: raster.width_mm,
+                        height_mm: raster.height_mm,
+                        angle: raster.angle,
+                        mode: raster.mode,
+                        threshold: raster.threshold,
+                        invert: raster.invert,
+                        line_interval: raster.line_interval,
+                        bidirectional: raster.bidirectional,
+                    }),
+                })
+                .collect(),
+            order: doc.layers.iter().map(|layer| layer.index).collect(),
+            plan: plan.clone(),
+            gcode: gcode.clone(),
+        }
+    }
+
+    fn apply(self, doc: &mut Document, plan: &mut PlanOptions, gcode: &mut GcodeOptions) {
+        for layer in &mut doc.layers {
+            let Some(saved) = self.layers.iter().find(|saved| saved.index == layer.index) else {
+                continue;
+            };
+            layer.name.clone_from(&saved.name);
+            layer.color = saved.color;
+            layer.mode = saved.mode;
+            layer.cut = saved.cut;
+            layer.fill = saved.fill;
+            layer.tabs = saved.tabs;
+            layer.visible = saved.visible;
+            layer.output = saved.output;
+            if let (Some(image), Some(saved)) = (layer.raster.as_mut(), saved.raster.as_ref()) {
+                image.x = saved.x;
+                image.y = saved.y;
+                image.width_mm = saved.width_mm;
+                image.height_mm = saved.height_mm;
+                image.angle = saved.angle;
+                image.mode = saved.mode;
+                image.threshold = saved.threshold;
+                image.invert = saved.invert;
+                image.line_interval = saved.line_interval;
+                image.bidirectional = saved.bidirectional;
+            }
+        }
+        let order = self.order;
+        if order.len() == doc.layers.len()
+            && doc.layers.iter().all(|layer| order.contains(&layer.index))
+        {
+            doc.layers
+                .sort_by_key(|layer| order.iter().position(|&index| index == layer.index));
+        }
+        *plan = self.plan;
+        *gcode = self.gcode;
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -195,6 +316,7 @@ enum Action {
     Send,
     SaveProject,
     Undo,
+    Redo,
     ExitNodes,
     DeleteNode,
 }
@@ -206,6 +328,10 @@ pub struct OrleansApp {
     selected_shapes: BTreeSet<ShapeRef>,
     shape_transforms: ShapeTransforms,
     undo_stack: Vec<UndoSnapshot>,
+    redo_stack: Vec<UndoSnapshot>,
+    /// Settings as they were before the current pointer/keyboard edit gesture.
+    settings_edit: Option<SettingsSnapshot>,
+    settings_edit_changed: bool,
     dragging_shape: bool,
     transform_dx: f64,
     transform_dy: f64,
@@ -281,6 +407,9 @@ impl OrleansApp {
             selected_shapes: BTreeSet::new(),
             shape_transforms: ShapeTransforms::new(),
             undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            settings_edit: None,
+            settings_edit_changed: false,
             dragging_shape: false,
             transform_dx: 0.0,
             transform_dy: 0.0,
@@ -372,7 +501,7 @@ impl OrleansApp {
                     .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
                 self.shape_transforms.clear();
-                self.undo_stack.clear();
+                self.clear_undo();
                 self.dragging_shape = false;
                 self.active_handle = None;
                 self.node_edit = None;
@@ -430,7 +559,7 @@ impl OrleansApp {
                     .and_then(|layer| layer.raster.as_ref().map(|_| layer.index));
                 self.selected_shapes.clear();
                 self.shape_transforms.clear();
-                self.undo_stack.clear();
+                self.clear_undo();
                 self.dragging_shape = false;
                 self.active_handle = None;
                 self.node_edit = None;
@@ -537,7 +666,7 @@ impl OrleansApp {
                 ((transform.layer, transform.shape.clone()), affine)
             })
             .collect();
-        self.undo_stack.clear();
+        self.clear_undo();
         self.dragging_shape = false;
         self.active_handle = None;
         self.node_edit = None;
@@ -1020,6 +1149,56 @@ impl OrleansApp {
         })
     }
 
+    fn clear_undo(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.settings_edit = None;
+        self.settings_edit_changed = false;
+    }
+
+    fn push_undo(&mut self, snapshot: UndoSnapshot) {
+        self.undo_stack.push(snapshot);
+        self.redo_stack.clear();
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn capture_settings(&self) -> SettingsSnapshot {
+        SettingsSnapshot::capture(&self.doc, &self.plan_opts, &self.gcode_opts)
+    }
+
+    /// Capture the settings at the start of the frame, before the panels can
+    /// change them. A pointer or keyboard gesture keeps the snapshot from its
+    /// first frame, so a whole drag undoes as one step; a click that starts and
+    /// ends within one frame still has its pre-change state.
+    fn begin_settings_edit(&mut self) {
+        if self.settings_edit.is_none() {
+            self.settings_edit = Some(self.capture_settings());
+            self.settings_edit_changed = false;
+        }
+    }
+
+    fn end_settings_edit(&mut self, ctx: &egui::Context) {
+        let interacting = ctx.input(|input| input.pointer.any_down())
+            || ctx.memory(|memory| memory.focused().is_some());
+        if !interacting && self.settings_edit_changed {
+            self.commit_settings_edit();
+        }
+    }
+
+    fn commit_settings_edit(&mut self) {
+        if let Some(before) = self.settings_edit.take() {
+            if self.settings_edit_changed {
+                self.push_undo(UndoSnapshot {
+                    settings: Some(before),
+                    ..UndoSnapshot::default()
+                });
+            }
+        }
+        self.settings_edit_changed = false;
+    }
+
     fn push_selection_undo(&mut self) {
         let mut shapes = Vec::new();
         for selected in &self.selected_shapes {
@@ -1036,15 +1215,13 @@ impl OrleansApp {
         if shapes.is_empty() {
             return;
         }
-        self.undo_stack.push(UndoSnapshot {
+        self.push_undo(UndoSnapshot {
             shapes,
-            transforms: self.shape_transforms.clone(),
-            edited_paths: self.edited_paths.clone(),
+            transforms: Some(self.shape_transforms.clone()),
+            edited_paths: Some(self.edited_paths.clone()),
             rasters: Vec::new(),
+            settings: None,
         });
-        if self.undo_stack.len() > 30 {
-            self.undo_stack.remove(0);
-        }
     }
 
     fn push_raster_undo(&mut self, layer_index: usize) {
@@ -1057,10 +1234,10 @@ impl OrleansApp {
         else {
             return;
         };
-        self.undo_stack.push(UndoSnapshot {
+        self.push_undo(UndoSnapshot {
             shapes: Vec::new(),
-            transforms: self.shape_transforms.clone(),
-            edited_paths: self.edited_paths.clone(),
+            transforms: Some(self.shape_transforms.clone()),
+            edited_paths: Some(self.edited_paths.clone()),
             rasters: vec![RasterSnapshot {
                 layer: layer_index,
                 x: raster.x,
@@ -1069,17 +1246,66 @@ impl OrleansApp {
                 height_mm: raster.height_mm,
                 angle: raster.angle,
             }],
+            settings: None,
         });
-        if self.undo_stack.len() > 30 {
-            self.undo_stack.remove(0);
+    }
+
+    /// Capture the current state in the same shape as `snapshot`, for redo.
+    fn capture_for(&self, snapshot: &UndoSnapshot) -> UndoSnapshot {
+        let mut shapes = Vec::new();
+        for (layer_index, shape_id, _) in &snapshot.shapes {
+            if let Some(shape) = self
+                .doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == *layer_index)
+                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == *shape_id))
+            {
+                shapes.push((*layer_index, shape_id.clone(), shape.path.clone()));
+            }
+        }
+        let rasters = snapshot
+            .rasters
+            .iter()
+            .filter_map(|saved| {
+                let raster = self
+                    .doc
+                    .layers
+                    .iter()
+                    .find(|layer| layer.index == saved.layer)?
+                    .raster
+                    .as_ref()?;
+                Some(RasterSnapshot {
+                    layer: saved.layer,
+                    x: raster.x,
+                    y: raster.y,
+                    width_mm: raster.width_mm,
+                    height_mm: raster.height_mm,
+                    angle: raster.angle,
+                })
+            })
+            .collect();
+        UndoSnapshot {
+            shapes,
+            transforms: snapshot
+                .transforms
+                .as_ref()
+                .map(|_| self.shape_transforms.clone()),
+            edited_paths: snapshot
+                .edited_paths
+                .as_ref()
+                .map(|_| self.edited_paths.clone()),
+            rasters,
+            settings: snapshot.settings.as_ref().map(|_| self.capture_settings()),
         }
     }
 
-    fn undo_shape_move(&mut self) {
-        let Some(snapshot) = self.undo_stack.pop() else {
-            self.set_status("nothing to undo", false);
-            return;
-        };
+    fn restore_snapshot(&mut self, snapshot: UndoSnapshot) {
+        let has_geometry = snapshot.transforms.is_some()
+            || snapshot.edited_paths.is_some()
+            || !snapshot.shapes.is_empty()
+            || !snapshot.rasters.is_empty();
+
         for (layer_index, shape_id, path) in snapshot.shapes {
             if let Some(shape) = self
                 .doc
@@ -1091,8 +1317,12 @@ impl OrleansApp {
                 shape.path = path;
             }
         }
-        self.shape_transforms = snapshot.transforms;
-        self.edited_paths = snapshot.edited_paths;
+        if let Some(transforms) = snapshot.transforms {
+            self.shape_transforms = transforms;
+        }
+        if let Some(edited_paths) = snapshot.edited_paths {
+            self.edited_paths = edited_paths;
+        }
         for raster in snapshot.rasters {
             if let Some(layer) = self
                 .doc
@@ -1109,10 +1339,20 @@ impl OrleansApp {
                 }
             }
         }
+        if let Some(settings) = snapshot.settings {
+            settings.apply(&mut self.doc, &mut self.plan_opts, &mut self.gcode_opts);
+        }
+
+        self.settings_edit = None;
+        self.settings_edit_changed = false;
         self.raster_drag = None;
         self.node_drag = None;
         self.selected_node = None;
-        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.dragging_shape = false;
+        self.active_handle = None;
+        if has_geometry {
+            self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        }
         self.replan();
         self.dirty = false;
 
@@ -1135,9 +1375,36 @@ impl OrleansApp {
                 self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
             }
         }
-        self.dragging_shape = false;
-        self.active_handle = None;
+    }
+
+    fn undo_edit(&mut self) {
+        self.commit_settings_edit();
+        let Some(snapshot) = self.undo_stack.pop() else {
+            self.set_status("nothing to undo", false);
+            return;
+        };
+        let current = self.capture_for(&snapshot);
+        self.redo_stack.push(current);
+        if self.redo_stack.len() > UNDO_LIMIT {
+            self.redo_stack.remove(0);
+        }
+        self.restore_snapshot(snapshot);
         self.set_status("undid edit", false);
+    }
+
+    fn redo_edit(&mut self) {
+        self.commit_settings_edit();
+        let Some(snapshot) = self.redo_stack.pop() else {
+            self.set_status("nothing to redo", false);
+            return;
+        };
+        let current = self.capture_for(&snapshot);
+        self.undo_stack.push(current);
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.restore_snapshot(snapshot);
+        self.set_status("redid edit", false);
     }
 
     fn apply_affine_to_selection(&mut self, affine: Affine) {
@@ -2685,6 +2952,13 @@ impl OrleansApp {
                 {
                     *action = Some(Action::Undo);
                 }
+                if ui
+                    .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("Redo"))
+                    .on_hover_text("Redo last undone edit (Ctrl+Shift+Z)")
+                    .clicked()
+                {
+                    *action = Some(Action::Redo);
+                }
                 ui.separator();
                 ui.checkbox(&mut self.show_grid, "Grid");
                 ui.checkbox(&mut self.show_travel, "Travel");
@@ -2872,6 +3146,9 @@ impl OrleansApp {
                     let layer_count = self.doc.layers.len();
                     let mut move_up = false;
                     let mut move_down = false;
+                    // Name and colour do not affect the toolpath, so they are
+                    // undoable without forcing a replan on every keystroke.
+                    let mut display_changed = false;
                     {
                         let layer = &mut self.doc.layers[pos];
                         ui.horizontal(|ui| {
@@ -2886,12 +3163,14 @@ impl OrleansApp {
                             );
                         });
                         ui.horizontal(|ui| {
-                            ui.color_edit_button_srgb(&mut layer.color);
-                            ui.add(
-                                egui::TextEdit::singleline(&mut layer.name)
-                                    .hint_text("Layer name")
-                                    .desired_width(f32::INFINITY),
-                            );
+                            display_changed |= ui.color_edit_button_srgb(&mut layer.color).changed();
+                            display_changed |= ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut layer.name)
+                                        .hint_text("Layer name")
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .changed();
                         });
                         egui::Grid::new("selected-layer-params")
                             .num_columns(2)
@@ -3184,6 +3463,7 @@ impl OrleansApp {
                             ui.label(RichText::new("cut order").small().weak());
                         });
                     }
+                    self.settings_edit_changed |= display_changed;
                     if move_up {
                         self.doc.layers.swap(pos, pos - 1);
                         changed = true;
@@ -3204,7 +3484,7 @@ impl OrleansApp {
                 } else if selected_count == 0 {
                     "Click a shape or image · Ctrl/Shift-click for multiple · right-drag to pan"
                 } else {
-                    "Corner handles scale · top handle rotates · Ctrl+Z to undo"
+                    "Corner handles scale · top handle rotates · Ctrl+Z/Ctrl+Shift+Z undo/redo"
                 };
                 ui.label(RichText::new(hint).small().weak());
 
@@ -3369,11 +3649,13 @@ impl OrleansApp {
                         ui.end_row();
 
                         ui.label("Max S");
-                        ui.add(
-                            egui::DragValue::new(&mut self.gcode_opts.max_s)
-                                .speed(10.0)
-                                .range(1..=100_000),
-                        );
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.gcode_opts.max_s)
+                                    .speed(10.0)
+                                    .range(1..=100_000),
+                            )
+                            .changed();
                         ui.end_row();
                     });
                 changed |= ui
@@ -3387,10 +3669,12 @@ impl OrleansApp {
                     .changed()
                 {
                     self.gcode_opts.laser_mode = if m4 { LaserMode::M4 } else { LaserMode::M3 };
+                    changed = true;
                 }
 
                 if changed {
                     self.dirty = true;
+                    self.settings_edit_changed = true;
                 }
             });
     }
@@ -4371,6 +4655,7 @@ impl eframe::App for OrleansApp {
         let ctx = ui.ctx().clone();
         self.pump_machine(&ctx);
         self.ensure_raster_textures(&ctx);
+        self.begin_settings_edit();
 
         if self.dirty {
             self.replan();
@@ -4391,7 +4676,14 @@ impl eframe::App for OrleansApp {
                 action = Some(Action::SaveProject);
             }
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
-                action = Some(Action::Undo);
+                action = Some(if i.modifiers.shift {
+                    Action::Redo
+                } else {
+                    Action::Undo
+                });
+            }
+            if i.modifiers.command && i.key_pressed(egui::Key::Y) {
+                action = Some(Action::Redo);
             }
             if !i.modifiers.command && i.key_pressed(egui::Key::F) {
                 action = Some(Action::Fit);
@@ -4413,6 +4705,10 @@ impl eframe::App for OrleansApp {
         self.bottom_bar(ui);
         self.canvas_panel(ui);
 
+        // Commit a finished settings gesture before acting on undo/redo, so the
+        // edit that just ended is the one they operate on.
+        self.end_settings_edit(&ctx);
+
         match action {
             Some(Action::Open) => {
                 if let Some(path) = rfd::FileDialog::new()
@@ -4427,7 +4723,8 @@ impl eframe::App for OrleansApp {
             }
             Some(Action::Export) => self.export(),
             Some(Action::SaveProject) => self.save_project(),
-            Some(Action::Undo) => self.undo_shape_move(),
+            Some(Action::Undo) => self.undo_edit(),
+            Some(Action::Redo) => self.redo_edit(),
             Some(Action::ExitNodes) => self.exit_node_edit(),
             Some(Action::DeleteNode) => self.delete_selected_node(),
             Some(Action::Reload) => {
@@ -4676,5 +4973,94 @@ mod tests {
         assert_eq!(format_duration(42.4), "42s");
         assert_eq!(format_duration(61.0), "1m 01s");
         assert_eq!(format_duration(3725.0), "1h 02m");
+    }
+
+    #[test]
+    fn settings_snapshot_restores_layers_order_and_job() {
+        use orleans_core::{CutParams, Layer, RasterImage};
+
+        let mut doc = Document::new(100.0, 80.0);
+        let mut outer = Layer::new(0, "outer", [200, 10, 10], CutParams::new(1200.0, 60.0, 2));
+        outer.mode = LayerMode::Fill;
+        outer.fill.spacing = 0.4;
+        outer.tabs.count = 3;
+        let mut image = Layer::new(1, "image", [10, 200, 10], CutParams::new(800.0, 40.0, 1));
+        image.mode = LayerMode::Raster;
+        image.visible = false;
+        image.output = false;
+        image.raster = Some(RasterImage {
+            width: 2,
+            height: 2,
+            grayscale: vec![0, 64, 128, 255],
+            x: 5.0,
+            y: 6.0,
+            width_mm: 20.0,
+            height_mm: 10.0,
+            angle: 15.0,
+            mode: RasterMode::Dither,
+            threshold: 90,
+            invert: true,
+            line_interval: 0.3,
+            bidirectional: false,
+        });
+        doc.layers.push(image);
+        doc.layers.push(outer);
+
+        let mut plan = PlanOptions {
+            kerf: 0.15,
+            optimize: false,
+            ..PlanOptions::default()
+        };
+        let mut gcode = GcodeOptions {
+            laser_mode: LaserMode::M4,
+            max_s: 750,
+            ..GcodeOptions::default()
+        };
+        let saved = SettingsSnapshot::capture(&doc, &plan, &gcode);
+
+        doc.layers[0].name = "changed".to_owned();
+        doc.layers[0].visible = true;
+        doc.layers[0].output = true;
+        doc.layers[0].raster.as_mut().expect("raster layer").angle = -45.0;
+        doc.layers[1].cut.speed = 100.0;
+        doc.layers[1].mode = LayerMode::Line;
+        doc.layers.swap(0, 1);
+        plan.kerf = 0.5;
+        plan.optimize = true;
+        gcode.laser_mode = LaserMode::M3;
+        gcode.max_s = 1000;
+
+        saved.apply(&mut doc, &mut plan, &mut gcode);
+
+        assert_eq!(
+            doc.layers
+                .iter()
+                .map(|layer| layer.index)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        let image = &doc.layers[0];
+        assert_eq!(image.name, "image");
+        assert!(!image.visible);
+        assert!(!image.output);
+        let raster = image.raster.as_ref().expect("raster layer");
+        assert_eq!(raster.angle, 15.0);
+        assert_eq!(raster.mode, RasterMode::Dither);
+        assert_eq!(raster.threshold, 90);
+        assert!(raster.invert);
+        assert_eq!(raster.line_interval, 0.3);
+        assert!(!raster.bidirectional);
+
+        let outer = &doc.layers[1];
+        assert_eq!(outer.name, "outer");
+        assert_eq!(outer.mode, LayerMode::Fill);
+        assert_eq!(outer.cut.speed, 1200.0);
+        assert_eq!(outer.fill.spacing, 0.4);
+        assert_eq!(outer.tabs.count, 3);
+
+        assert_eq!(plan.kerf, 0.15);
+        assert!(!plan.optimize);
+        assert_eq!(gcode.laser_mode, LaserMode::M4);
+        assert_eq!(gcode.max_s, 750);
     }
 }
