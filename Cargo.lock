@@ -286,65 +286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lb-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "kurbo",
- "lb-core",
- "lb-driver",
- "lb-geom",
- "lb-import",
- "lb-toolpath",
-]
-
-[[package]]
-name = "lb-core"
-version = "0.1.0"
-dependencies = [
- "kurbo",
-]
-
-[[package]]
-name = "lb-driver"
-version = "0.1.0"
-dependencies = [
- "kurbo",
- "lb-core",
- "serialport",
- "thiserror",
-]
-
-[[package]]
-name = "lb-geom"
-version = "0.1.0"
-dependencies = [
- "kurbo",
- "thiserror",
-]
-
-[[package]]
-name = "lb-import"
-version = "0.1.0"
-dependencies = [
- "kurbo",
- "lb-core",
- "thiserror",
- "usvg",
-]
-
-[[package]]
-name = "lb-toolpath"
-version = "0.1.0"
-dependencies = [
- "kurbo",
- "lb-core",
- "lb-geom",
- "thiserror",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -435,6 +376,65 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "orleans-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "kurbo",
+ "orleans-core",
+ "orleans-driver",
+ "orleans-geom",
+ "orleans-import",
+ "orleans-toolpath",
+]
+
+[[package]]
+name = "orleans-core"
+version = "0.1.0"
+dependencies = [
+ "kurbo",
+]
+
+[[package]]
+name = "orleans-driver"
+version = "0.1.0"
+dependencies = [
+ "kurbo",
+ "orleans-core",
+ "serialport",
+ "thiserror",
+]
+
+[[package]]
+name = "orleans-geom"
+version = "0.1.0"
+dependencies = [
+ "kurbo",
+ "thiserror",
+]
+
+[[package]]
+name = "orleans-import"
+version = "0.1.0"
+dependencies = [
+ "kurbo",
+ "orleans-core",
+ "thiserror",
+ "usvg",
+]
+
+[[package]]
+name = "orleans-toolpath"
+version = "0.1.0"
+dependencies = [
+ "kurbo",
+ "orleans-core",
+ "orleans-geom",
+ "thiserror",
+]
 
 [[package]]
 name = "pico-args"

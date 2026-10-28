@@ -1,0 +1,18 @@
+[package]
+name = "orleans-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "orleans"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+kurbo.workspace = true
+orleans-core = { path = "../orleans-core" }
+orleans-geom = { path = "../orleans-geom" }
+orleans-import = { path = "../orleans-import" }
+orleans-toolpath = { path = "../orleans-toolpath" }
+orleans-driver = { path = "../orleans-driver" }

@@ -1,7 +1,8 @@
 [package]
-name = "lb-core"
+name = "orleans-geom"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 kurbo.workspace = true
+thiserror.workspace = true

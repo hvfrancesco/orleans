@@ -1,10 +1,10 @@
 [package]
-name = "lb-toolpath"
+name = "orleans-toolpath"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 kurbo.workspace = true
 thiserror.workspace = true
-lb-core = { path = "../lb-core" }
-lb-geom = { path = "../lb-geom" }
+orleans-core = { path = "../orleans-core" }
+orleans-geom = { path = "../orleans-geom" }

@@ -8,7 +8,7 @@
 use std::rc::Rc;
 
 use kurbo::{BezPath, Point};
-use lb_core::{CutParams, Document, Layer, Shape};
+use orleans_core::{CutParams, Document, Layer, Shape};
 use usvg::tiny_skia_path::PathSegment;
 
 /// 96 CSS pixels per inch, the SVG/CSS reference resolution.

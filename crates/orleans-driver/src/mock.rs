@@ -3,7 +3,7 @@
 //! It speaks just enough of the protocol to exercise the streaming client, the
 //! G-code writer and the planner without hardware: `ok` for every line, `error`
 //! for garbage, `?` status reports, and realtime feed hold / resume / reset.
-//! The `lb run --mock` command uses it, and so do the driver tests.
+//! The `orleans run --mock` command uses it, and so do the driver tests.
 
 use std::collections::VecDeque;
 use std::io;

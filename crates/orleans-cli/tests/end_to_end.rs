@@ -1,13 +1,13 @@
 //! End-to-end check: SVG bytes in, simulated GRBL motion out.
 //!
-//! This exercises the exact pipeline the `lb` binary uses, without touching a
+//! This exercises the exact pipeline the `orleans` binary uses, without touching a
 //! serial port, so it is safe to run in CI.
 
 use kurbo::Point;
-use lb_driver::gcode::{self, GcodeOptions};
-use lb_driver::{GrblClient, RunState, SimulatedGrbl};
-use lb_import::{import_svg, ImportOptions};
-use lb_toolpath::{plan, PlanOptions};
+use orleans_driver::gcode::{self, GcodeOptions};
+use orleans_driver::{GrblClient, RunState, SimulatedGrbl};
+use orleans_import::{import_svg, ImportOptions};
+use orleans_toolpath::{plan, PlanOptions};
 
 const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="40mm" viewBox="0 0 60 40">
     <circle cx="30" cy="20" r="18" fill="none" stroke="#000000"/>

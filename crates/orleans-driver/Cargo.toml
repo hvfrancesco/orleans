@@ -1,12 +1,12 @@
 [package]
-name = "lb-driver"
+name = "orleans-driver"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 kurbo.workspace = true
 thiserror.workspace = true
-lb-core = { path = "../lb-core" }
+orleans-core = { path = "../orleans-core" }
 
 [features]
 default = ["serial"]

@@ -1,5 +1,5 @@
 [package]
-name = "lb-import"
+name = "orleans-import"
 version.workspace = true
 edition.workspace = true
 
@@ -7,4 +7,4 @@ edition.workspace = true
 kurbo.workspace = true
 usvg.workspace = true
 thiserror.workspace = true
-lb-core = { path = "../lb-core" }
+orleans-core = { path = "../orleans-core" }

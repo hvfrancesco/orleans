@@ -1,4 +1,4 @@
-# lightburn-rs
+# orleans
 
 An open, clean-room CAM stack for laser cutters, written in Rust.
 
@@ -57,30 +57,30 @@ cargo run -q -- run examples/coaster.svg --port /dev/ttyUSB0 \
 cargo run -q -- status --port /dev/ttyUSB0
 ```
 
-Installed as a binary, the commands are `lb info`, `lb gcode`, `lb run`,
-`lb status`.
+Installed as a binary, the commands are `orleans info`, `orleans gcode`, `orleans run`,
+`orleans status`.
 
 ## Architecture
 
 ```
 crates/
-  lb-core/      document model: Document → Layer → Shape, CutParams, Job
-  lb-geom/      flattening, area, containment, kerf/miter offset
-  lb-import/    SVG → Document (via usvg)
-  lb-toolpath/  Document → Job: nesting, ordering, passes, time estimate
-  lb-driver/    Job → G-code, Transport trait, GRBL client, simulator
-  lb-cli/       the `lb` binary
+  orleans-core/      document model: Document → Layer → Shape, CutParams, Job
+  orleans-geom/      flattening, area, containment, kerf/miter offset
+  orleans-import/    SVG → Document (via usvg)
+  orleans-toolpath/  Document → Job: nesting, ordering, passes, time estimate
+  orleans-driver/    Job → G-code, Transport trait, GRBL client, simulator
+  orleans-cli/       the `orleans` binary
 ```
 
 The layers only depend downwards, and the only thing that knows about a
-specific machine is `lb-driver`. Adding Marlin only means adding a
+specific machine is `orleans-driver`. Adding Marlin only means adding a
 `GcodeOptions` variant; adding Ruida means implementing `Transport` plus a
 binary protocol streamer, with nothing above it changing.
 
 ## Design decisions
 
 **Millimetres, Y up, origin bottom-left.** Machine convention, not SVG's
-top-left/Y-down. `lb-import` flips Y using the document height, so 0,0 is the
+top-left/Y-down. `orleans-import` flips Y using the document height, so 0,0 is the
 bottom-left of the bed.
 
 **Kerf is applied towards the material.** The planner computes each contour's

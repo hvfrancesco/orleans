@@ -9,8 +9,8 @@
 //! * repeat each contour for multi-pass layers.
 
 use kurbo::Point;
-use lb_core::{Document, Job, JobStats, Op};
-use lb_geom::{dedup, flatten_path, offset_closed, point_in_polygon, Contour};
+use orleans_core::{Document, Job, JobStats, Op};
+use orleans_geom::{dedup, flatten_path, offset_closed, point_in_polygon, Contour};
 
 /// Knobs for [`plan`].
 #[derive(Clone, Debug)]
@@ -30,7 +30,7 @@ pub struct PlanOptions {
 impl Default for PlanOptions {
     fn default() -> Self {
         Self {
-            tolerance: lb_geom::DEFAULT_TOLERANCE,
+            tolerance: orleans_geom::DEFAULT_TOLERANCE,
             kerf: 0.0,
             rapid_speed: 3000.0,
             optimize: true,
@@ -90,9 +90,9 @@ pub fn plan(doc: &Document, opt: &PlanOptions) -> Job {
                         job.ops.push(Op::Rapid { to: start });
                     }
                 }
-                stats.cut_mm += lb_geom::polyline_length(&points);
+                stats.cut_mm += orleans_geom::polyline_length(&points);
                 stats.seconds +=
-                    lb_geom::polyline_length(&points) / layer.cut.speed.max(1.0) * 60.0;
+                    orleans_geom::polyline_length(&points) / layer.cut.speed.max(1.0) * 60.0;
                 job.ops.push(Op::Cut {
                     polyline: points.clone(),
                     params: layer.cut,
@@ -215,7 +215,7 @@ fn rotate(points: &[Point], start: usize, closed: bool) -> Vec<Point> {
 mod tests {
     use super::*;
     use kurbo::BezPath;
-    use lb_core::{CutParams, Layer, Shape};
+    use orleans_core::{CutParams, Layer, Shape};
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> BezPath {
         let mut p = BezPath::new();
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(first_len, expected_hole + 1, "hole should be cut first");
 
         // The hole is 4x4 and the outer contour 10x10.
-        let hole_area = lb_geom::signed_area(&cuts[0].0[..4]).abs();
+        let hole_area = orleans_geom::signed_area(&cuts[0].0[..4]).abs();
         assert!((hole_area - 4.0).abs() < 1e-6);
     }
 
@@ -264,14 +264,14 @@ mod tests {
         let cuts: Vec<_> = job.cuts().collect();
 
         // A 2x2 hole grows by half the kerf on each side: 2.2^2.
-        let hole_area = lb_geom::signed_area(&cuts[0].0[..4]).abs();
+        let hole_area = orleans_geom::signed_area(&cuts[0].0[..4]).abs();
         assert!(
             (hole_area - 2.2 * 2.2).abs() < 1e-3,
             "hole area {hole_area}"
         );
 
         let outer = &cuts[1].0;
-        let outer_area = lb_geom::signed_area(&outer[..4]).abs();
+        let outer_area = orleans_geom::signed_area(&outer[..4]).abs();
         assert!(
             (outer_area - 9.8 * 9.8).abs() < 1e-3,
             "outer area {outer_area}"

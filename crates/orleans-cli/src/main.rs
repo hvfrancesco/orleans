@@ -1,11 +1,11 @@
-//! `lb` — a small CAM tool for laser cutters.
+//! `orleans` — a small CAM tool for laser cutters.
 //!
 //! Three commands are enough to be useful end to end:
 //!
 //! ```text
-//! lb info  design.svg
-//! lb gcode design.svg -o design.gcode
-//! lb run   design.svg --port /dev/ttyUSB0      # or --mock
+//! orleans info  design.svg
+//! orleans gcode design.svg -o design.gcode
+//! orleans run   design.svg --port /dev/ttyUSB0      # or --mock
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -14,15 +14,15 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use kurbo::Point;
-use lb_core::Document;
-use lb_driver::gcode::{self, GcodeOptions, LaserMode};
-use lb_driver::{GrblClient, GrblConfig, SimulatedGrbl};
-use lb_import::{import_svg, ImportOptions};
-use lb_toolpath::{plan, PlanOptions};
+use orleans_core::Document;
+use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
+use orleans_driver::{GrblClient, GrblConfig, SimulatedGrbl};
+use orleans_import::{import_svg, ImportOptions};
+use orleans_toolpath::{plan, PlanOptions};
 
 #[derive(Parser)]
 #[command(
-    name = "lb",
+    name = "orleans",
     version,
     about = "Open CAM for laser cutters: SVG in, G-code out, GRBL over serial"
 )]
@@ -92,7 +92,7 @@ struct Common {
     #[arg(long)]
     dynamic_power: bool,
     /// Flattening tolerance in mm.
-    #[arg(long, default_value_t = lb_geom::DEFAULT_TOLERANCE)]
+    #[arg(long, default_value_t = orleans_geom::DEFAULT_TOLERANCE)]
     tolerance: f64,
     /// Keep the SVG's Y-down orientation instead of flipping it.
     #[arg(long)]
@@ -110,10 +110,10 @@ impl Common {
         let bytes = std::fs::read(&self.input)
             .with_context(|| format!("reading {}", self.input.display()))?;
         let opt = ImportOptions {
-            dpi: lb_import::DEFAULT_DPI,
+            dpi: orleans_import::DEFAULT_DPI,
             flip_y: !self.no_flip,
             scale: self.scale,
-            default_cut: lb_core::CutParams::new(self.speed, self.power, self.passes),
+            default_cut: orleans_core::CutParams::new(self.speed, self.power, self.passes),
             group_by_color: true,
         };
         let doc = import_svg(&bytes, &opt)
@@ -124,7 +124,7 @@ impl Common {
         Ok(doc)
     }
 
-    fn plan(&self, doc: &Document) -> lb_core::Job {
+    fn plan(&self, doc: &Document) -> orleans_core::Job {
         let opt = PlanOptions {
             tolerance: self.tolerance,
             kerf: self.kerf,
@@ -272,7 +272,7 @@ fn run(cmd: &Common, port: Option<String>, baud: u32, mock: bool) -> Result<()> 
     let port = port.ok_or_else(|| {
         anyhow::anyhow!("no port given: pass --port /dev/ttyUSB0, or --mock to simulate")
     })?;
-    let link = lb_driver::open_serial(&port, baud)
+    let link = orleans_driver::open_serial(&port, baud)
         .with_context(|| format!("opening {port} at {baud} baud"))?;
     let mut client = GrblClient::new(link);
 
@@ -288,7 +288,7 @@ fn run(cmd: &Common, port: Option<String>, baud: u32, mock: bool) -> Result<()> 
 }
 
 fn status(port: &str, baud: u32) -> Result<()> {
-    let link = lb_driver::open_serial(port, baud)
+    let link = orleans_driver::open_serial(port, baud)
         .with_context(|| format!("opening {port} at {baud} baud"))?;
     let mut client = GrblClient::new(link);
     client.wake()?;
