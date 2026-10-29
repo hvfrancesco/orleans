@@ -217,6 +217,52 @@ fn italian(text: &str) -> Option<&'static str> {
         "No jobs sent yet. Completed, stopped and framing runs appear here." => {
             "Nessun lavoro inviato. I lavori completati, arrestati e le inquadrature appaiono qui."
         }
+        "State" => "Stato",
+        "controller settings unavailable ($$)" => "impostazioni controller non disponibili ($$)",
+        "Cancel jog (realtime 0x85)" => "Annulla jog (realtime 0x85)",
+        "Pause requires M4 + $32=1; use Stop." => "La pausa richiede M4 + $32=1; usa Arresta.",
+        "Trace the job bounds at 3000 mm/min with the laser off." => {
+            "Traccia i limiti del lavoro a 3000 mm/min con il laser spento."
+        }
+        "Clear a GRBL alarm." => "Cancella un allarme GRBL.",
+        "Feed hold and soft reset; switches the laser off." => {
+            "Pausa avanzamento e reset software; spegne il laser."
+        }
+        "connect to edit controller settings" => "connetti per modificare le impostazioni del controller",
+        "settings unavailable; press Refresh" => "impostazioni non disponibili; premi Aggiorna",
+        "Create a new empty layer" => "Crea un nuovo livello vuoto",
+        "Include this layer in the job" => "Includi questo livello nel lavoro",
+        "Include this layer in the job and frame" => "Includi questo livello nel lavoro e nell'inquadratura",
+        "Draw this layer in the editor" => "Disegna questo livello nell'editor",
+        "Select a layer to edit it." => "Seleziona un livello da modificare.",
+        "Select and transform these shapes together" => "Seleziona e trasforma queste forme insieme",
+        "Remove the groups these shapes belong to" => "Rimuovi i gruppi a cui appartengono queste forme",
+        "Align left edges" => "Allinea i bordi sinistri",
+        "Align horizontal centres" => "Allinea i centri orizzontali",
+        "Align right edges" => "Allinea i bordi destri",
+        "Align top edges" => "Allinea i bordi superiori",
+        "Align vertical centres" => "Allinea i centri verticali",
+        "Align bottom edges" => "Allinea i bordi inferiori",
+        "Space centres evenly left to right" => "Distribuisci i centri da sinistra a destra",
+        "Space centres evenly bottom to top" => "Distribuisci i centri dal basso verso l'alto",
+        "Move the selected objects to this layer" => "Sposta gli oggetti selezionati su questo livello",
+        "Copy the selected objects into this layer" => "Copia gli oggetti selezionati in questo livello",
+        "Delete the selected objects (Del)" => "Elimina gli oggetti selezionati (Canc)",
+        "Duplicate the selected objects in place (Ctrl+D)" => "Duplica gli oggetti selezionati sul posto (Ctrl+D)",
+        "Create the array and select its copies" => "Crea la matrice e seleziona le copie",
+        "Move the selected reference point to these coordinates" => {
+            "Sposta il punto di riferimento selezionato su queste coordinate"
+        }
+        "Snap dragged nodes to the canvas grid" => "Aggancia i nodi trascinati alla griglia del piano",
+        "Delete the selected anchor (Del)" => "Elimina l'ancora selezionata (Canc)",
+        "Velocity-scaled power. Required for a safe pause when $32=1." => {
+            "Potenza proporzionale alla velocità. Necessaria per una pausa sicura con $32=1."
+        }
+        "Page" => "Pagina",
+        "waiting for status…" => "in attesa di stato…",
+        "waiting for the link…" => "in attesa del collegamento…",
+        "Sending…" => "Invio…",
+        "Framing…" => "Inquadratura…",
         _ => return None,
     })
 }
