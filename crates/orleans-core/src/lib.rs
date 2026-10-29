@@ -247,7 +247,7 @@ impl Default for TabParams {
     }
 }
 
-/// A group of shapes sharing cutting parameters, equivalent to a LightBurn layer.
+/// A group of shapes sharing cutting parameters.
 #[derive(Clone, Debug)]
 pub struct Layer {
     pub index: usize,
