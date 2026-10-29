@@ -125,13 +125,14 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 `orleans gui [design.svg|design.orleans]` opens the editor:
 
 * wheel to zoom at the cursor, drag to pan, `F` or double-click to fit;
-* **Light** in the toolbar switches the interface and canvas to a light theme.
-  The canvas background, grid, page, bed, travel, selection handles and node
-  markers change with it. The choice applies immediately and lasts for the
-  session;
+* the **theme** dropdown in the toolbar switches between dark and light
+  interfaces. The canvas background, grid, page, bed, travel, selection
+  handles and node markers change with it. The choice applies immediately and
+  lasts for the session;
 * **Language** in the toolbar switches between English, Italiano, Français,
   Español, Deutsch and 简体中文. The choice is saved in the user configuration
-  directory and restored at startup. Chinese uses a system CJK font fallback;
+  directory and restored at startup. A system CJK fallback font is loaded at
+  startup so the Chinese menu label is readable before switching languages;
 * millimetre rulers run along the left and bottom edges of the canvas. They use
   the same world origin and pan/zoom with the drawing, so both rulers always
   show aligned coordinates;

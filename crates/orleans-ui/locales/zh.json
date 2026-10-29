@@ -248,5 +248,6 @@
   "nothing to reload": "没有可重新加载的内容",
   "connected": "已连接",
   "connecting": "连接中",
-  "offline": "离线"
+  "offline": "离线",
+  "Dark": "深色"
 }

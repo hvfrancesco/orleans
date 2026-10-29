@@ -99,6 +99,13 @@ impl Theme {
     fn is_light(self) -> bool {
         self == Self::Light
     }
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
 }
 
 /// Canvas colours that egui's own visuals do not cover.
@@ -772,7 +779,8 @@ impl OrleansApp {
             pending_pdf: None,
         };
         app.apply_theme(&cc.egui_ctx);
-        if language == Language::Chinese && !crate::cjk::install(&cc.egui_ctx) {
+        let cjk_available = crate::cjk::install(&cc.egui_ctx);
+        if language == Language::Chinese && !cjk_available {
             app.status = Status::error("Chinese UI needs a system CJK font (e.g. Noto Sans CJK)");
         }
         if let Some(path) = initial {
@@ -4854,15 +4862,22 @@ impl OrleansApp {
                     *action = Some(Action::Redo);
                 }
                 ui.separator();
-                let mut light = self.theme.is_light();
-                if ui
-                    .checkbox(&mut light, tr!("Light"))
-                    .on_hover_text(tr!("Use the light interface and canvas"))
-                    .changed()
-                {
-                    self.theme = if light { Theme::Light } else { Theme::Dark };
-                    self.apply_theme(ui.ctx());
-                }
+                ui.menu_button(tr!(self.theme.label_key()), |ui| {
+                    if ui
+                        .selectable_label(self.theme == Theme::Dark, tr!("Dark"))
+                        .clicked()
+                    {
+                        self.theme = Theme::Dark;
+                        self.apply_theme(ui.ctx());
+                    }
+                    if ui
+                        .selectable_label(self.theme == Theme::Light, tr!("Light"))
+                        .clicked()
+                    {
+                        self.theme = Theme::Light;
+                        self.apply_theme(ui.ctx());
+                    }
+                });
                 ui.menu_button(tr!("Language"), |ui| {
                     for language in Language::ALL {
                         if ui

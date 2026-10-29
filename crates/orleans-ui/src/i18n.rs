@@ -148,6 +148,7 @@ fn italian(text: &str) -> Option<&'static str> {
         "Undo" => "Annulla",
         "Redo" => "Ripeti",
         "Light" => "Chiaro",
+        "Dark" => "Scuro",
         "Grid" => "Griglia",
         "Travel" => "Spostamenti",
         "Bed" => "Piano",
@@ -420,8 +421,12 @@ fn italian(text: &str) -> Option<&'static str> {
     })
 }
 
+const PREFERENCES_FORMAT: u32 = 2;
+
 #[derive(Serialize, Deserialize, Default)]
 struct Preferences {
+    #[serde(default)]
+    format: u32,
     language: Option<Language>,
 }
 
@@ -435,9 +440,10 @@ fn preferences_path() -> PathBuf {
 
 pub fn load_language() -> Option<Language> {
     let text = fs::read_to_string(preferences_path()).ok()?;
-    serde_json::from_str::<Preferences>(&text)
-        .ok()
-        .and_then(|preferences| preferences.language)
+    let preferences = serde_json::from_str::<Preferences>(&text).ok()?;
+    (preferences.format >= PREFERENCES_FORMAT)
+        .then_some(preferences.language)
+        .flatten()
 }
 
 pub fn save_language(language: Language) {
@@ -449,6 +455,7 @@ pub fn save_language(language: Language) {
         return;
     }
     let preferences = Preferences {
+        format: PREFERENCES_FORMAT,
         language: Some(language),
     };
     if let Ok(json) = serde_json::to_string_pretty(&preferences) {
