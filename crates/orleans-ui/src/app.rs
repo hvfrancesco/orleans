@@ -14,7 +14,9 @@ use orleans_geom::{
     flatten_path, hatch_contours, nearest_along_closed, offset_region, point_at_fraction,
     point_in_polygon, tab_span_polylines, HatchOptions,
 };
-use orleans_import::{import_dxf, import_image, import_svg, ImportOptions, DEFAULT_RASTER_DPI};
+use orleans_import::{
+    import_dxf, import_image, import_pdf, import_svg, ImportOptions, DEFAULT_RASTER_DPI,
+};
 use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 
 use crate::history::{self, JobHistory, JobKind, JobOutcome, JobRecord};
@@ -860,6 +862,59 @@ impl OrleansApp {
         }
     }
 
+    fn load_pdf(&mut self, path: PathBuf) {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = Status::error(format!("reading {}: {err}", path.display()));
+                return;
+            }
+        };
+        match import_pdf(&bytes, &ImportOptions::default()) {
+            Ok(doc) if doc.is_empty() => {
+                self.status = Status::error(format!(
+                    "{} contains no vector paths; outline text first",
+                    path.display()
+                ));
+            }
+            Ok(doc) => {
+                self.preview = Preview::build(&doc, DISPLAY_TOLERANCE);
+                self.doc = doc;
+                self.selected_layer = self.doc.layers.first().map(|layer| layer.index);
+                self.selected_raster = None;
+                self.selected_shapes.clear();
+                self.groups.clear();
+                self.transfer_layer = None;
+                self.clear_undo();
+                self.dragging_shape = false;
+                self.active_handle = None;
+                self.node_edit = None;
+                self.selected_nodes.clear();
+                self.node_drag = None;
+                self.tab_edit_layer = None;
+                self.raster_textures.clear();
+                self.raster_texture_keys.clear();
+                self.replan();
+                self.status = Status::ok(format!(
+                    "{}: {} layers, {} shapes, {} contours",
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string()),
+                    self.doc.layers.len(),
+                    self.doc.shape_count(),
+                    self.preview.contour_count()
+                ));
+                self.path = Some(path);
+                self.project_path = None;
+                self.fit_pending = true;
+                self.dirty = false;
+            }
+            Err(err) => {
+                self.status = Status::error(format!("importing {}: {err}", path.display()));
+            }
+        }
+    }
+
     fn import_path(&mut self, path: PathBuf) {
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -875,6 +930,8 @@ impl OrleansApp {
             import_image(&bytes, DEFAULT_RASTER_DPI)
         } else if is_dxf_path(&path) {
             import_dxf(&bytes, &ImportOptions::default())
+        } else if is_pdf_path(&path) {
+            import_pdf(&bytes, &ImportOptions::default())
         } else {
             import_svg(&bytes, &ImportOptions::default())
         };
@@ -1023,6 +1080,8 @@ impl OrleansApp {
             self.load_image(path);
         } else if is_dxf_path(&path) {
             self.load_dxf(path);
+        } else if is_pdf_path(&path) {
+            self.load_pdf(path);
         } else {
             self.load_svg(path);
         }
@@ -6757,6 +6816,14 @@ fn is_dxf_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_pdf_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("pdf") || extension.eq_ignore_ascii_case("ai")
+        })
+}
+
 fn is_project_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -7009,10 +7076,11 @@ impl eframe::App for OrleansApp {
             Some(Action::Open) => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("SVG", &["svg"])
+                    .add_filter("PDF / AI", &["pdf", "ai"])
                     .add_filter("DXF", &["dxf"])
                     .add_filter("Image", &["png", "jpg", "jpeg", "bmp"])
                     .add_filter("Orleans project", &["orleans"])
-                    .set_title("Open design, DXF, image or project")
+                    .set_title("Open design, PDF, DXF, image or project")
                     .pick_file()
                 {
                     self.open_path(path);
@@ -7021,6 +7089,7 @@ impl eframe::App for OrleansApp {
             Some(Action::Import) => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("SVG", &["svg"])
+                    .add_filter("PDF / AI", &["pdf", "ai"])
                     .add_filter("DXF", &["dxf"])
                     .add_filter("Image", &["png", "jpg", "jpeg", "bmp"])
                     .set_title("Import layers into the current design")

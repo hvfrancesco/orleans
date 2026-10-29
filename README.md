@@ -5,7 +5,7 @@ An open, clean-room CAM stack for laser cutters, written in Rust.
 This is **not** a fork of LightBurn and contains no LightBurn code, assets or
 proprietary file formats. It reimplements the same workflow — vector design in,
 G-code out, streamed to a controller over USB or WiFi — from public
-specifications: SVG, G-code and the GRBL protocol.
+specifications: SVG, PDF, DXF, G-code and the GRBL protocol.
 
 The commercial binary in `../LightBurn` was only used to inventory which device
 families exist (GRBL, Marlin, Smoothieware, Ruida, TopWisdom, galvo). Nothing
@@ -30,7 +30,7 @@ was decompiled or copied.
 | USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
 | Hardware-free GRBL simulator | ✅ |
 | DXF import (common 2D entities) | ✅ |
-| PDF / AI import | ❌ |
+| PDF / AI import (PDF vector paths, first page) | ✅ |
 | Raster engraving (threshold, Floyd–Steinberg/Atkinson/Bayer dither, grayscale, crop) | ✅ |
 | Tabs/bridges on contour cuts, automatic or manual, with canvas markers | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
@@ -41,7 +41,7 @@ was decompiled or copied.
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
 | Project save/load (`.orleans`, canonical layer/shape snapshot) | ✅ |
-| Import SVG/DXF/images into the current design (hybrid jobs) | ✅ |
+| Import SVG/PDF/DXF/images into the current design (hybrid jobs) | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
@@ -54,7 +54,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-146 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+152 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -70,6 +70,9 @@ cargo run -q -- gui examples/coaster.svg --url tcp://192.168.1.10
 
 # Open a DXF drawing
 cargo run -q -- gui drawing.dxf
+
+# Open a PDF or a PDF-compatible Illustrator file
+cargo run -q -- gui drawing.pdf
 
 # Open a PNG/JPEG/BMP as a raster-engraving layer
 cargo run -q -- gui photo.png
@@ -161,6 +164,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   an image on the canvas or select its layer to show handles: drag inside to
   move, drag a corner to resize and drag the top handle to rotate. Use a
   separate vector layer for outlines;
+* PDF files open or import as vector paths, grouped by stroke colour (or fill
+  colour for fill-only paths). PDF-compatible `.ai` files work too. The first
+  page is imported. Text must be converted to outlines, and raster images,
+  clipping paths, gradients and patterns are not imported;
 * DXF files open or import as one layer per DXF layer, using the layer's ACI or
   true colour. `LINE`, `LWPOLYLINE`/`POLYLINE` (including bulges), `CIRCLE`,
   `ARC`, `ELLIPSE` and `SPLINE` are read; `$INSUNITS` sets the millimetre
@@ -429,6 +436,11 @@ concept of a line and some bridges emit negotiation on connect.
   SVG but no longer depend on re-import or index matching.
 * Interactive handles scale uniformly around the opposite corner and rotate
   around the selection centre. There is no non-uniform/skewed scaling.
+* PDF import reads the first page's vector paths and form XObjects only. Text
+  must be outlined; raster images, clip paths, gradients, patterns,
+  transparency groups, annotations and later pages are skipped. Illustrator
+  files must be saved with PDF compatibility. Imported paths are not linked to
+  their source file.
 * DXF import covers ASCII files and the listed entities only. Blocks,
   `INSERT`, `HATCH`, text, dimensions, meshes and binary DXF are skipped.
   Imported vector layers are self-contained: they are not linked to their
@@ -475,7 +487,7 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **More importers** — PDF, AI; LBRN2 read/write from community specs.
+1. **More importers** — PDF page selection, HPGL, DXF blocks/text.
 2. **Second driver** — Marlin, then Ruida over UDP.
 3. **Job control extras** — feed/power overrides, rotary setup.
 

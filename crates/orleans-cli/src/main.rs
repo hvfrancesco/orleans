@@ -24,7 +24,7 @@ use orleans_core::Document;
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_driver::net::{parse_endpoint, TcpTransport};
 use orleans_driver::{GrblClient, GrblConfig, SimulatedGrbl, Transport};
-use orleans_import::{import_dxf, import_svg, ImportOptions};
+use orleans_import::{import_dxf, import_pdf, import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
 #[derive(Parser)]
@@ -124,7 +124,7 @@ enum Command {
 
 #[derive(Args, Clone)]
 struct Common {
-    /// Input SVG.
+    /// Input SVG, DXF or PDF/AI file.
     input: PathBuf,
     /// Feed rate in mm/min.
     #[arg(long, default_value_t = 1000.0)]
@@ -174,8 +174,17 @@ impl Common {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("dxf"));
+        let is_pdf = self
+            .input
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("pdf") || extension.eq_ignore_ascii_case("ai")
+            });
         let doc = if is_dxf {
             import_dxf(&bytes, &opt)
+        } else if is_pdf {
+            import_pdf(&bytes, &opt)
         } else {
             import_svg(&bytes, &opt)
         }

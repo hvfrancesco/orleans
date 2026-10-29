@@ -1,9 +1,8 @@
-//! SVG import.
+//! Vector and raster import.
 //!
-//! `usvg` resolves the hard parts of SVG (CSS, `use`, transforms, units,
-//! shapes-to-paths, text-to-paths with a font database), so this module only
-//! has to walk the resolved tree, convert its paths to `kurbo::BezPath` and
-//! group them into layers by colour — the same model LightBurn uses.
+//! SVG is resolved with `usvg`; PDF uses `lopdf` plus a small path/content
+//! interpreter; DXF is parsed directly. All importers produce the same
+//! millimetre, Y-up [`Document`] model grouped by colour.
 
 use std::rc::Rc;
 
@@ -12,7 +11,9 @@ use orleans_core::{CutParams, Document, Layer, LayerMode, RasterImage, RasterMod
 use usvg::tiny_skia_path::PathSegment;
 
 mod dxf;
+mod pdf;
 pub use dxf::import_dxf;
+pub use pdf::import_pdf;
 
 /// 96 CSS pixels per inch, the SVG/CSS reference resolution.
 pub const DEFAULT_DPI: f64 = 96.0;
@@ -57,6 +58,8 @@ pub enum ImportError {
     Image(#[from] image::ImageError),
     #[error("could not parse DXF: {0}")]
     Dxf(String),
+    #[error("could not parse PDF: {0}")]
+    Pdf(String),
 }
 
 /// Decode an image into a single raster layer at `dpi`.
