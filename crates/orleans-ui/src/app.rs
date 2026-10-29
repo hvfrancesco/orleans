@@ -2952,7 +2952,10 @@ impl OrleansApp {
         self.transform_dx = 0.0;
         self.transform_dy = 0.0;
         let count = self.selected_shapes.len();
-        self.set_status(format!("moved {count} shape(s)"), false);
+        self.set_status(
+            format!("{} {} {}", tr!("moved"), count, tr!("shape(s)")),
+            false,
+        );
     }
 
     fn ensure_raster_textures(&mut self, ctx: &egui::Context) {
@@ -3036,8 +3039,12 @@ impl OrleansApp {
         let count = self.selected_shapes.len();
         self.set_status(
             format!(
-                "moved {count} shape(s): {} at X {:.3}, Y {:.3}",
+                "{} {} {}: {} {} X {:.3}, Y {:.3}",
+                tr!("moved"),
+                count,
+                tr!("shape(s)"),
                 self.move_anchor.label(),
+                tr!("at"),
                 self.move_to_x,
                 self.move_to_y
             ),
@@ -3059,7 +3066,15 @@ impl OrleansApp {
         self.apply_affine_to_selection(affine);
         self.transform_scale = 1.0;
         let count = self.selected_shapes.len();
-        self.set_status(format!("scaled {count} shape(s) ×{factor:.2}"), false);
+        self.set_status(
+            format!(
+                "{} {} {} ×{factor:.2}",
+                tr!("scaled"),
+                count,
+                tr!("shape(s)")
+            ),
+            false,
+        );
     }
 
     fn rotate_selection(&mut self) {
@@ -3076,7 +3091,15 @@ impl OrleansApp {
         self.apply_affine_to_selection(affine);
         self.transform_angle = 0.0;
         let count = self.selected_shapes.len();
-        self.set_status(format!("rotated {count} shape(s) by {degrees:.1}°"), false);
+        self.set_status(
+            format!(
+                "{} {} {} {degrees:.1}°",
+                tr!("rotated"),
+                count,
+                tr!("shape(s)")
+            ),
+            false,
+        );
     }
 
     fn selection_handle_at(&self, screen: Pos2, area: Rect) -> Option<Handle> {

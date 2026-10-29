@@ -324,5 +324,10 @@
   "Right": "Rechts",
   "Bottom left": "Unten links",
   "Bottom": "Unten",
-  "Bottom right": "Unten rechts"
+  "Bottom right": "Unten rechts",
+  "moved": "verschoben",
+  "scaled": "skaliert",
+  "rotated": "gedreht",
+  "shape(s)": "Form(en)",
+  "at": "bei"
 }

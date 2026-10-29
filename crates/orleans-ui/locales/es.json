@@ -324,5 +324,10 @@
   "Right": "Derecha",
   "Bottom left": "Abajo izquierda",
   "Bottom": "Abajo",
-  "Bottom right": "Abajo derecha"
+  "Bottom right": "Abajo derecha",
+  "moved": "movido",
+  "scaled": "escalado",
+  "rotated": "girado",
+  "shape(s)": "forma(s)",
+  "at": "en"
 }

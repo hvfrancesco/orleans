@@ -324,5 +324,10 @@
   "Right": "右",
   "Bottom left": "左下",
   "Bottom": "下",
-  "Bottom right": "右下"
+  "Bottom right": "右下",
+  "moved": "已移动",
+  "scaled": "已缩放",
+  "rotated": "已旋转",
+  "shape(s)": "个形状",
+  "at": "位置"
 }

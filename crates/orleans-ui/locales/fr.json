@@ -324,5 +324,10 @@
   "Right": "Droite",
   "Bottom left": "En bas à gauche",
   "Bottom": "En bas",
-  "Bottom right": "En bas à droite"
+  "Bottom right": "En bas à droite",
+  "moved": "déplacé",
+  "scaled": "mis à l'échelle",
+  "rotated": "pivoté",
+  "shape(s)": "forme(s)",
+  "at": "à"
 }

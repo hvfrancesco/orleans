@@ -494,6 +494,11 @@ fn italian(text: &str) -> Option<&'static str> {
         "Bottom left" => "In basso a sinistra",
         "Bottom" => "In basso",
         "Bottom right" => "In basso a destra",
+        "moved" => "spostato",
+        "scaled" => "scalato",
+        "rotated" => "ruotato",
+        "shape(s)" => "forma/e",
+        "at" => "a",
         _ => return None,
     })
 }
