@@ -499,6 +499,28 @@ fn italian(text: &str) -> Option<&'static str> {
         "rotated" => "ruotato",
         "shape(s)" => "forma/e",
         "at" => "a",
+        "Boolean" => "Booleana",
+        "Union" => "Unione",
+        "Subtract" => "Sottrai",
+        "Intersect" => "Interseca",
+        "Combine the selected closed shapes" => "Combina le forme chiuse selezionate",
+        "Subtract the other selected shapes from the first" => "Sottrai le altre forme selezionate dalla prima",
+        "Keep only the area shared by the selected shapes" => "Mantieni solo l'area comune alle forme selezionate",
+        "Apply offset" => "Applica offset",
+        "Positive shrinks closed contours; negative expands them" => {
+            "Valori positivi restringono i contorni chiusi; quelli negativi li espandono"
+        }
+        "Offset the selected closed shapes" => "Applica un offset alle forme chiuse selezionate",
+        "select closed shapes for a boolean operation" => "seleziona forme chiuse per un'operazione booleana",
+        "select at least two closed shapes" => "seleziona almeno due forme chiuse",
+        "boolean operation produced no geometry" => "l'operazione booleana non ha prodotto geometria",
+        "union complete" => "unione completata",
+        "subtraction complete" => "sottrazione completata",
+        "intersection complete" => "intersezione completata",
+        "select closed shapes to offset" => "seleziona forme chiuse da offsettare",
+        "offset distance must be non-zero" => "la distanza dell'offset deve essere diversa da zero",
+        "offset produced no geometry" => "l'offset non ha prodotto geometria",
+        "offset complete" => "offset completato",
         _ => return None,
     })
 }

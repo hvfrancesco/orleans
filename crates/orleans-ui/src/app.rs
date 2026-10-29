@@ -12,8 +12,8 @@ use orleans_core::{
 };
 use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
 use orleans_geom::{
-    flatten_path, hatch_contours, nearest_along_closed, offset_region, point_at_fraction,
-    point_in_polygon, tab_span_polylines, HatchOptions,
+    difference, flatten_path, hatch_contours, intersection, nearest_along_closed, offset_region,
+    point_at_fraction, point_in_polygon, tab_span_polylines, union, HatchOptions,
 };
 use orleans_import::{
     import_dxf, import_image, import_pdf, import_svg, pdf_page_count, ImportOptions,
@@ -598,6 +598,13 @@ enum LinkState {
     Connected,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BooleanOp {
+    Union,
+    Difference,
+    Intersection,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     Open,
@@ -643,6 +650,7 @@ pub struct OrleansApp {
     array_spacing_y: f64,
     move_to_x: f64,
     move_to_y: f64,
+    offset_distance: f64,
     move_sync: Option<(BTreeSet<ShapeRef>, SelectionAnchor, Option<[u64; 2]>)>,
     active_handle: Option<ActiveHandle>,
     selected_raster: Option<usize>,
@@ -739,6 +747,7 @@ impl OrleansApp {
             array_spacing_y: 10.0,
             move_to_x: 0.0,
             move_to_y: 0.0,
+            offset_distance: 0.5,
             move_sync: None,
             active_handle: None,
             selected_raster: None,
@@ -2277,6 +2286,152 @@ impl OrleansApp {
 
     /// Copy the selected shapes at each offset and select the copies. Groups
     /// are copied once per offset, preserving their relative membership.
+    fn selected_ring_groups(&self) -> Vec<(ShapeRef, Vec<Vec<Point>>)> {
+        let mut groups = Vec::new();
+        for selected in &self.selected_shapes {
+            let Some(shape) = self.shape_by_ref(selected) else {
+                continue;
+            };
+            let rings: Vec<Vec<Point>> = flatten_path(&shape.path, DISPLAY_TOLERANCE)
+                .into_iter()
+                .filter(|contour| contour.closed && contour.points.len() >= 3)
+                .map(|contour| contour.points)
+                .collect();
+            if !rings.is_empty() {
+                groups.push((selected.clone(), rings));
+            }
+        }
+        groups
+    }
+
+    fn apply_boolean(&mut self, operation: BooleanOp) {
+        let groups = self.selected_ring_groups();
+        if groups.is_empty() {
+            self.set_status("select closed shapes for a boolean operation", true);
+            return;
+        }
+        if operation != BooleanOp::Union && groups.len() < 2 {
+            self.set_status("select at least two closed shapes", true);
+            return;
+        }
+        let all_rings: Vec<Vec<Point>> = groups
+            .iter()
+            .flat_map(|(_, rings)| rings.iter().cloned())
+            .collect();
+        let (target, result) = match operation {
+            BooleanOp::Union => (groups[0].0.clone(), union(&all_rings)),
+            BooleanOp::Difference => {
+                let clip: Vec<Vec<Point>> = groups[1..]
+                    .iter()
+                    .flat_map(|(_, rings)| rings.iter().cloned())
+                    .collect();
+                (groups[0].0.clone(), difference(&groups[0].1, &clip))
+            }
+            BooleanOp::Intersection => {
+                let mut result = groups[0].1.clone();
+                for (_, rings) in &groups[1..] {
+                    result = intersection(&result, rings);
+                    if result.is_empty() {
+                        break;
+                    }
+                }
+                (groups[0].0.clone(), result)
+            }
+        };
+        if result.is_empty() {
+            self.set_status("boolean operation produced no geometry", true);
+            return;
+        }
+        let status = match operation {
+            BooleanOp::Union => "union complete",
+            BooleanOp::Difference => "subtraction complete",
+            BooleanOp::Intersection => "intersection complete",
+        };
+        self.replace_selection_with_rings(target.layer, &result, "boolean", status);
+    }
+
+    fn offset_selection(&mut self) {
+        let groups = self.selected_ring_groups();
+        if groups.is_empty() {
+            self.set_status("select closed shapes to offset", true);
+            return;
+        }
+        if !self.offset_distance.is_finite() || self.offset_distance.abs() < 1e-6 {
+            self.set_status("offset distance must be non-zero", true);
+            return;
+        }
+        let rings: Vec<Vec<Point>> = groups
+            .iter()
+            .flat_map(|(_, rings)| rings.iter().cloned())
+            .collect();
+        let result = offset_region(&rings, self.offset_distance, 4.0);
+        if result.is_empty() {
+            self.set_status("offset produced no geometry", true);
+            return;
+        }
+        self.replace_selection_with_rings(groups[0].0.layer, &result, "offset", "offset complete");
+    }
+
+    fn replace_selection_with_rings(
+        &mut self,
+        target_layer: usize,
+        rings: &[Vec<Point>],
+        id_base: &str,
+        status: &str,
+    ) {
+        let refs = self.selected_shapes.clone();
+        self.push_structure_undo();
+        for source in &refs {
+            if let Some(layer) = self
+                .doc
+                .layers
+                .iter_mut()
+                .find(|layer| layer.index == source.layer)
+            {
+                layer.shapes.retain(|shape| shape.id != source.shape);
+            }
+            self.remove_manual_tabs(source.layer, &source.shape);
+        }
+        for group in &mut self.groups {
+            group.members.retain(|member| !refs.contains(member));
+        }
+        self.groups.retain(|group| !group.members.is_empty());
+        let Some(position) = self
+            .doc
+            .layers
+            .iter()
+            .position(|layer| layer.index == target_layer)
+        else {
+            return;
+        };
+        let mut used = self.doc.layers[position]
+            .shapes
+            .iter()
+            .map(|shape| shape.id.clone())
+            .collect::<BTreeSet<_>>();
+        let id = unique_shape_id(id_base, &mut used);
+        let path = rings_to_path(rings);
+        self.doc.layers[position]
+            .shapes
+            .push(Shape::new(id.clone(), path, true));
+        let new_ref = ShapeRef {
+            layer: target_layer,
+            shape: id,
+        };
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.selected_shapes = std::iter::once(new_ref).collect();
+        self.selected_layer = Some(target_layer);
+        self.selected_raster = None;
+        self.selected_nodes.clear();
+        self.node_edit = None;
+        self.node_drag = None;
+        self.tab_edit_layer = None;
+        self.dragging_shape = false;
+        self.active_handle = None;
+        self.dirty = true;
+        self.set_status(status, false);
+    }
+
     fn duplicate_selected(&mut self, offsets: &[(f64, f64)]) {
         if self.selected_shapes.is_empty() {
             self.set_status("select objects to duplicate", true);
@@ -5811,6 +5966,58 @@ impl OrleansApp {
                             );
                         }
                     });
+                    let mut boolean_action = None;
+                    let mut offset_action = false;
+                    ui.horizontal(|ui| {
+                        ui.label(tr!("Boolean"));
+                        let can_boolean = selected_count >= 2;
+                        if ui
+                            .add_enabled(can_boolean, egui::Button::new(tr!("Union")))
+                            .on_hover_text(tr!("Combine the selected closed shapes"))
+                            .clicked()
+                        {
+                            boolean_action = Some(BooleanOp::Union);
+                        }
+                        if ui
+                            .add_enabled(can_boolean, egui::Button::new(tr!("Subtract")))
+                            .on_hover_text(tr!("Subtract the other selected shapes from the first"))
+                            .clicked()
+                        {
+                            boolean_action = Some(BooleanOp::Difference);
+                        }
+                        if ui
+                            .add_enabled(can_boolean, egui::Button::new(tr!("Intersect")))
+                            .on_hover_text(tr!("Keep only the area shared by the selected shapes"))
+                            .clicked()
+                        {
+                            boolean_action = Some(BooleanOp::Intersection);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(tr!("Offset"));
+                        ui.add(
+                            egui::DragValue::new(&mut self.offset_distance)
+                                .speed(0.05)
+                                .range(-100.0..=100.0)
+                                .suffix(" mm"),
+                        )
+                        .on_hover_text(tr!(
+                            "Positive shrinks closed contours; negative expands them"
+                        ));
+                        if ui
+                            .button(tr!("Apply offset"))
+                            .on_hover_text(tr!("Offset the selected closed shapes"))
+                            .clicked()
+                        {
+                            offset_action = true;
+                        }
+                    });
+                    if let Some(operation) = boolean_action {
+                        self.apply_boolean(operation);
+                    }
+                    if offset_action {
+                        self.offset_selection();
+                    }
                     if units.len() >= 2 {
                         ui.horizontal(|ui| {
                             ui.label(tr!("Align"));
@@ -7398,6 +7605,21 @@ fn distance_to_contour(contour: &crate::preview::PreviewContour, point: Point) -
         ));
     }
     best
+}
+
+fn rings_to_path(rings: &[Vec<Point>]) -> kurbo::BezPath {
+    let mut path = kurbo::BezPath::new();
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        path.move_to(ring[0]);
+        for point in &ring[1..] {
+            path.line_to(*point);
+        }
+        path.close_path();
+    }
+    path
 }
 
 fn world_rect(a: Point, b: Point) -> kurbo::Rect {

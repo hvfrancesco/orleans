@@ -21,7 +21,8 @@ was decompiled or copied.
 | Image import (PNG/JPEG/BMP) | ✅ |
 | Colours → layers, per-layer speed/power/passes | ✅ |
 | Kerf compensation via Clipper2 (outer shrinks, holes grow) | ✅ |
-| Boolean ops (union / difference / intersection) | ✅ |
+| Boolean ops (union / difference / intersection) from the selection panel | ✅ |
+| Offset/inset selected closed shapes | ✅ |
 | Inside-out ordering + nearest-neighbour travel optimisation | ✅ |
 | Multi-pass cutting | ✅ |
 | Fill/hatch layers (angle, spacing, overlap, alternate, cross-hatch, offset, outline) | ✅ |
@@ -130,7 +131,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 * drag on empty canvas from left to right to select fully enclosed shapes,
   or right to left to select intersecting shapes. Hold Ctrl/Shift to add to
   the selection. In node editing the same window selects nodes. The overlay is
-  blue for contained selection and amber for crossing selection;
+  blue for contained selection and amber for crossing selection. With two or
+  more closed shapes selected, **Union**, **Subtract** and **Intersect** appear
+  in the Selection panel. Subtract removes the other selected shapes from the
+  first. **Offset** applies a positive inset or negative outset in millimetres;
 * the **theme** dropdown in the toolbar switches between dark and light
   interfaces. The canvas background, grid, page, bed, travel, selection
   handles and node markers change with it. The choice applies immediately and
@@ -480,6 +484,8 @@ concept of a line and some bridges emit negotiation on connect.
   outlined; raster images, clip paths, gradients, patterns, transparency groups
   and annotations are skipped. Illustrator files must be saved with PDF
   compatibility. Imported paths are not linked to their source file.
+* Boolean and offset results are flattened polylines; source curves are not
+  reconstructed after the operation.
 * DXF import covers ASCII files and the listed entities only. `HATCH`,
   dimensions, meshes, binary DXF and block attributes are skipped. Imported
   vector layers are self-contained: they are not linked to their source file,
