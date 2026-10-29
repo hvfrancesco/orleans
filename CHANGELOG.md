@@ -27,6 +27,7 @@ First stable release.
 - Duplicate, rectangular arrays, undo/redo and Inkscape-compatible SVG clipboard.
 - Raster placement, rotation, cropping and engraving preview.
 - Six interface languages: English, Italian, French, Spanish, German and Chinese.
+- Help > About dialog with version, author, license and icon attribution.
 
 ### Machine
 

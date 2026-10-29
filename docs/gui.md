@@ -31,6 +31,9 @@ Deutsch and 简体中文. The choice is saved in the user configuration director
 restored at startup. A system CJK fallback font is loaded at startup so Chinese
 text is readable before switching languages.
 
+The **Help** menu contains **About orleans**, which shows the running version,
+author, license and icon attribution.
+
 ## Layers
 
 Every SVG colour becomes a layer when a design is opened. The left panel is a

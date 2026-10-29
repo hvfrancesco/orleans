@@ -707,6 +707,7 @@ pub struct OrleansApp {
     job_done: usize,
     job_total: usize,
     confirm_send: bool,
+    about_open: bool,
     jog_step: f64,
     jog_feed: f64,
     jog_pending_until: Option<Instant>,
@@ -805,6 +806,7 @@ impl OrleansApp {
             job_done: 0,
             job_total: 0,
             confirm_send: false,
+            about_open: false,
             jog_step: 1.0,
             jog_feed: 1000.0,
             jog_pending_until: None,
@@ -5148,6 +5150,47 @@ impl OrleansApp {
             });
     }
 
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        let mut close = false;
+        egui::Window::new(tr!("About orleans"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("orleans");
+                    ui.label(format!("{} {}", tr!("Version"), env!("CARGO_PKG_VERSION")));
+                    ui.label(tr!("Open CAM for laser cutters"));
+                });
+                ui.separator();
+                ui.label(format!("{}: Francesco Fantoni", tr!("Author")));
+                ui.label(format!("{}: MIT OR Apache-2.0", tr!("License")));
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}:", tr!("Icons")));
+                    ui.hyperlink_to(
+                        "Phosphor Icons (MIT / Apache-2.0)",
+                        "https://phosphoricons.com/",
+                    );
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Copyright © 2026 Francesco Fantoni")
+                        .small()
+                        .weak(),
+                );
+                ui.add_space(4.0);
+                if ui.button(tr!("Close")).clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.about_open = false;
+        }
+    }
+
     fn export(&mut self) {
         if self.doc.is_empty() {
             self.status = Status::error("nothing to export");
@@ -5288,6 +5331,12 @@ impl OrleansApp {
                         .map(|path| path.display().to_string())
                         .unwrap_or_else(|| tr!("no file").to_owned());
                     ui.label(RichText::new(name).weak());
+                    ui.menu_button(tr!("Help"), |ui| {
+                        if ui.button(tr!("About orleans")).clicked() {
+                            self.about_open = true;
+                            ui.close();
+                        }
+                    });
                 });
             });
             ui.add_space(4.0);
@@ -8293,6 +8342,7 @@ impl eframe::App for OrleansApp {
         self.send_dialog(&ctx);
         self.settings_window(&ctx);
         self.pdf_page_dialog(&ctx);
+        self.about_window(&ctx);
     }
 }
 
