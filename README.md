@@ -128,6 +128,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 
 * wheel to zoom at the cursor, right/middle-drag to pan, `F` or double-click to
   fit;
+* compact tools use vector icons with localized tooltips: fit, undo/redo, layer
+  ordering/delete, grouping, alignment/distribution, duplicate/delete and
+  Boolean operations. Primary and safety-sensitive actions remain text;
 * drag on empty canvas from left to right to select fully enclosed shapes,
   or right to left to select intersecting shapes. Hold Ctrl/Shift to add to
   the selection. In node editing the same window selects nodes. The overlay is

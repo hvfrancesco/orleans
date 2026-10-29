@@ -23,6 +23,7 @@ use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 
 use crate::history::{self, JobHistory, JobKind, JobOutcome, JobRecord};
 use crate::i18n::{self, Language};
+use crate::icons::{self, Icon};
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
@@ -5158,20 +5159,28 @@ impl OrleansApp {
                 {
                     *action = Some(Action::Reload);
                 }
-                if ui.button(tr!("Fit")).clicked() {
+                if icons::button(ui, Icon::Fit, 26.0, tr!("Fit"), true).clicked() {
                     *action = Some(Action::Fit);
                 }
-                if ui
-                    .add_enabled(!self.undo_stack.is_empty(), egui::Button::new(tr!("Undo")))
-                    .on_hover_text(tr!("Undo last edit (Ctrl+Z)"))
-                    .clicked()
+                if icons::button(
+                    ui,
+                    Icon::Undo,
+                    26.0,
+                    tr!("Undo last edit (Ctrl+Z)"),
+                    !self.undo_stack.is_empty(),
+                )
+                .clicked()
                 {
                     *action = Some(Action::Undo);
                 }
-                if ui
-                    .add_enabled(!self.redo_stack.is_empty(), egui::Button::new(tr!("Redo")))
-                    .on_hover_text(tr!("Redo last undone edit (Ctrl+Shift+Z)"))
-                    .clicked()
+                if icons::button(
+                    ui,
+                    Icon::Redo,
+                    26.0,
+                    tr!("Redo last undone edit (Ctrl+Shift+Z)"),
+                    !self.redo_stack.is_empty(),
+                )
+                .clicked()
                 {
                     *action = Some(Action::Redo);
                 }
@@ -5878,18 +5887,30 @@ impl OrleansApp {
                             }
                         }
                         ui.horizontal(|ui| {
-                            move_up = ui
-                                .add_enabled(pos > 0, egui::Button::new(tr!("Up")))
-                                .on_hover_text(tr!("Cut earlier"))
-                                .clicked();
-                            move_down = ui
-                                .add_enabled(pos + 1 < layer_count, egui::Button::new(tr!("Down")))
-                                .on_hover_text(tr!("Cut later"))
-                                .clicked();
-                            delete_layer = ui
-                                .add_enabled(layer.is_empty(), egui::Button::new(tr!("Delete")))
-                                .on_hover_text(tr!("Delete this empty layer"))
-                                .clicked();
+                            move_up = icons::button(
+                                ui,
+                                Icon::Up,
+                                22.0,
+                                tr!("Cut earlier"),
+                                pos > 0,
+                            )
+                            .clicked();
+                            move_down = icons::button(
+                                ui,
+                                Icon::Down,
+                                22.0,
+                                tr!("Cut later"),
+                                pos + 1 < layer_count,
+                            )
+                            .clicked();
+                            delete_layer = icons::button(
+                                ui,
+                                Icon::Delete,
+                                22.0,
+                                tr!("Delete this empty layer"),
+                                layer.is_empty(),
+                            )
+                            .clicked();
                             ui.label(RichText::new(tr!("cut order")).small().weak());
                         });
                     }
@@ -5954,17 +5975,25 @@ impl OrleansApp {
                             .any(|member| self.selected_shapes.contains(member))
                     });
                     ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(selected_count >= 2, egui::Button::new(tr!("Group")))
-                            .on_hover_text(tr!("Select and transform these shapes together"))
-                            .clicked()
+                        if icons::button(
+                            ui,
+                            Icon::Group,
+                            24.0,
+                            tr!("Select and transform these shapes together"),
+                            selected_count >= 2,
+                        )
+                        .clicked()
                         {
                             self.group_selection();
                         }
-                        if ui
-                            .add_enabled(has_group, egui::Button::new(tr!("Ungroup")))
-                            .on_hover_text(tr!("Remove the groups these shapes belong to"))
-                            .clicked()
+                        if icons::button(
+                            ui,
+                            Icon::Ungroup,
+                            24.0,
+                            tr!("Remove the groups these shapes belong to"),
+                            has_group,
+                        )
+                        .clicked()
                         {
                             self.ungroup_selection();
                         }
@@ -5981,24 +6010,36 @@ impl OrleansApp {
                     ui.horizontal(|ui| {
                         ui.label(tr!("Boolean"));
                         let can_boolean = selected_count >= 2;
-                        if ui
-                            .add_enabled(can_boolean, egui::Button::new(tr!("Union")))
-                            .on_hover_text(tr!("Combine the selected closed shapes"))
-                            .clicked()
+                        if icons::button(
+                            ui,
+                            Icon::Union,
+                            23.0,
+                            tr!("Combine the selected closed shapes"),
+                            can_boolean,
+                        )
+                        .clicked()
                         {
                             boolean_action = Some(BooleanOp::Union);
                         }
-                        if ui
-                            .add_enabled(can_boolean, egui::Button::new(tr!("Subtract")))
-                            .on_hover_text(tr!("Subtract the other selected shapes from the first"))
-                            .clicked()
+                        if icons::button(
+                            ui,
+                            Icon::Subtract,
+                            23.0,
+                            tr!("Subtract the other selected shapes from the first"),
+                            can_boolean,
+                        )
+                        .clicked()
                         {
                             boolean_action = Some(BooleanOp::Difference);
                         }
-                        if ui
-                            .add_enabled(can_boolean, egui::Button::new(tr!("Intersect")))
-                            .on_hover_text(tr!("Keep only the area shared by the selected shapes"))
-                            .clicked()
+                        if icons::button(
+                            ui,
+                            Icon::Intersect,
+                            23.0,
+                            tr!("Keep only the area shared by the selected shapes"),
+                            can_boolean,
+                        )
+                        .clicked()
                         {
                             boolean_action = Some(BooleanOp::Intersection);
                         }
@@ -6031,46 +6072,22 @@ impl OrleansApp {
                     if units.len() >= 2 {
                         ui.horizontal(|ui| {
                             ui.label(tr!("Align"));
-                            if ui
-                                .small_button("L")
-                                .on_hover_text(tr!("Align left edges"))
-                                .clicked()
-                            {
+                            if icons::button(ui, Icon::AlignLeft, 23.0, tr!("Align left edges"), true).clicked() {
                                 self.align_selection(AlignAxis::Horizontal, AlignEdge::Start);
                             }
-                            if ui
-                                .small_button("C")
-                                .on_hover_text(tr!("Align horizontal centres"))
-                                .clicked()
-                            {
+                            if icons::button(ui, Icon::AlignCenterH, 23.0, tr!("Align horizontal centres"), true).clicked() {
                                 self.align_selection(AlignAxis::Horizontal, AlignEdge::Center);
                             }
-                            if ui
-                                .small_button("R")
-                                .on_hover_text(tr!("Align right edges"))
-                                .clicked()
-                            {
+                            if icons::button(ui, Icon::AlignRight, 23.0, tr!("Align right edges"), true).clicked() {
                                 self.align_selection(AlignAxis::Horizontal, AlignEdge::End);
                             }
-                            if ui
-                                .small_button("T")
-                                .on_hover_text(tr!("Align top edges"))
-                                .clicked()
-                            {
+                            if icons::button(ui, Icon::AlignTop, 23.0, tr!("Align top edges"), true).clicked() {
                                 self.align_selection(AlignAxis::Vertical, AlignEdge::End);
                             }
-                            if ui
-                                .small_button("M")
-                                .on_hover_text(tr!("Align vertical centres"))
-                                .clicked()
-                            {
+                            if icons::button(ui, Icon::AlignCenterV, 23.0, tr!("Align vertical centres"), true).clicked() {
                                 self.align_selection(AlignAxis::Vertical, AlignEdge::Center);
                             }
-                            if ui
-                                .small_button("B")
-                                .on_hover_text(tr!("Align bottom edges"))
-                                .clicked()
-                            {
+                            if icons::button(ui, Icon::AlignBottom, 23.0, tr!("Align bottom edges"), true).clicked() {
                                 self.align_selection(AlignAxis::Vertical, AlignEdge::Start);
                             }
                         });
@@ -6078,17 +6095,25 @@ impl OrleansApp {
                     if units.len() >= 3 {
                         ui.horizontal(|ui| {
                             ui.label(tr!("Distribute"));
-                            if ui
-                                .small_button("H")
-                                .on_hover_text(tr!("Space centres evenly left to right"))
-                                .clicked()
+                            if icons::button(
+                                ui,
+                                Icon::DistributeH,
+                                23.0,
+                                tr!("Space centres evenly left to right"),
+                                true,
+                            )
+                            .clicked()
                             {
                                 self.distribute_selection(AlignAxis::Horizontal);
                             }
-                            if ui
-                                .small_button("V")
-                                .on_hover_text(tr!("Space centres evenly bottom to top"))
-                                .clicked()
+                            if icons::button(
+                                ui,
+                                Icon::DistributeV,
+                                23.0,
+                                tr!("Space centres evenly bottom to top"),
+                                true,
+                            )
+                            .clicked()
                             {
                                 self.distribute_selection(AlignAxis::Vertical);
                             }
@@ -6156,10 +6181,14 @@ impl OrleansApp {
                                 self.transfer_selection(target, true);
                             }
                         }
-                        if ui
-                            .button(tr!("Delete"))
-                            .on_hover_text(tr!("Delete the selected objects (Del)"))
-                            .clicked()
+                        if icons::button(
+                            ui,
+                            Icon::Delete,
+                            23.0,
+                            tr!("Delete the selected objects (Del)"),
+                            true,
+                        )
+                        .clicked()
                         {
                             self.delete_selected_objects();
                         }
@@ -6176,10 +6205,14 @@ impl OrleansApp {
                         }
                     });
                     ui.horizontal(|ui| {
-                        if ui
-                            .button(tr!("Duplicate"))
-                            .on_hover_text(tr!("Duplicate the selected objects in place (Ctrl+D)"))
-                            .clicked()
+                        if icons::button(
+                            ui,
+                            Icon::Duplicate,
+                            24.0,
+                            tr!("Duplicate the selected objects in place (Ctrl+D)"),
+                            true,
+                        )
+                        .clicked()
                         {
                             self.duplicate_selected(&[(0.0, 0.0)]);
                         }

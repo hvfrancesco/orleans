@@ -8,6 +8,7 @@ mod app;
 mod cjk;
 mod history;
 mod i18n;
+mod icons;
 mod machine;
 mod nodes;
 mod preview;
