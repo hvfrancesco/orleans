@@ -185,5 +185,8 @@
   "shown": "sichtbar",
   "line": "Linie",
   "fill": "Füllen",
-  "raster": "Raster"
+  "raster": "Raster",
+  "h": "Std.",
+  "min": "Min.",
+  "s": "Sek."
 }

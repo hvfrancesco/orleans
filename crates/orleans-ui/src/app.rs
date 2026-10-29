@@ -4418,7 +4418,7 @@ impl OrleansApp {
                         self.job.cuts().count(),
                         tr!("cuts"),
                         self.job.stats.cut_mm,
-                        format_duration(self.job.stats.seconds)
+                        format_duration_localized(self.job.stats.seconds)
                     ))
                     .small()
                     .weak(),
@@ -4473,14 +4473,14 @@ impl OrleansApp {
                                         format!(
                                             "{} · {} · {} lines",
                                             history::format_age(job.started),
-                                            format_duration(job.actual_secs),
+                                            format_duration_localized(job.actual_secs),
                                             job.lines_done
                                         )
                                     } else {
                                         format!(
                                             "{} · {} · {:.1} mm · {} cuts",
                                             history::format_age(job.started),
-                                            format_duration(job.actual_secs),
+                                            format_duration_localized(job.actual_secs),
                                             job.cut_mm,
                                             job.cuts
                                         )
@@ -4728,7 +4728,7 @@ impl OrleansApp {
                     tr!("cuts"),
                     self.job.stats.cut_mm,
                     tr!("of cutting"),
-                    format_duration(self.job.stats.seconds)
+                    format_duration_localized(self.job.stats.seconds)
                 ));
                 ui.label(format!(
                     "{} {} · {} {max_power:.0}% · {} {}",
@@ -4790,7 +4790,7 @@ impl OrleansApp {
                     path.display(),
                     self.job.cuts().count(),
                     self.job.stats.cut_mm,
-                    format_duration(self.job.stats.seconds)
+                    format_duration_localized(self.job.stats.seconds)
                 ));
             }
             Err(err) => {
@@ -6077,7 +6077,7 @@ impl OrleansApp {
                         self.job.stats.cut_mm,
                         tr!("travel"),
                         self.job.stats.travel_mm,
-                        format_duration(self.job.stats.seconds)
+                        format_duration_localized(self.job.stats.seconds)
                     ));
                     ui.separator();
                     ui.label(format!("{:.1} px/mm", self.view.zoom));
@@ -7463,6 +7463,30 @@ fn document_summary(
     summary
 }
 
+fn format_duration_localized(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    if total >= 3600 {
+        format!(
+            "{} {} {:02} {}",
+            total / 3600,
+            tr!("h"),
+            (total % 3600) / 60,
+            tr!("min")
+        )
+    } else if total >= 60 {
+        format!(
+            "{} {} {:02} {}",
+            total / 60,
+            tr!("min"),
+            total % 60,
+            tr!("s")
+        )
+    } else {
+        format!("{total} {}", tr!("s"))
+    }
+}
+
+#[cfg(test)]
 fn format_duration(seconds: f64) -> String {
     let total = seconds.max(0.0).round() as u64;
     if total >= 3600 {

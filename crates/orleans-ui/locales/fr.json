@@ -185,5 +185,8 @@
   "shown": "affichés",
   "line": "ligne",
   "fill": "remplissage",
-  "raster": "raster"
+  "raster": "raster",
+  "h": "h",
+  "min": "min",
+  "s": "s"
 }

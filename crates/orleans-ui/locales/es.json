@@ -185,5 +185,8 @@
   "shown": "visibles",
   "line": "línea",
   "fill": "relleno",
-  "raster": "raster"
+  "raster": "raster",
+  "h": "h",
+  "min": "min",
+  "s": "s"
 }

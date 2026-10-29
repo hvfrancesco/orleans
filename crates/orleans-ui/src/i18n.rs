@@ -323,6 +323,9 @@ fn italian(text: &str) -> Option<&'static str> {
         }
         "image" => "immagine",
         "images" => "immagini",
+        "h" => "h",
+        "min" => "min",
+        "s" => "s",
         "layers" => "livelli",
         "shape" => "forma",
         "shapes" => "forme",
