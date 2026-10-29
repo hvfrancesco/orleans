@@ -45,6 +45,7 @@ was decompiled or copied.
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
+| Persistent job history (cut/frame outcome, duration, stats) | ✅ |
 | GUI laser-off framing pass | ✅ |
 | GUI jog (X/Y) and work zero: temporary `G92` or stored `G54` | ✅ |
 | Controller settings editor (`$32`, `$30`, `$22`, raw `$$`) | ✅ |
@@ -53,7 +54,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-143 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+146 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -238,6 +239,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   because a feed hold at zero velocity then switches the laser off. If you
   switch a job to M3, Pause is disabled and you must use Stop. A framing pass
   can always be paused because it holds `M5`;
+* completed, stopped and failed cut/framing runs are added to **Job history**
+  in the streaming panel with time, outcome, duration, cut length and line
+  count. History is persisted at
+  `$XDG_DATA_HOME/orleans/job-history.json` (or
+  `~/.local/share/orleans/job-history.json`) and can be cleared from the panel;
 * **Frame** traces the job bounds at 3000 mm/min with the laser off, so you can
   check placement before committing to a cut.
 
@@ -469,10 +475,9 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **Finish the editor** — job history for the streaming panel.
-2. **More importers** — PDF, AI; LBRN2 read/write from community specs.
-3. **Second driver** — Marlin, then Ruida over UDP.
-4. **Job control extras** — feed/power overrides, rotary setup.
+1. **More importers** — PDF, AI; LBRN2 read/write from community specs.
+2. **Second driver** — Marlin, then Ruida over UDP.
+3. **Job control extras** — feed/power overrides, rotary setup.
 
 ## License
 

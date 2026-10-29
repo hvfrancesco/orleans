@@ -17,6 +17,7 @@ use orleans_geom::{
 use orleans_import::{import_dxf, import_image, import_svg, ImportOptions, DEFAULT_RASTER_DPI};
 use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 
+use crate::history::{self, JobHistory, JobKind, JobOutcome, JobRecord};
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
@@ -499,6 +500,22 @@ enum RasterDrag {
     },
 }
 
+#[derive(Clone, Debug)]
+struct PendingJob {
+    started: Instant,
+    started_unix: u64,
+    label: String,
+    source: Option<String>,
+    kind: JobKind,
+    cuts: usize,
+    layers: usize,
+    cut_mm: f64,
+    travel_mm: f64,
+    estimated_secs: f64,
+    lines_done: usize,
+    lines_total: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ActiveHandle {
     Scale { anchor: Point, last_distance: f64 },
@@ -609,6 +626,9 @@ pub struct OrleansApp {
     setting_laser: bool,
     setting_max_s: u32,
     setting_homing: bool,
+    job_history: JobHistory,
+    history_path: PathBuf,
+    pending_job: Option<PendingJob>,
 }
 
 impl OrleansApp {
@@ -617,6 +637,8 @@ impl OrleansApp {
         initial: Option<PathBuf>,
         endpoint: Option<String>,
     ) -> Self {
+        let history_path = history::default_path();
+        let job_history = JobHistory::load(&history_path);
         let mut app = Self {
             doc: Document::new(100.0, 100.0),
             preview: Preview::default(),
@@ -694,6 +716,9 @@ impl OrleansApp {
             setting_laser: true,
             setting_max_s: 1000,
             setting_homing: false,
+            job_history,
+            history_path,
+            pending_job: None,
         };
         app.apply_theme(&cc.egui_ctx);
         if let Some(path) = initial {
@@ -1162,6 +1187,77 @@ impl OrleansApp {
         self.job = plan(&self.doc, &self.plan_opts);
     }
 
+    fn history_identity(&self) -> (String, Option<String>) {
+        let source = self.display_path().map(|path| path.display().to_string());
+        let label = source
+            .as_deref()
+            .and_then(|source| std::path::Path::new(source).file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Unsaved design".to_owned());
+        (label, source)
+    }
+
+    fn begin_pending_job(&mut self, kind: JobKind) {
+        let (label, source) = self.history_identity();
+        let (cuts, cut_mm, travel_mm, estimated_secs) = if kind == JobKind::Cut {
+            (
+                self.job.cuts().count(),
+                self.job.stats.cut_mm,
+                self.job.stats.travel_mm,
+                self.job.stats.seconds,
+            )
+        } else {
+            (0, 0.0, 0.0, 0.0)
+        };
+        self.pending_job = Some(PendingJob {
+            started: Instant::now(),
+            started_unix: history::now_unix(),
+            label,
+            source,
+            kind,
+            cuts,
+            layers: self.doc.layers.len(),
+            cut_mm,
+            travel_mm,
+            estimated_secs,
+            lines_done: 0,
+            lines_total: 0,
+        });
+    }
+
+    fn finish_pending_job(&mut self, outcome: JobOutcome, message: Option<String>) {
+        let Some(pending) = self.pending_job.take() else {
+            return;
+        };
+        let record = JobRecord {
+            started: pending.started_unix,
+            finished: history::now_unix(),
+            label: pending.label,
+            kind: pending.kind,
+            outcome,
+            cuts: pending.cuts,
+            layers: pending.layers,
+            cut_mm: pending.cut_mm,
+            travel_mm: pending.travel_mm,
+            estimated_secs: pending.estimated_secs,
+            actual_secs: pending.started.elapsed().as_secs_f64(),
+            lines_done: pending.lines_done,
+            lines_total: pending.lines_total,
+            source: pending.source,
+            message,
+        };
+        self.job_history.push(record);
+        if let Err(err) = self.job_history.save(&self.history_path) {
+            eprintln!("saving job history: {err}");
+        }
+    }
+
+    fn save_history(&self) {
+        if let Err(err) = self.job_history.save(&self.history_path) {
+            eprintln!("saving job history: {err}");
+        }
+    }
+
     fn set_status(&mut self, text: impl Into<String>, error: bool) {
         self.status = if error {
             Status::error(text)
@@ -1202,6 +1298,10 @@ impl OrleansApp {
                     );
                 }
                 MachineEvent::Disconnected(reason) => {
+                    let history_message = reason
+                        .clone()
+                        .unwrap_or_else(|| "connection lost".to_owned());
+                    self.finish_pending_job(JobOutcome::Failed, Some(history_message));
                     self.link = LinkState::Disconnected;
                     self.reconnect_attempt = 0;
                     self.machine_status = None;
@@ -1255,6 +1355,10 @@ impl OrleansApp {
                     self.settings = Some(settings);
                 }
                 MachineEvent::JobStarted(total) => {
+                    if let Some(pending) = &mut self.pending_job {
+                        pending.lines_total = total;
+                        pending.lines_done = 0;
+                    }
                     self.job_running = true;
                     self.job_paused = false;
                     self.job_done = 0;
@@ -1267,10 +1371,19 @@ impl OrleansApp {
                     }
                 }
                 MachineEvent::JobProgress { done, total } => {
+                    if let Some(pending) = &mut self.pending_job {
+                        pending.lines_done = done;
+                        pending.lines_total = total;
+                    }
                     self.job_done = done;
                     self.job_total = total;
                 }
                 MachineEvent::JobDone(acks) => {
+                    if let Some(pending) = &mut self.pending_job {
+                        pending.lines_done = acks;
+                        pending.lines_total = acks.max(pending.lines_total);
+                    }
+                    self.finish_pending_job(JobOutcome::Completed, None);
                     self.job_running = false;
                     self.job_paused = false;
                     self.job_done = acks;
@@ -1283,6 +1396,10 @@ impl OrleansApp {
                     self.frame_job = false;
                 }
                 MachineEvent::JobStopped => {
+                    self.finish_pending_job(
+                        JobOutcome::Stopped,
+                        Some("stopped before completion".to_owned()),
+                    );
                     self.job_running = false;
                     self.job_paused = false;
                     if self.frame_job {
@@ -1296,6 +1413,7 @@ impl OrleansApp {
                     self.frame_job = false;
                 }
                 MachineEvent::JobFailed(reason) => {
+                    self.finish_pending_job(JobOutcome::Failed, Some(reason.clone()));
                     self.job_running = false;
                     self.job_paused = false;
                     if self.frame_job {
@@ -1368,6 +1486,7 @@ impl OrleansApp {
         self.job_uses_m4 = self.gcode_opts.laser_mode == LaserMode::M4;
         let program = gcode::write(&self.job, &self.gcode_opts);
         if self.machine.run(&program) {
+            self.begin_pending_job(JobKind::Cut);
             self.job_running = true;
             self.frame_job = false;
             self.job_paused = false;
@@ -1393,6 +1512,7 @@ impl OrleansApp {
         };
         let program = frame_program(bounds, FRAME_FEED);
         if self.machine.run(&program) {
+            self.begin_pending_job(JobKind::Frame);
             self.job_running = true;
             self.frame_job = true;
             self.job_uses_m4 = false;
@@ -3977,6 +4097,90 @@ impl OrleansApp {
                     .small()
                     .weak(),
                 );
+
+                let mut clear_history = false;
+                egui::CollapsingHeader::new(format!(
+                    "Job history ({})",
+                    self.job_history.jobs.len()
+                ))
+                .id_salt("job-history")
+                .default_open(false)
+                .show(ui, |ui| {
+                    if self.job_history.jobs.is_empty() {
+                        ui.label(
+                            RichText::new("No jobs sent yet. Completed, stopped and framing runs appear here.")
+                                .small()
+                                .weak(),
+                        );
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("job-history-scroll")
+                            .max_height(150.0)
+                            .show(ui, |ui| {
+                                for job in self.job_history.jobs.iter().rev().take(30) {
+                                    let outcome_color = match job.outcome {
+                                        JobOutcome::Completed => Color32::from_rgb(120, 200, 130),
+                                        JobOutcome::Stopped => Color32::from_rgb(230, 180, 80),
+                                        JobOutcome::Failed => Color32::from_rgb(235, 120, 110),
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(job.kind.label()).small().weak(),
+                                        );
+                                        let response = ui.label(RichText::new(&job.label).strong());
+                                        if let Some(source) = &job.source {
+                                            response.on_hover_text(source);
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(job.outcome.label())
+                                                        .color(outcome_color)
+                                                        .small(),
+                                                );
+                                            },
+                                        );
+                                    });
+                                    let details = if job.kind == JobKind::Frame {
+                                        format!(
+                                            "{} · {} · {} lines",
+                                            history::format_age(job.started),
+                                            format_duration(job.actual_secs),
+                                            job.lines_done
+                                        )
+                                    } else {
+                                        format!(
+                                            "{} · {} · {:.1} mm · {} cuts",
+                                            history::format_age(job.started),
+                                            format_duration(job.actual_secs),
+                                            job.cut_mm,
+                                            job.cuts
+                                        )
+                                    };
+                                    let response =
+                                        ui.label(RichText::new(details).small().weak());
+                                    if let Some(message) = &job.message {
+                                        response.on_hover_text(message);
+                                    }
+                                    ui.add_space(2.0);
+                                }
+                            });
+                        if ui.button("Clear history").clicked() {
+                            clear_history = true;
+                        }
+                    }
+                    ui.label(
+                        RichText::new(self.history_path.display().to_string())
+                            .small()
+                            .weak(),
+                    )
+                    .on_hover_text("Persistent job history file");
+                });
+                if clear_history {
+                    self.job_history.jobs.clear();
+                    self.save_history();
+                }
 
                 ui.separator();
                 ui.heading("Control");

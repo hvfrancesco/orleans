@@ -5,6 +5,7 @@
 //! and streams it to a GRBL controller.
 
 mod app;
+mod history;
 mod machine;
 mod nodes;
 mod preview;
