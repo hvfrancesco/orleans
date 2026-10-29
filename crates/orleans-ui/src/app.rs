@@ -4199,7 +4199,7 @@ impl OrleansApp {
                     }
                     LinkState::Reconnecting => {
                         ui.spinner();
-                        ui.label(format!("Reconnecting… ({})", self.reconnect_attempt));
+                        ui.label(format!("{} ({})", tr!("Reconnecting…"), self.reconnect_attempt));
                         if ui.button(tr!("Cancel")).clicked() {
                             self.disconnect_machine();
                         }
@@ -4331,10 +4331,10 @@ impl OrleansApp {
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(can_jog, egui::Button::new(tr!("Set zero (G92)")))
-                        .on_hover_text(
+                        .on_hover_text(tr!(
                             "Temporary work zero at the current position. \
-                             A controller reset clears it.",
-                        )
+                             A controller reset clears it."
+                        ))
                         .clicked()
                         && !self.machine.set_origin()
                     {
@@ -4342,10 +4342,10 @@ impl OrleansApp {
                     }
                     if ui
                         .add_enabled(can_jog, egui::Button::new(tr!("Save zero (G54)")))
-                        .on_hover_text(
+                        .on_hover_text(tr!(
                             "Stored G54 work zero (G10 L20 P1) at the current position. \
-                             Survives a reset on most GRBL builds.",
-                        )
+                             Survives a reset on most GRBL builds."
+                        ))
                         .clicked()
                         && !self.machine.save_origin()
                     {
@@ -4367,9 +4367,9 @@ impl OrleansApp {
                         if ui
                             .add_enabled(!self.job_paused && pause_safe, egui::Button::new(tr!("Pause")))
                             .on_hover_text(if self.frame_job {
-                                "Pause the framing move"
+                                tr!("Pause the framing move")
                             } else {
-                                "Feed hold. Requires M4 dynamic power and $32=1."
+                                tr!("Feed hold. Requires M4 dynamic power and $32=1.")
                             })
                             .clicked()
                         {
@@ -4408,10 +4408,10 @@ impl OrleansApp {
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(can_send, egui::Button::new(send_label))
-                        .on_hover_text(
+                        .on_hover_text(tr!(
                             "Stream the current job. The controller must be idle \
-                             with the laser off.",
-                        )
+                             with the laser off."
+                        ))
                         .clicked()
                     {
                         self.confirm_send = true;
@@ -4547,10 +4547,10 @@ impl OrleansApp {
                 if ui
                     .add_enabled(can_home, egui::Button::new(tr!("Home ($H)")))
                     .on_hover_text(if homing_enabled {
-                        "Move the head to the limit switches. \
-                         Enabled when the controller is idle or in alarm."
+                        tr!("Move the head to the limit switches. \
+                         Enabled when the controller is idle or in alarm.")
                     } else {
-                        "Homing is disabled ($22=0); enable it in Settings."
+                        tr!("Homing is disabled ($22=0); enable it in Settings.")
                     })
                     .clicked()
                 {
@@ -4652,7 +4652,7 @@ impl OrleansApp {
                     egui::Checkbox::new(&mut self.setting_laser, "Laser mode ($32)"),
                 );
                 ui.horizontal(|ui| {
-                    ui.label("$30 max S");
+                    ui.label(tr!("$30 max S"));
                     ui.add_enabled(
                         can_edit,
                         egui::DragValue::new(&mut self.setting_max_s)
@@ -4689,7 +4689,7 @@ impl OrleansApp {
                 }
                 if let Some(settings) = &self.settings {
                     if let Some([w, h]) = settings.bed {
-                        ui.label(format!("Bed / max travel: {w:.1} × {h:.1} mm"));
+                        ui.label(format!("{}: {w:.1} × {h:.1} mm", tr!("Bed / max travel")));
                     }
                     if settings.laser_mode == Some(false) {
                         ui.colored_label(
@@ -5200,9 +5200,9 @@ impl OrleansApp {
                                             .range(36.0..=1200.0)
                                             .suffix(" dpi"),
                                     )
-                                    .on_hover_text(
-                                        "Pixel resolution; changing it scales both dimensions",
-                                    )
+                                    .on_hover_text(tr!(
+                                        "Pixel resolution; changing it scales both dimensions"
+                                    ))
                                     .changed()
                                 {
                                     let dpi = dpi.clamp(1.0, 10_000.0);
@@ -5212,66 +5212,66 @@ impl OrleansApp {
                                 }
                             });
                             ui.horizontal(|ui| {
-                                ui.label("Raster");
+                                ui.label(tr!("Raster"));
                                 egui::ComboBox::from_id_salt("raster-mode")
                                     .selected_text(match raster.mode {
-                                        RasterMode::Threshold => "Threshold",
-                                        RasterMode::Dither => "Dither",
-                                        RasterMode::Atkinson => "Atkinson",
-                                        RasterMode::Bayer => "Bayer",
-                                        RasterMode::Grayscale => "Grayscale",
+                                        RasterMode::Threshold => tr!("Threshold"),
+                                        RasterMode::Dither => tr!("Dither"),
+                                        RasterMode::Atkinson => tr!("Atkinson"),
+                                        RasterMode::Bayer => tr!("Bayer"),
+                                        RasterMode::Grayscale => tr!("Grayscale"),
                                     })
                                     .show_ui(ui, |ui| {
                                         changed |= ui
                                             .selectable_value(
                                                 &mut raster.mode,
                                                 RasterMode::Threshold,
-                                                "Threshold",
+                                                tr!("Threshold"),
                                             )
                                             .changed();
                                         changed |= ui
                                             .selectable_value(
                                                 &mut raster.mode,
                                                 RasterMode::Dither,
-                                                "Dither",
+                                                tr!("Dither"),
                                             )
                                             .changed();
                                         changed |= ui
                                             .selectable_value(
                                                 &mut raster.mode,
                                                 RasterMode::Atkinson,
-                                                "Atkinson",
+                                                tr!("Atkinson"),
                                             )
                                             .changed();
                                         changed |= ui
                                             .selectable_value(
                                                 &mut raster.mode,
                                                 RasterMode::Bayer,
-                                                "Bayer",
+                                                tr!("Bayer"),
                                             )
                                             .changed();
                                         changed |= ui
                                             .selectable_value(
                                                 &mut raster.mode,
                                                 RasterMode::Grayscale,
-                                                "Grayscale",
+                                                tr!("Grayscale"),
                                             )
                                             .changed();
                                     });
                                 if raster.mode != RasterMode::Grayscale {
-                                    ui.label("Threshold");
+                                    ui.label(tr!("Threshold"));
                                     changed |= ui
                                         .add(
                                             egui::DragValue::new(&mut raster.threshold)
                                                 .speed(1.0)
                                                 .range(0..=255),
                                         )
-                                        .on_hover_text("Darkness threshold; lower values burn more")
+                                        .on_hover_text(tr!("Darkness threshold; lower values burn more"))
                                         .changed();
                                 }
                             });
                             ui.horizontal(|ui| {
-                                ui.label("Line interval");
+                                ui.label(tr!("Line interval"));
                                 changed |= ui
                                     .add(
                                         egui::DragValue::new(&mut raster.line_interval)
@@ -5279,7 +5279,7 @@ impl OrleansApp {
                                             .range(0.05..=5.0)
                                             .suffix(" mm"),
                                     )
-                                    .on_hover_text("Distance between raster scan lines")
+                                    .on_hover_text(tr!("Distance between raster scan lines"))
                                     .changed();
                                 ui.label(tr!("Angle"));
                                 changed |= ui
@@ -5289,17 +5289,17 @@ impl OrleansApp {
                                             .range(-180.0..=180.0)
                                             .suffix("°"),
                                     )
-                                    .on_hover_text("Rotate the image around its centre")
+                                    .on_hover_text(tr!("Rotate the image around its centre"))
                                     .changed();
                                 changed |= ui
-                                    .checkbox(&mut raster.invert, "Invert")
-                                    .on_hover_text("Engrave white instead of dark pixels")
+                                    .checkbox(&mut raster.invert, tr!("Invert"))
+                                    .on_hover_text(tr!("Engrave white instead of dark pixels"))
                                     .changed();
                             });
                             ui.horizontal(|ui| {
                                 changed |= ui
-                                    .checkbox(&mut raster.bidirectional, "Alternate rows")
-                                    .on_hover_text("Reverse alternate scan lines to reduce travel")
+                                    .checkbox(&mut raster.bidirectional, tr!("Alternate rows"))
+                                    .on_hover_text(tr!("Reverse alternate scan lines to reduce travel"))
                                     .changed();
                                 ui.label(tr!("Position"));
                                 changed |= ui
@@ -5341,9 +5341,9 @@ impl OrleansApp {
                             let (crop_x, crop_y, crop_w, crop_h) = raster.crop_bounds();
                             let mut crop = (crop_x, crop_y, crop_w, crop_h);
                             ui.horizontal(|ui| {
-                                ui.label("Crop").on_hover_text(
-                                    "Pixel region to engrave; position and physical size stay fixed",
-                                );
+                                ui.label(tr!("Crop")).on_hover_text(tr!(
+                                    "Pixel region to engrave; position and physical size stay fixed"
+                                ));
                                 ui.label("X");
                                 ui.add(
                                     egui::DragValue::new(&mut crop.0)
@@ -5358,7 +5358,7 @@ impl OrleansApp {
                                 );
                                 if ui
                                     .small_button("Full")
-                                    .on_hover_text("Use the whole image")
+                                    .on_hover_text(tr!("Use the whole image"))
                                     .clicked()
                                 {
                                     crop = (0, 0, raster.width, raster.height);
@@ -5416,9 +5416,9 @@ impl OrleansApp {
                                     ui.label(tr!("Tabs"));
                                     changed |= ui
                                         .checkbox(&mut layer.tabs.manual, tr!("Manual"))
-                                        .on_hover_text(
-                                            "Place tabs by clicking closed contours instead of distributing them evenly",
-                                        )
+                                        .on_hover_text(tr!(
+                                            "Place tabs by clicking closed contours instead of distributing them evenly"
+                                        ))
                                         .changed();
                                     if !layer.tabs.manual {
                                         changed |= ui
@@ -5427,9 +5427,9 @@ impl OrleansApp {
                                                     .speed(1.0)
                                                     .range(0..=16),
                                             )
-                                            .on_hover_text(
-                                                "Number of holding tabs per outer contour; 0 disables",
-                                            )
+                                            .on_hover_text(tr!(
+                                                "Number of holding tabs per outer contour; 0 disables"
+                                            ))
                                             .changed();
                                     }
                                     if layer.tabs.manual || layer.tabs.count > 0 {
@@ -5441,12 +5441,12 @@ impl OrleansApp {
                                                     .range(0.5..=20.0)
                                                     .suffix(" mm"),
                                             )
-                                            .on_hover_text("Width of each uncut tab")
+                                            .on_hover_text(tr!("Width of each uncut tab"))
                                             .changed();
                                         if !layer.tabs.manual {
                                             changed |= ui
-                                                .checkbox(&mut layer.tabs.inner, "Holes")
-                                                .on_hover_text("Also place tabs on inner contours")
+                                                .checkbox(&mut layer.tabs.inner, tr!("Holes"))
+                                                .on_hover_text(tr!("Also place tabs on inner contours"))
                                                 .changed();
                                         }
                                     }
@@ -5458,16 +5458,16 @@ impl OrleansApp {
                                         } else {
                                             tr!("Place tabs")
                                         })
-                                        .on_hover_text(
-                                            "Click a closed contour to add a tab; click a tab again to remove it",
-                                        )
+                                        .on_hover_text(tr!(
+                                            "Click a closed contour to add a tab; click a tab again to remove it"
+                                        ))
                                         .clicked()
                                     {
                                         toggle_tab_mode = true;
                                     }
                                     if tab_editing_here {
                                         ui.label(
-                                            RichText::new("click contours to add/remove tabs")
+                                            RichText::new(tr!("click contours to add/remove tabs"))
                                                 .small()
                                                 .weak(),
                                         );
@@ -5487,18 +5487,18 @@ impl OrleansApp {
                                                 .range(0.05..=10.0)
                                                 .suffix(" mm"),
                                         )
-                                        .on_hover_text(
-                                            "Distance between hatch lines or concentric loops",
-                                        )
+                                        .on_hover_text(tr!(
+                                            "Distance between hatch lines or concentric loops"
+                                        ))
                                         .changed();
                                     ui.end_row();
 
                                     ui.label(tr!("Offset"));
                                     changed |= ui
                                         .checkbox(&mut layer.fill.offset, tr!("Concentric loops"))
-                                        .on_hover_text(
-                                            "Fill inward with closed loops instead of scan lines",
-                                        )
+                                        .on_hover_text(tr!(
+                                            "Fill inward with closed loops instead of scan lines"
+                                        ))
                                         .changed();
                                     ui.end_row();
 
@@ -5511,7 +5511,7 @@ impl OrleansApp {
                                                     .range(0.0..=180.0)
                                                     .suffix("°"),
                                             )
-                                            .on_hover_text("0° is horizontal, 90° is vertical")
+                                            .on_hover_text(tr!("0° is horizontal, 90° is vertical"))
                                             .changed();
                                         ui.end_row();
 
@@ -5523,9 +5523,9 @@ impl OrleansApp {
                                                     .range(0.0..=5.0)
                                                     .suffix(" mm"),
                                             )
-                                            .on_hover_text(
-                                                "Extend each hatch line at both ends by this distance",
-                                            )
+                                            .on_hover_text(tr!(
+                                                "Extend each hatch line at both ends by this distance"
+                                            ))
                                             .changed();
                                         ui.end_row();
 
@@ -5535,9 +5535,9 @@ impl OrleansApp {
                                                 &mut layer.fill.alternate,
                                                 tr!("Reverse each line"),
                                             )
-                                            .on_hover_text(
-                                                "Alternate hatch direction to reduce travel",
-                                            )
+                                            .on_hover_text(tr!(
+                                                "Alternate hatch direction to reduce travel"
+                                            ))
                                             .changed();
                                         ui.end_row();
 
@@ -5547,7 +5547,7 @@ impl OrleansApp {
                                                 &mut layer.fill.cross,
                                                 tr!("Second pass at 90°"),
                                             )
-                                            .on_hover_text("Hatch again across the first pass")
+                                            .on_hover_text(tr!("Hatch again across the first pass"))
                                             .changed();
                                         ui.end_row();
                                     }
@@ -5555,9 +5555,9 @@ impl OrleansApp {
                                     ui.label(tr!("Outline"));
                                     changed |= ui
                                         .checkbox(&mut layer.fill.outline, tr!("Cut contour"))
-                                        .on_hover_text(
-                                            "Trace the closed contours after filling them",
-                                        )
+                                        .on_hover_text(tr!(
+                                            "Trace the closed contours after filling them"
+                                        ))
                                         .changed();
                                     ui.end_row();
                                 });
@@ -5566,15 +5566,15 @@ impl OrleansApp {
                         ui.horizontal(|ui| {
                             move_up = ui
                                 .add_enabled(pos > 0, egui::Button::new(tr!("Up")))
-                                .on_hover_text("Cut earlier")
+                                .on_hover_text(tr!("Cut earlier"))
                                 .clicked();
                             move_down = ui
                                 .add_enabled(pos + 1 < layer_count, egui::Button::new(tr!("Down")))
-                                .on_hover_text("Cut later")
+                                .on_hover_text(tr!("Cut later"))
                                 .clicked();
                             delete_layer = ui
                                 .add_enabled(layer.is_empty(), egui::Button::new(tr!("Delete")))
-                                .on_hover_text("Delete this empty layer")
+                                .on_hover_text(tr!("Delete this empty layer"))
                                 .clicked();
                             ui.label(RichText::new(tr!("cut order")).small().weak());
                         });
@@ -5656,7 +5656,7 @@ impl OrleansApp {
                         }
                         if has_group {
                             ui.label(
-                                RichText::new(format!("{} object(s)", units.len()))
+                                RichText::new(format!("{} {}", units.len(), tr!("object(s)")))
                                     .small()
                                     .weak(),
                             );
@@ -5918,13 +5918,13 @@ impl OrleansApp {
                             });
                         if let Some(point) = self.selection_anchor_point() {
                             ui.label(
-                                RichText::new(format!("now {:.3}, {:.3}", point.x, point.y))
+                                RichText::new(format!("{} {:.3}, {:.3}", tr!("now"), point.x, point.y))
                                     .small()
                                     .weak(),
                             )
-                            .on_hover_text(
-                                "Current reference point relative to the job origin (0, 0)",
-                            );
+                            .on_hover_text(tr!(
+                                "Current reference point relative to the job origin (0, 0)"
+                            ));
                         }
                     });
                     ui.horizontal(|ui| {
@@ -5952,25 +5952,25 @@ impl OrleansApp {
                             let editing = self.node_edit.is_some();
                             if ui
                                 .button(if editing { tr!("Done") } else { tr!("Edit nodes") })
-                                .on_hover_text(
-                                    "Edit path anchors and Bézier control points of the selected shape",
-                                )
+                                .on_hover_text(tr!(
+                                    "Edit path anchors and Bézier control points of the selected shape"
+                                ))
                                 .clicked()
                             {
                                 self.toggle_node_edit();
                             }
                             if editing {
-                                ui.label(RichText::new("drag anchors / controls").small().weak());
+                                ui.label(RichText::new(tr!("drag anchors / controls")).small().weak());
                             }
                         });
                         if self.node_edit.is_some() {
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.node_snap, "Snap")
+                                ui.checkbox(&mut self.node_snap, tr!("Snap"))
                                     .on_hover_text(tr!("Snap dragged nodes to the canvas grid"));
-                                ui.checkbox(&mut self.node_snap_geometry, "Geometry")
-                                    .on_hover_text(
-                                        "Snap dragged nodes to anchors and segments of other shapes",
-                                    );
+                                ui.checkbox(&mut self.node_snap_geometry, tr!("Geometry"))
+                                    .on_hover_text(tr!(
+                                        "Snap dragged nodes to anchors and segments of other shapes"
+                                    ));
                             });
                             ui.horizontal(|ui| {
                                 let single_anchor = self.selected_nodes.len() == 1
@@ -5992,18 +5992,18 @@ impl OrleansApp {
                                 }
                                 if ui
                                     .add_enabled(single_anchor, egui::Button::new(tr!("Break")))
-                                    .on_hover_text(
-                                        "Open a closed contour at this anchor, or split an open path in two",
-                                    )
+                                    .on_hover_text(tr!(
+                                        "Open a closed contour at this anchor, or split an open path in two"
+                                    ))
                                     .clicked()
                                 {
                                     self.break_selected_node();
                                 }
                                 if ui
                                     .add_enabled(two_anchors, egui::Button::new(tr!("Join")))
-                                    .on_hover_text(
-                                        "Join two endpoint anchors; Ctrl/Shift-click selects multiple nodes",
-                                    )
+                                    .on_hover_text(tr!(
+                                        "Join two endpoint anchors; Ctrl/Shift-click selects multiple nodes"
+                                    ))
                                     .clicked()
                                 {
                                     self.join_selected_nodes();
