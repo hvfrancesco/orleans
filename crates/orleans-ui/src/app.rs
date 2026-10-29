@@ -1,6 +1,7 @@
 //! The main application window: toolbar, layer panel, canvas, status bar.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -610,6 +611,8 @@ pub struct OrleansApp {
     /// Layer or job settings changed; re-plan before the next use.
     dirty: bool,
     fit_pending: bool,
+    /// Last world point under the canvas pointer, used to place pasted objects.
+    last_pointer_world: Option<Point>,
     show_grid: bool,
     show_travel: bool,
     show_bed: bool,
@@ -702,6 +705,7 @@ impl OrleansApp {
             status: Status::ok("Open an SVG, or drop one onto the window."),
             dirty: false,
             fit_pending: true,
+            last_pointer_world: None,
             show_grid: true,
             show_travel: false,
             show_bed: true,
@@ -913,6 +917,141 @@ impl OrleansApp {
                 self.status = Status::error(format!("importing {}: {err}", path.display()));
             }
         }
+    }
+
+    /// Serialize the selected vector objects as SVG for the system clipboard.
+    /// The bounds are local to the selection, so a later paste can place it
+    /// wherever the pointer is instead of reusing the source page position.
+    fn selected_svg(&self) -> Option<String> {
+        let bounds = self.selection_bounds()?;
+        let margin = 1.0;
+        let width = (bounds.width() + margin * 2.0).max(0.01);
+        let height = (bounds.height() + margin * 2.0).max(0.01);
+        let mut svg = String::new();
+        writeln!(
+            svg,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width:.4}mm" height="{height:.4}mm" viewBox="0 0 {width:.4} {height:.4}">"#
+        )
+        .expect("writing to string");
+        writeln!(
+            svg,
+            r#"<g transform="translate({:.4},{:.4}) scale(1,-1)">"#,
+            -bounds.x0 + margin,
+            height + bounds.y0 - margin
+        )
+        .expect("writing to string");
+        for selected in &self.selected_shapes {
+            let Some(shape) = self.shape_by_ref(selected) else {
+                continue;
+            };
+            let Some(layer) = self
+                .doc
+                .layers
+                .iter()
+                .find(|layer| layer.index == selected.layer)
+            else {
+                continue;
+            };
+            let [r, g, b] = layer.color;
+            let color = format!("#{r:02x}{g:02x}{b:02x}");
+            let path = shape.path.to_svg();
+            if shape.is_fill {
+                writeln!(svg, r#"<path d="{path}" fill="{color}" stroke="none"/>"#)
+                    .expect("writing to string");
+            } else {
+                writeln!(
+                    svg,
+                    r#"<path d="{path}" fill="none" stroke="{color}" stroke-width="0.1" stroke-linecap="round" stroke-linejoin="round"/>"#
+                )
+                .expect("writing to string");
+            }
+        }
+        svg.push_str("</g>\n</svg>\n");
+        Some(svg)
+    }
+
+    fn copy_selected_to_clipboard(&mut self, ctx: &egui::Context) -> bool {
+        let Some(svg) = self.selected_svg() else {
+            self.set_status("select objects to copy", true);
+            return false;
+        };
+        let count = self.selected_shapes.len();
+        ctx.copy_text(svg);
+        self.set_status(format!("copied {count} object(s)"), false);
+        true
+    }
+
+    /// Parse SVG text put on the clipboard by Inkscape (or by this editor) and
+    /// paste it as new colour layers around the current canvas pointer.
+    fn paste_svg_text(&mut self, text: &str) {
+        if !looks_like_svg(text) {
+            self.set_status("clipboard does not contain SVG objects", true);
+            return;
+        }
+        let mut imported = match import_svg(text.as_bytes(), &ImportOptions::default()) {
+            Ok(doc) if doc.is_empty() => {
+                self.set_status("clipboard SVG contains no paths; outline text first", true);
+                return;
+            }
+            Ok(doc) => doc,
+            Err(err) => {
+                self.set_status(format!("pasting SVG: {err}"), true);
+                return;
+            }
+        };
+        let Some(bounds) = imported.bounds() else {
+            self.set_status("clipboard SVG contains no visible geometry", true);
+            return;
+        };
+        let target = self.last_pointer_world.unwrap_or(self.view.center);
+        let delta = target - bounds.center();
+        if !delta.x.is_finite() || !delta.y.is_finite() {
+            self.set_status("cannot place pasted objects", true);
+            return;
+        }
+        for layer in &mut imported.layers {
+            for shape in &mut layer.shapes {
+                shape
+                    .path
+                    .apply_affine(Affine::translate((delta.x, delta.y)));
+            }
+            if let Some(raster) = &mut layer.raster {
+                raster.x += delta.x;
+                raster.y += delta.y;
+            }
+        }
+        let shape_count = imported.shape_count();
+        let start_index = self
+            .doc
+            .layers
+            .iter()
+            .map(|layer| layer.index)
+            .max()
+            .map_or(0, |index| index + 1);
+        self.merge_imported(imported, None);
+        self.fit_pending = false;
+        let pasted: BTreeSet<ShapeRef> = self
+            .doc
+            .layers
+            .iter()
+            .filter(|layer| layer.index >= start_index)
+            .flat_map(|layer| {
+                layer.shapes.iter().map(move |shape| ShapeRef {
+                    layer: layer.index,
+                    shape: shape.id.clone(),
+                })
+            })
+            .collect();
+        if let Some(first) = pasted.iter().next() {
+            self.selected_layer = Some(first.layer);
+            self.selected_raster = None;
+            self.selected_shapes = pasted;
+            self.selected_nodes.clear();
+            self.node_edit = None;
+            self.node_drag = None;
+            self.tab_edit_layer = None;
+        }
+        self.set_status(format!("pasted {shape_count} object(s)"), false);
     }
 
     fn import_path(&mut self, path: PathBuf) {
@@ -5985,6 +6124,7 @@ impl OrleansApp {
         }
 
         if let Some(position) = response.hover_pos() {
+            self.last_pointer_world = Some(self.view.screen_to_world(area, position));
             if tab_editing {
                 let world = self.view.screen_to_world(area, position);
                 if self
@@ -6798,6 +6938,11 @@ fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
     (point - projected).hypot()
 }
 
+fn looks_like_svg(text: &str) -> bool {
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg"))
+}
+
 fn is_image_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -7013,6 +7158,33 @@ impl eframe::App for OrleansApp {
 
         let node_editing = self.node_edit.is_some();
         let keyboard_input = ctx.egui_wants_keyboard_input();
+        let mut copy_requested = false;
+        let mut cut_requested = false;
+        let mut paste_text: Option<String> = None;
+        ctx.input(|i| {
+            for event in &i.events {
+                match event {
+                    egui::Event::Copy => copy_requested = true,
+                    egui::Event::Cut => cut_requested = true,
+                    egui::Event::Paste(text) => paste_text = Some(text.clone()),
+                    _ => {}
+                }
+            }
+        });
+        if !keyboard_input {
+            if copy_requested {
+                self.copy_selected_to_clipboard(&ctx);
+            }
+            if cut_requested && self.copy_selected_to_clipboard(&ctx) {
+                let count = self.selected_shapes.len();
+                self.delete_selected_objects();
+                self.set_status(format!("cut {count} object(s)"), false);
+            }
+            if let Some(text) = paste_text {
+                self.paste_svg_text(&text);
+            }
+        }
+
         let mut action: Option<Action> = None;
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(egui::Key::O) {
@@ -7196,6 +7368,18 @@ mod tests {
             layer_color([0, 0, 0], false),
             Color32::from_rgb(150, 150, 150)
         );
+    }
+
+    #[test]
+    fn clipboard_svg_detection() {
+        assert!(looks_like_svg(
+            r#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#
+        ));
+        assert!(looks_like_svg(
+            "  <svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
+        ));
+        assert!(!looks_like_svg("just some text"));
+        assert!(!looks_like_svg("<html><body>no vector</body></html>"));
     }
 
     #[test]

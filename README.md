@@ -37,6 +37,7 @@ was decompiled or copied.
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | New layers; move/copy/delete objects between layers; delete empty layers | ✅ |
 | Duplicate selected objects and rectangular arrays | ✅ |
+| Paste SVG objects from Inkscape via the system clipboard | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
@@ -54,7 +55,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-152 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+153 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -139,7 +140,12 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   next to **Up**/**Down**. **Duplicate** (`Ctrl+D`) copies the selection in
   place and selects the copies. The **Array** rows keep the original and create
   a grid of copies from column/row counts and `dx`/`dy` spacing; groups are
-  duplicated as groups;
+  duplicated as groups. `Ctrl+V` pastes SVG at the canvas pointer, including
+  objects copied from Inkscape. `Ctrl+C` and `Ctrl+X` place selected objects on
+  the system clipboard as SVG text; pasting that back into orleans recreates
+  them, while applications that expect a vector MIME type may receive only the
+  SVG source as text. Clipboard round-trips preserve paths and colours but not
+  editor groups or manual tabs; outline text in Inkscape before copying;
 * choose **Line** or **Fill** for each layer. Fill mode adds **Fill spacing**,
   **Angle**, **Overlap**, **Alternate**, **Cross** and **Outline**; it hatches
   closed contours and previews the fill. **Cross** adds a second pass at 90°,
