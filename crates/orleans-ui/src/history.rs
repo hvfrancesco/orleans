@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n;
+
 pub const FORMAT: u32 = 1;
 pub const MAX_JOBS: usize = 50;
 
@@ -22,8 +24,8 @@ pub enum JobKind {
 impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Cut => "cut",
-            Self::Frame => "frame",
+            Self::Cut => i18n::tr("cut"),
+            Self::Frame => i18n::tr("frame"),
         }
     }
 }
@@ -38,9 +40,9 @@ pub enum JobOutcome {
 impl JobOutcome {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Completed => "completed",
-            Self::Stopped => "stopped",
-            Self::Failed => "failed",
+            Self::Completed => i18n::tr("completed"),
+            Self::Stopped => i18n::tr("stopped"),
+            Self::Failed => i18n::tr("failed"),
         }
     }
 }

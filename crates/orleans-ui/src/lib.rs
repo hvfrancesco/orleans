@@ -6,6 +6,7 @@
 
 mod app;
 mod history;
+mod i18n;
 mod machine;
 mod nodes;
 mod preview;

@@ -22,13 +22,22 @@ use orleans_import::{
 use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 
 use crate::history::{self, JobHistory, JobKind, JobOutcome, JobRecord};
+use crate::i18n::{self, Language};
 use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
 use crate::project::{GroupMember, GroupSettings, ProjectFile, FORMAT};
 use crate::viewport::Viewport;
 
+macro_rules! tr {
+    ($text:expr) => {
+        i18n::tr($text)
+    };
+}
+
 const DISPLAY_TOLERANCE: f64 = 0.05;
+const RULER_LEFT: f32 = 38.0;
+const RULER_BOTTOM: f32 = 22.0;
 
 const NEW_LAYER_COLORS: [[u8; 3]; 6] = [
     [200, 60, 50],
@@ -115,6 +124,9 @@ struct CanvasPalette {
     selected_node: Color32,
     origin: Color32,
     tab: Color32,
+    ruler_bg: Color32,
+    ruler_line: Color32,
+    ruler_text: Color32,
 }
 
 impl CanvasPalette {
@@ -141,6 +153,9 @@ impl CanvasPalette {
                 selected_node: Color32::WHITE,
                 origin: Color32::from_rgb(230, 190, 90),
                 tab: Color32::from_rgb(110, 200, 230),
+                ruler_bg: Color32::from_gray(24),
+                ruler_line: Color32::from_gray(75),
+                ruler_text: Color32::from_gray(155),
             },
             Theme::Light => Self {
                 background: Color32::from_rgb(204, 204, 196),
@@ -163,6 +178,9 @@ impl CanvasPalette {
                 selected_node: Color32::from_rgb(30, 70, 140),
                 origin: Color32::from_rgb(180, 130, 30),
                 tab: Color32::from_rgb(0, 120, 160),
+                ruler_bg: Color32::from_rgb(181, 181, 174),
+                ruler_line: Color32::from_gray(120),
+                ruler_text: Color32::from_gray(55),
             },
         }
     }
@@ -576,6 +594,7 @@ pub struct OrleansApp {
     doc: Document,
     preview: Preview,
     theme: Theme,
+    language: Language,
     selected_layer: Option<usize>,
     selected_shapes: BTreeSet<ShapeRef>,
     groups: Vec<ShapeGroup>,
@@ -666,10 +685,13 @@ impl OrleansApp {
     ) -> Self {
         let history_path = history::default_path();
         let job_history = JobHistory::load(&history_path);
+        let language = i18n::load_language().unwrap_or_else(Language::from_environment);
+        i18n::set_language(language);
         let mut app = Self {
             doc: Document::new(100.0, 100.0),
             preview: Preview::default(),
             theme: Theme::Dark,
+            language,
             selected_layer: None,
             selected_shapes: BTreeSet::new(),
             groups: Vec::new(),
@@ -4073,9 +4095,9 @@ impl OrleansApp {
             }
             None => {
                 let text = match self.link {
-                    LinkState::Connecting => "waiting for status…",
-                    LinkState::Reconnecting => "waiting for the link…",
-                    _ => "not connected",
+                    LinkState::Connecting => tr!("waiting for status…"),
+                    LinkState::Reconnecting => tr!("waiting for the link…"),
+                    _ => tr!("not connected"),
                 };
                 ui.label(RichText::new(text).weak());
             }
@@ -4135,7 +4157,7 @@ impl OrleansApp {
             .show(ui, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.heading("Machine");
+                    ui.heading(tr!("Machine"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (text, color) = match self.link {
                             LinkState::Connected => ("connected", Color32::from_rgb(120, 200, 130)),
@@ -4149,7 +4171,7 @@ impl OrleansApp {
                 });
                 ui.add_space(4.0);
 
-                ui.label("Endpoint");
+                ui.label(tr!("Endpoint"));
                 let field = ui.add_enabled(
                     self.link == LinkState::Disconnected,
                     egui::TextEdit::singleline(&mut self.endpoint)
@@ -4160,39 +4182,39 @@ impl OrleansApp {
 
                 ui.horizontal(|ui| match self.link {
                     LinkState::Disconnected => {
-                        if ui.button("Connect").clicked() || enter {
+                        if ui.button(tr!("Connect")).clicked() || enter {
                             self.begin_connect();
                         }
                     }
                     LinkState::Connecting => {
                         ui.spinner();
                         ui.label("Connecting…");
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(tr!("Cancel")).clicked() {
                             self.disconnect_machine();
                         }
                     }
                     LinkState::Reconnecting => {
                         ui.spinner();
                         ui.label(format!("Reconnecting… ({})", self.reconnect_attempt));
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(tr!("Cancel")).clicked() {
                             self.disconnect_machine();
                         }
                     }
                     LinkState::Connected => {
                         if ui
-                            .add_enabled(!self.job_running, egui::Button::new("Disconnect"))
+                            .add_enabled(!self.job_running, egui::Button::new(tr!("Disconnect")))
                             .clicked()
                         {
                             self.disconnect_machine();
                         }
-                        if ui.button("Settings…").clicked() {
+                        if ui.button(tr!("Settings…")).clicked() {
                             self.open_settings();
                         }
                     }
                 });
 
                 ui.separator();
-                ui.heading("Status");
+                ui.heading(tr!("Status"));
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), 160.0),
                     egui::Layout::top_down(egui::Align::Min),
@@ -4211,7 +4233,7 @@ impl OrleansApp {
                         .unwrap_or(false);
 
                 ui.separator();
-                ui.heading("Jog");
+                ui.heading(tr!("Jog"));
                 let idle = self
                     .machine_status
                     .as_ref()
@@ -4225,7 +4247,7 @@ impl OrleansApp {
                 let can_cancel_jog = connected && !self.job_running;
 
                 ui.horizontal(|ui| {
-                    ui.label("Step");
+                    ui.label(tr!("Step"));
                     ui.add(
                         egui::DragValue::new(&mut self.jog_step)
                             .speed(0.1)
@@ -4234,7 +4256,7 @@ impl OrleansApp {
                     );
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Feed");
+                    ui.label(tr!("Feed"));
                     ui.add(
                         egui::DragValue::new(&mut self.jog_feed)
                             .speed(10.0)
@@ -4304,7 +4326,7 @@ impl OrleansApp {
 
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(can_jog, egui::Button::new("Set zero (G92)"))
+                        .add_enabled(can_jog, egui::Button::new(tr!("Set zero (G92)")))
                         .on_hover_text(
                             "Temporary work zero at the current position. \
                              A controller reset clears it.",
@@ -4315,7 +4337,7 @@ impl OrleansApp {
                         self.set_status("machine thread stopped", true);
                     }
                     if ui
-                        .add_enabled(can_jog, egui::Button::new("Save zero (G54)"))
+                        .add_enabled(can_jog, egui::Button::new(tr!("Save zero (G54)")))
                         .on_hover_text(
                             "Stored G54 work zero (G10 L20 P1) at the current position. \
                              Survives a reset on most GRBL builds.",
@@ -4328,7 +4350,7 @@ impl OrleansApp {
                 });
 
                 ui.separator();
-                ui.heading("Job");
+                ui.heading(tr!("Job"));
                 if self.job_running {
                     let fraction = self.job_done as f32 / self.job_total.max(1) as f32;
                     ui.add(
@@ -4339,7 +4361,7 @@ impl OrleansApp {
                     ui.horizontal(|ui| {
                         let pause_safe = self.frame_job || self.pause_is_safe();
                         if ui
-                            .add_enabled(!self.job_paused && pause_safe, egui::Button::new("Pause"))
+                            .add_enabled(!self.job_paused && pause_safe, egui::Button::new(tr!("Pause")))
                             .on_hover_text(if self.frame_job {
                                 "Pause the framing move"
                             } else {
@@ -4352,7 +4374,7 @@ impl OrleansApp {
                             self.set_status("pausing…", false);
                         }
                         if ui
-                            .add_enabled(self.job_paused, egui::Button::new("Resume"))
+                            .add_enabled(self.job_paused, egui::Button::new(tr!("Resume")))
                             .clicked()
                         {
                             self.job_paused = false;
@@ -4372,12 +4394,12 @@ impl OrleansApp {
                 let can_send = self.can_send();
                 let send_label = if self.job_running {
                     if self.frame_job {
-                        "Framing…"
+                        tr!("Framing…")
                     } else {
-                        "Sending…"
+                        tr!("Sending…")
                     }
                 } else {
-                    "Send to laser"
+                    tr!("Send to laser")
                 };
                 ui.horizontal(|ui| {
                     if ui
@@ -4391,7 +4413,7 @@ impl OrleansApp {
                         self.confirm_send = true;
                     }
                     if ui
-                        .add_enabled(can_send, egui::Button::new("Frame"))
+                        .add_enabled(can_send, egui::Button::new(tr!("Frame")))
                         .on_hover_text("Trace the job bounds at 3000 mm/min with the laser off.")
                         .clicked()
                     {
@@ -4411,7 +4433,8 @@ impl OrleansApp {
 
                 let mut clear_history = false;
                 egui::CollapsingHeader::new(format!(
-                    "Job history ({})",
+                    "{} ({})",
+                    tr!("Job history"),
                     self.job_history.jobs.len()
                 ))
                 .id_salt("job-history")
@@ -4419,7 +4442,7 @@ impl OrleansApp {
                 .show(ui, |ui| {
                     if self.job_history.jobs.is_empty() {
                         ui.label(
-                            RichText::new("No jobs sent yet. Completed, stopped and framing runs appear here.")
+                            RichText::new(tr!("No jobs sent yet. Completed, stopped and framing runs appear here."))
                                 .small()
                                 .weak(),
                         );
@@ -4477,7 +4500,7 @@ impl OrleansApp {
                                     ui.add_space(2.0);
                                 }
                             });
-                        if ui.button("Clear history").clicked() {
+                        if ui.button(tr!("Clear history")).clicked() {
                             clear_history = true;
                         }
                     }
@@ -4494,7 +4517,7 @@ impl OrleansApp {
                 }
 
                 ui.separator();
-                ui.heading("Control");
+                ui.heading(tr!("Control"));
                 let homing_enabled = self
                     .settings
                     .as_ref()
@@ -4517,7 +4540,7 @@ impl OrleansApp {
                         .unwrap_or(false);
 
                 if ui
-                    .add_enabled(can_home, egui::Button::new("Home ($H)"))
+                    .add_enabled(can_home, egui::Button::new(tr!("Home ($H)")))
                     .on_hover_text(if homing_enabled {
                         "Move the head to the limit switches. \
                          Enabled when the controller is idle or in alarm."
@@ -4531,7 +4554,7 @@ impl OrleansApp {
                 if ui
                     .add_enabled(
                         connected && !self.job_running,
-                        egui::Button::new("Unlock ($X)"),
+                        egui::Button::new(tr!("Unlock ($X)")),
                     )
                     .on_hover_text("Clear a GRBL alarm.")
                     .clicked()
@@ -4540,7 +4563,7 @@ impl OrleansApp {
                     self.set_status("machine thread stopped", true);
                 }
                 ui.add_space(6.0);
-                let stop = egui::Button::new(RichText::new("Stop").strong().color(Color32::WHITE))
+                let stop = egui::Button::new(RichText::new(tr!("Stop")).strong().color(Color32::WHITE))
                     .fill(Color32::from_rgb(145, 40, 40));
                 if ui
                     .add_enabled(connected, stop)
@@ -4571,17 +4594,17 @@ impl OrleansApp {
         if !self.confirm_home {
             return;
         }
-        egui::Window::new("Home the machine?")
+        egui::Window::new(tr!("Home the machine?"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(
-                    "The head will move to the limit switches. Make sure the machine is clear.",
-                );
+                ui.label(tr!(
+                    "The head will move to the limit switches. Make sure the machine is clear."
+                ));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Home").clicked() {
+                    if ui.button(tr!("Home")).clicked() {
                         if self.machine.home() {
                             self.home_pending_until = Some(Instant::now() + Duration::from_secs(3));
                             self.set_status("homing…", false);
@@ -4590,7 +4613,7 @@ impl OrleansApp {
                         }
                         self.confirm_home = false;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr!("Cancel")).clicked() {
                         self.confirm_home = false;
                     }
                 });
@@ -4605,7 +4628,7 @@ impl OrleansApp {
         let can_edit = connected && !self.job_running && !self.homing && self.settings.is_some();
         let mut close = false;
 
-        egui::Window::new("Controller settings")
+        egui::Window::new(tr!("Controller settings"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -4639,18 +4662,18 @@ impl OrleansApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(can_edit, egui::Button::new("Apply"))
+                        .add_enabled(can_edit, egui::Button::new(tr!("Apply")))
                         .clicked()
                     {
                         self.apply_settings();
                     }
                     if ui
-                        .add_enabled(connected, egui::Button::new("Refresh"))
+                        .add_enabled(connected, egui::Button::new(tr!("Refresh")))
                         .clicked()
                     {
                         self.machine.refresh_settings();
                     }
-                    if ui.button("Close").clicked() {
+                    if ui.button(tr!("Close")).clicked() {
                         close = true;
                     }
                 });
@@ -4691,7 +4714,7 @@ impl OrleansApp {
         if !self.confirm_send {
             return;
         }
-        egui::Window::new("Send job to the laser?")
+        egui::Window::new(tr!("Send job to the laser?"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -4727,11 +4750,11 @@ impl OrleansApp {
                 );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if enter || ui.button("Send").clicked() {
+                    if enter || ui.button(tr!("Send")).clicked() {
                         self.send_job();
                         self.confirm_send = false;
                     }
-                    if escape || ui.button("Cancel").clicked() {
+                    if escape || ui.button(tr!("Cancel")).clicked() {
                         self.confirm_send = false;
                     }
                 });
@@ -4782,11 +4805,11 @@ impl OrleansApp {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("Open…").clicked() {
+                if ui.button(tr!("Open…")).clicked() {
                     *action = Some(Action::Open);
                 }
                 if ui
-                    .button("Import…")
+                    .button(tr!("Import…"))
                     .on_hover_text("Add SVG, DXF or image layers to the current design")
                     .clicked()
                 {
@@ -4794,36 +4817,36 @@ impl OrleansApp {
                 }
                 let has_doc = !self.doc.is_empty();
                 if ui
-                    .add_enabled(has_doc, egui::Button::new("Export G-code…"))
+                    .add_enabled(has_doc, egui::Button::new(tr!("Export G-code…")))
                     .clicked()
                 {
                     *action = Some(Action::Export);
                 }
                 if ui
-                    .add_enabled(has_doc, egui::Button::new("Save project…"))
+                    .add_enabled(has_doc, egui::Button::new(tr!("Save project…")))
                     .clicked()
                 {
                     *action = Some(Action::SaveProject);
                 }
                 if ui
-                    .add_enabled(has_doc, egui::Button::new("Reload"))
+                    .add_enabled(has_doc, egui::Button::new(tr!("Reload")))
                     .clicked()
                 {
                     *action = Some(Action::Reload);
                 }
-                if ui.button("Fit").clicked() {
+                if ui.button(tr!("Fit")).clicked() {
                     *action = Some(Action::Fit);
                 }
                 if ui
-                    .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("Undo"))
-                    .on_hover_text("Undo last edit (Ctrl+Z)")
+                    .add_enabled(!self.undo_stack.is_empty(), egui::Button::new(tr!("Undo")))
+                    .on_hover_text(tr!("Undo last edit (Ctrl+Z)"))
                     .clicked()
                 {
                     *action = Some(Action::Undo);
                 }
                 if ui
-                    .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("Redo"))
-                    .on_hover_text("Redo last undone edit (Ctrl+Shift+Z)")
+                    .add_enabled(!self.redo_stack.is_empty(), egui::Button::new(tr!("Redo")))
+                    .on_hover_text(tr!("Redo last undone edit (Ctrl+Shift+Z)"))
                     .clicked()
                 {
                     *action = Some(Action::Redo);
@@ -4831,21 +4854,34 @@ impl OrleansApp {
                 ui.separator();
                 let mut light = self.theme.is_light();
                 if ui
-                    .checkbox(&mut light, "Light")
-                    .on_hover_text("Use the light interface and canvas")
+                    .checkbox(&mut light, tr!("Light"))
+                    .on_hover_text(tr!("Use the light interface and canvas"))
                     .changed()
                 {
                     self.theme = if light { Theme::Light } else { Theme::Dark };
                     self.apply_theme(ui.ctx());
                 }
-                ui.checkbox(&mut self.show_grid, "Grid");
-                ui.checkbox(&mut self.show_travel, "Travel");
-                ui.checkbox(&mut self.show_bed, "Bed");
+                ui.menu_button(tr!("Language"), |ui| {
+                    for language in Language::ALL {
+                        if ui
+                            .selectable_label(self.language == language, language.native_name())
+                            .clicked()
+                            && self.language != language
+                        {
+                            self.language = language;
+                            i18n::set_language(language);
+                            i18n::save_language(language);
+                        }
+                    }
+                });
+                ui.checkbox(&mut self.show_grid, tr!("Grid"));
+                ui.checkbox(&mut self.show_travel, tr!("Travel"));
+                ui.checkbox(&mut self.show_bed, tr!("Bed"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let name = self
                         .display_path()
                         .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "no file".to_owned());
+                        .unwrap_or_else(|| tr!("no file").to_owned());
                     ui.label(RichText::new(name).weak());
                 });
             });
@@ -4866,7 +4902,7 @@ impl OrleansApp {
                 let visible = self.doc.layers.iter().filter(|layer| layer.visible).count();
                 let cutting = self.doc.layers.iter().filter(|layer| layer.output).count();
                 ui.horizontal(|ui| {
-                    ui.heading("Layers");
+                    ui.heading(tr!("Layers"));
                     if ui
                         .small_button("+")
                         .on_hover_text("Create a new empty layer")
@@ -4888,7 +4924,7 @@ impl OrleansApp {
 
                 let mut changed = false;
                 if total == 0 {
-                    ui.label(RichText::new("No layers yet. Open an SVG or image, or drop one here.").weak());
+                    ui.label(RichText::new(tr!("No layers yet. Open an SVG or image, or drop one here.")).weak());
                 } else {
                     let transform_height = if self.selected_shapes.is_empty() {
                         0.0
@@ -4939,7 +4975,7 @@ impl OrleansApp {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             if ui
-                                                .checkbox(&mut layer.output, "Cut")
+                                                .checkbox(&mut layer.output, tr!("Cut"))
                                                 .on_hover_text("Include this layer in the job")
                                                 .changed()
                                             {
@@ -5049,7 +5085,7 @@ impl OrleansApp {
                     {
                         let layer = &mut self.doc.layers[pos];
                         ui.horizontal(|ui| {
-                            ui.strong("Selected layer");
+                            ui.strong(tr!("Selected layer"));
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -5073,7 +5109,7 @@ impl OrleansApp {
                             .num_columns(2)
                             .spacing([8.0, 4.0])
                             .show(ui, |ui| {
-                                ui.label("Speed");
+                                ui.label(tr!("Speed"));
                                 changed |= ui
                                     .add(
                                         egui::DragValue::new(&mut layer.cut.speed)
@@ -5084,7 +5120,7 @@ impl OrleansApp {
                                     .changed();
                                 ui.end_row();
 
-                                ui.label("Power");
+                                ui.label(tr!("Power"));
                                 changed |= ui
                                     .add(
                                         egui::DragValue::new(&mut layer.cut.power)
@@ -5095,7 +5131,7 @@ impl OrleansApp {
                                     .changed();
                                 ui.end_row();
 
-                                ui.label("Passes");
+                                ui.label(tr!("Passes"));
                                 changed |= ui
                                     .add(
                                         egui::DragValue::new(&mut layer.cut.passes)
@@ -5107,11 +5143,11 @@ impl OrleansApp {
                             });
                         ui.horizontal(|ui| {
                             changed |= ui
-                                .checkbox(&mut layer.output, "Cut")
+                                .checkbox(&mut layer.output, tr!("Cut"))
                                 .on_hover_text("Include this layer in the job and frame")
                                 .changed();
                             changed |= ui
-                                .checkbox(&mut layer.visible, "Show")
+                                .checkbox(&mut layer.visible, tr!("Show"))
                                 .on_hover_text("Draw this layer in the editor")
                                 .changed();
                         });
@@ -5214,7 +5250,7 @@ impl OrleansApp {
                                     )
                                     .on_hover_text("Distance between raster scan lines")
                                     .changed();
-                                ui.label("Angle");
+                                ui.label(tr!("Angle"));
                                 changed |= ui
                                     .add(
                                         egui::DragValue::new(&mut raster.angle)
@@ -5234,7 +5270,7 @@ impl OrleansApp {
                                     .checkbox(&mut raster.bidirectional, "Alternate rows")
                                     .on_hover_text("Reverse alternate scan lines to reduce travel")
                                     .changed();
-                                ui.label("Position");
+                                ui.label(tr!("Position"));
                                 changed |= ui
                                     .add(
                                         egui::DragValue::new(&mut raster.x)
@@ -5253,7 +5289,7 @@ impl OrleansApp {
                                     .changed();
                             });
                             ui.horizontal(|ui| {
-                                ui.label("Size");
+                                ui.label(tr!("Size"));
                                 changed |= ui
                                     .add(
                                         egui::DragValue::new(&mut raster.width_mm)
@@ -5336,19 +5372,19 @@ impl OrleansApp {
                             }
                         } else {
                             ui.horizontal(|ui| {
-                                ui.label("Mode");
+                                ui.label(tr!("Mode"));
                                 changed |= ui
-                                    .selectable_value(&mut layer.mode, LayerMode::Line, "Line")
+                                    .selectable_value(&mut layer.mode, LayerMode::Line, tr!("Line"))
                                     .changed();
                                 changed |= ui
-                                    .selectable_value(&mut layer.mode, LayerMode::Fill, "Fill")
+                                    .selectable_value(&mut layer.mode, LayerMode::Fill, tr!("Fill"))
                                     .changed();
                             });
                             if layer.mode == LayerMode::Line {
                                 ui.horizontal(|ui| {
-                                    ui.label("Tabs");
+                                    ui.label(tr!("Tabs"));
                                     changed |= ui
-                                        .checkbox(&mut layer.tabs.manual, "Manual")
+                                        .checkbox(&mut layer.tabs.manual, tr!("Manual"))
                                         .on_hover_text(
                                             "Place tabs by clicking closed contours instead of distributing them evenly",
                                         )
@@ -5366,7 +5402,7 @@ impl OrleansApp {
                                             .changed();
                                     }
                                     if layer.tabs.manual || layer.tabs.count > 0 {
-                                        ui.label("Width");
+                                        ui.label(tr!("Width"));
                                         changed |= ui
                                             .add(
                                                 egui::DragValue::new(&mut layer.tabs.width)
@@ -5387,9 +5423,9 @@ impl OrleansApp {
                                 ui.horizontal(|ui| {
                                     if ui
                                         .button(if tab_editing_here {
-                                            "Done"
+                                            tr!("Done")
                                         } else {
-                                            "Place tabs"
+                                            tr!("Place tabs")
                                         })
                                         .on_hover_text(
                                             "Click a closed contour to add a tab; click a tab again to remove it",
@@ -5412,7 +5448,7 @@ impl OrleansApp {
                                 .num_columns(2)
                                 .spacing([8.0, 4.0])
                                 .show(ui, |ui| {
-                                    ui.label("Fill spacing");
+                                    ui.label(tr!("Fill spacing"));
                                     changed |= ui
                                         .add(
                                             egui::DragValue::new(&mut layer.fill.spacing)
@@ -5426,9 +5462,9 @@ impl OrleansApp {
                                         .changed();
                                     ui.end_row();
 
-                                    ui.label("Offset");
+                                    ui.label(tr!("Offset"));
                                     changed |= ui
-                                        .checkbox(&mut layer.fill.offset, "Concentric loops")
+                                        .checkbox(&mut layer.fill.offset, tr!("Concentric loops"))
                                         .on_hover_text(
                                             "Fill inward with closed loops instead of scan lines",
                                         )
@@ -5436,7 +5472,7 @@ impl OrleansApp {
                                     ui.end_row();
 
                                     if !layer.fill.offset {
-                                        ui.label("Angle");
+                                        ui.label(tr!("Angle"));
                                         changed |= ui
                                             .add(
                                                 egui::DragValue::new(&mut layer.fill.angle)
@@ -5448,7 +5484,7 @@ impl OrleansApp {
                                             .changed();
                                         ui.end_row();
 
-                                        ui.label("Overlap");
+                                        ui.label(tr!("Overlap"));
                                         changed |= ui
                                             .add(
                                                 egui::DragValue::new(&mut layer.fill.overlap)
@@ -5462,11 +5498,11 @@ impl OrleansApp {
                                             .changed();
                                         ui.end_row();
 
-                                        ui.label("Alternate");
+                                        ui.label(tr!("Alternate"));
                                         changed |= ui
                                             .checkbox(
                                                 &mut layer.fill.alternate,
-                                                "Reverse each line",
+                                                tr!("Reverse each line"),
                                             )
                                             .on_hover_text(
                                                 "Alternate hatch direction to reduce travel",
@@ -5474,20 +5510,20 @@ impl OrleansApp {
                                             .changed();
                                         ui.end_row();
 
-                                        ui.label("Cross");
+                                        ui.label(tr!("Cross"));
                                         changed |= ui
                                             .checkbox(
                                                 &mut layer.fill.cross,
-                                                "Second pass at 90°",
+                                                tr!("Second pass at 90°"),
                                             )
                                             .on_hover_text("Hatch again across the first pass")
                                             .changed();
                                         ui.end_row();
                                     }
 
-                                    ui.label("Outline");
+                                    ui.label(tr!("Outline"));
                                     changed |= ui
-                                        .checkbox(&mut layer.fill.outline, "Cut contour")
+                                        .checkbox(&mut layer.fill.outline, tr!("Cut contour"))
                                         .on_hover_text(
                                             "Trace the closed contours after filling them",
                                         )
@@ -5498,18 +5534,18 @@ impl OrleansApp {
                         }
                         ui.horizontal(|ui| {
                             move_up = ui
-                                .add_enabled(pos > 0, egui::Button::new("Up"))
+                                .add_enabled(pos > 0, egui::Button::new(tr!("Up")))
                                 .on_hover_text("Cut earlier")
                                 .clicked();
                             move_down = ui
-                                .add_enabled(pos + 1 < layer_count, egui::Button::new("Down"))
+                                .add_enabled(pos + 1 < layer_count, egui::Button::new(tr!("Down")))
                                 .on_hover_text("Cut later")
                                 .clicked();
                             delete_layer = ui
-                                .add_enabled(layer.is_empty(), egui::Button::new("Delete"))
+                                .add_enabled(layer.is_empty(), egui::Button::new(tr!("Delete")))
                                 .on_hover_text("Delete this empty layer")
                                 .clicked();
-                            ui.label(RichText::new("cut order").small().weak());
+                            ui.label(RichText::new(tr!("cut order")).small().weak());
                         });
                     }
                     self.settings_edit_changed |= display_changed;
@@ -5536,23 +5572,23 @@ impl OrleansApp {
 
                 let selected_count = self.selected_shapes.len();
                 let hint = if self.node_edit.is_some() {
-                    "Drag nodes · Ctrl-click adds · dbl-click segment inserts · Break/Join · Esc finishes"
+                    tr!("Drag nodes · Ctrl-click adds · dbl-click segment inserts · Break/Join · Esc finishes")
                 } else if self.selected_raster.is_some() {
-                    "Drag image to move · corners resize · top handle rotates"
+                    tr!("Drag image to move · corners resize · top handle rotates")
                 } else if selected_count == 0 {
-                    "Click a shape or image · Ctrl/Shift-click for multiple · right-drag to pan"
+                    tr!("Click a shape or image · Ctrl/Shift-click for multiple · right-drag to pan")
                 } else {
-                    "Corner handles scale · top handle rotates · Ctrl+Z/Ctrl+Shift+Z undo/redo"
+                    tr!("Corner handles scale · top handle rotates · Ctrl+Z/Ctrl+Shift+Z undo/redo")
                 };
                 ui.label(RichText::new(hint).small().weak());
 
                 if selected_count > 0 {
                     ui.horizontal(|ui| {
-                        ui.strong(format!("Selection ({selected_count})"));
+                        ui.strong(format!("{} ({selected_count})", tr!("Selection")));
                     });
                     if let Some(bounds) = self.selection_bounds() {
                         ui.horizontal(|ui| {
-                            ui.label("Size").on_hover_text(
+                            ui.label(tr!("Size")).on_hover_text(
                                 "Bounding-box width and height of the selected shapes",
                             );
                             ui.label("W");
@@ -5574,14 +5610,14 @@ impl OrleansApp {
                     });
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(selected_count >= 2, egui::Button::new("Group"))
+                            .add_enabled(selected_count >= 2, egui::Button::new(tr!("Group")))
                             .on_hover_text("Select and transform these shapes together")
                             .clicked()
                         {
                             self.group_selection();
                         }
                         if ui
-                            .add_enabled(has_group, egui::Button::new("Ungroup"))
+                            .add_enabled(has_group, egui::Button::new(tr!("Ungroup")))
                             .on_hover_text("Remove the groups these shapes belong to")
                             .clicked()
                         {
@@ -5597,7 +5633,7 @@ impl OrleansApp {
                     });
                     if units.len() >= 2 {
                         ui.horizontal(|ui| {
-                            ui.label("Align");
+                            ui.label(tr!("Align"));
                             if ui
                                 .small_button("L")
                                 .on_hover_text("Align left edges")
@@ -5644,7 +5680,7 @@ impl OrleansApp {
                     }
                     if units.len() >= 3 {
                         ui.horizontal(|ui| {
-                            ui.label("Distribute");
+                            ui.label(tr!("Distribute"));
                             if ui
                                 .small_button("H")
                                 .on_hover_text("Space centres evenly left to right")
@@ -5724,7 +5760,7 @@ impl OrleansApp {
                             }
                         }
                         if ui
-                            .button("Delete")
+                            .button(tr!("Delete"))
                             .on_hover_text("Delete the selected objects (Del)")
                             .clicked()
                         {
@@ -5744,7 +5780,7 @@ impl OrleansApp {
                     });
                     ui.horizontal(|ui| {
                         if ui
-                            .button("Duplicate")
+                            .button(tr!("Duplicate"))
                             .on_hover_text("Duplicate the selected objects in place (Ctrl+D)")
                             .clicked()
                         {
@@ -5752,10 +5788,10 @@ impl OrleansApp {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Array").on_hover_text(
+                        ui.label(tr!("Array")).on_hover_text(
                             "Keep the original and add copies on a grid of columns and rows",
                         );
-                        ui.label("Cols");
+                        ui.label(tr!("Cols"));
                         ui.add(
                             egui::DragValue::new(&mut self.array_cols)
                                 .speed(1.0)
@@ -5771,7 +5807,7 @@ impl OrleansApp {
                     });
                     ui.horizontal(|ui| {
                         ui.add_space(32.0);
-                        ui.label("Rows");
+                        ui.label(tr!("Rows"));
                         ui.add(
                             egui::DragValue::new(&mut self.array_rows)
                                 .speed(1.0)
@@ -5785,7 +5821,7 @@ impl OrleansApp {
                                 .suffix(" mm"),
                         );
                         if ui
-                            .button("Create")
+                            .button(tr!("Create"))
                             .on_hover_text("Create the array and select its copies")
                             .clicked()
                         {
@@ -5793,7 +5829,7 @@ impl OrleansApp {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Move");
+                        ui.label(tr!("Move"));
                         ui.label("X");
                         ui.add(
                             egui::DragValue::new(&mut self.transform_dx)
@@ -5806,12 +5842,12 @@ impl OrleansApp {
                                 .speed(0.1)
                                 .suffix(" mm"),
                         );
-                        if ui.button("Move").clicked() {
+                        if ui.button(tr!("Move")).clicked() {
                             self.move_selection();
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Position").on_hover_text(
+                        ui.label(tr!("Position")).on_hover_text(
                             "Move the reference point to absolute coordinates relative to the job origin (0, 0)",
                         );
                         ui.label("X");
@@ -5829,7 +5865,7 @@ impl OrleansApp {
                                 .suffix(" mm"),
                         );
                         if ui
-                            .button("Move to")
+                            .button(tr!("Move to"))
                             .on_hover_text("Move the selected reference point to these coordinates")
                             .clicked()
                         {
@@ -5837,7 +5873,7 @@ impl OrleansApp {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Ref");
+                        ui.label(tr!("Ref"));
                         egui::ComboBox::from_id_salt("selection-anchor")
                             .selected_text(self.move_anchor.label())
                             .show_ui(ui, |ui| {
@@ -5861,13 +5897,13 @@ impl OrleansApp {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Scale");
+                        ui.label(tr!("Scale"));
                         ui.add(
                             egui::DragValue::new(&mut self.transform_scale)
                                 .speed(0.01)
                                 .range(0.05..=10.0),
                         );
-                        if ui.button("Scale").clicked() {
+                        if ui.button(tr!("Scale")).clicked() {
                             self.scale_selection();
                         }
                         ui.label("Rotate");
@@ -5876,7 +5912,7 @@ impl OrleansApp {
                                 .speed(1.0)
                                 .suffix("°"),
                         );
-                        if ui.button("Rotate").clicked() {
+                        if ui.button(tr!("Rotate")).clicked() {
                             self.rotate_selection();
                         }
                     });
@@ -5884,7 +5920,7 @@ impl OrleansApp {
                         ui.horizontal(|ui| {
                             let editing = self.node_edit.is_some();
                             if ui
-                                .button(if editing { "Done" } else { "Edit nodes" })
+                                .button(if editing { tr!("Done") } else { tr!("Edit nodes") })
                                 .on_hover_text(
                                     "Edit path anchors and Bézier control points of the selected shape",
                                 )
@@ -5917,14 +5953,14 @@ impl OrleansApp {
                                         .iter()
                                         .all(|node| node.kind == NodeKind::Anchor);
                                 if ui
-                                    .add_enabled(single_anchor, egui::Button::new("Delete node"))
+                                    .add_enabled(single_anchor, egui::Button::new(tr!("Delete node")))
                                     .on_hover_text("Delete the selected anchor (Del)")
                                     .clicked()
                                 {
                                     self.delete_selected_node();
                                 }
                                 if ui
-                                    .add_enabled(single_anchor, egui::Button::new("Break"))
+                                    .add_enabled(single_anchor, egui::Button::new(tr!("Break")))
                                     .on_hover_text(
                                         "Open a closed contour at this anchor, or split an open path in two",
                                     )
@@ -5933,7 +5969,7 @@ impl OrleansApp {
                                     self.break_selected_node();
                                 }
                                 if ui
-                                    .add_enabled(two_anchors, egui::Button::new("Join"))
+                                    .add_enabled(two_anchors, egui::Button::new(tr!("Join")))
                                     .on_hover_text(
                                         "Join two endpoint anchors; Ctrl/Shift-click selects multiple nodes",
                                     )
@@ -5947,12 +5983,12 @@ impl OrleansApp {
                 }
 
                 ui.separator();
-                ui.heading("Job");
+                ui.heading(tr!("Job"));
                 egui::Grid::new("job-settings")
                     .num_columns(2)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
-                        ui.label("Kerf");
+                        ui.label(tr!("Kerf"));
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut self.plan_opts.kerf)
@@ -5963,7 +5999,7 @@ impl OrleansApp {
                             .changed();
                         ui.end_row();
 
-                        ui.label("Max S");
+                        ui.label(tr!("Max S"));
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut self.gcode_opts.max_s)
@@ -5974,12 +6010,12 @@ impl OrleansApp {
                         ui.end_row();
                     });
                 changed |= ui
-                    .checkbox(&mut self.plan_opts.optimize, "Optimise travel")
+                    .checkbox(&mut self.plan_opts.optimize, tr!("Optimise travel"))
                     .changed();
 
                 let mut m4 = self.gcode_opts.laser_mode == LaserMode::M4;
                 if ui
-                    .checkbox(&mut m4, "Dynamic power (M4)")
+                    .checkbox(&mut m4, tr!("Dynamic power (M4)"))
                     .on_hover_text("Velocity-scaled power. Required for a safe pause when $32=1.")
                     .changed()
                 {
@@ -5999,7 +6035,7 @@ impl OrleansApp {
             ui.add_space(3.0);
             ui.horizontal(|ui| {
                 if self.doc.is_empty() {
-                    ui.label("No design loaded");
+                    ui.label(tr!("No design loaded"));
                 } else {
                     let rasters = self.doc.raster_count();
                     let images = if rasters > 0 {
@@ -6039,10 +6075,19 @@ impl OrleansApp {
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
-        let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
-        let area = response.rect;
+        let full = ui.available_rect_before_wrap();
+        if full.width() <= RULER_LEFT || full.height() <= RULER_BOTTOM {
+            return;
+        }
+        ui.allocate_rect(full, Sense::hover());
+        let area = Rect::from_min_max(
+            full.min + egui::vec2(RULER_LEFT, 0.0),
+            full.max - egui::vec2(0.0, RULER_BOTTOM),
+        );
+        let response = ui.interact(area, ui.id().with("canvas"), Sense::click_and_drag());
+        let painter = ui.painter_at(full);
         let palette = self.palette();
-        painter.rect_filled(area, 0.0, palette.background);
+        painter.rect_filled(full, 0.0, palette.background);
 
         if self.fit_pending {
             let mut bounds = self.doc.bounds().unwrap_or_else(|| {
@@ -6073,6 +6118,7 @@ impl OrleansApp {
         self.draw_nodes(&painter, area);
         self.draw_raster_selection(&painter, area);
         self.draw_origin(&painter, area);
+        self.draw_rulers(&painter, full, area);
 
         let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
         let node_editing = self.node_edit.is_some();
@@ -6290,6 +6336,125 @@ impl OrleansApp {
                 self.fit_pending = true;
             }
         }
+    }
+
+    fn draw_rulers(&self, painter: &egui::Painter, full: Rect, plot: Rect) {
+        let palette = self.palette();
+        let left = Rect::from_min_max(full.min, egui::pos2(plot.min.x, plot.max.y));
+        let bottom = Rect::from_min_max(egui::pos2(plot.min.x, plot.max.y), full.max);
+        let corner = Rect::from_min_max(
+            egui::pos2(full.min.x, plot.max.y),
+            egui::pos2(plot.min.x, full.max.y),
+        );
+        painter.rect_filled(left, 0.0, palette.ruler_bg);
+        painter.rect_filled(bottom, 0.0, palette.ruler_bg);
+        painter.rect_filled(corner, 0.0, palette.ruler_bg);
+        painter.line_segment(
+            [
+                egui::pos2(plot.min.x, full.min.y),
+                egui::pos2(plot.min.x, plot.max.y),
+            ],
+            Stroke::new(1.0, palette.ruler_line),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(plot.min.x, plot.max.y),
+                egui::pos2(full.max.x, plot.max.y),
+            ],
+            Stroke::new(1.0, palette.ruler_line),
+        );
+
+        let zoom = f64::from(self.view.zoom);
+        let label_step = nice_step(90.0 / zoom.max(1e-6));
+        let mut tick_step = label_step / 10.0;
+        for divisor in [5.0, 2.0] {
+            if tick_step * zoom < 6.0 {
+                tick_step = label_step / divisor;
+            }
+        }
+        let visible = self.view.visible_world(plot);
+        let font = egui::FontId::monospace(9.0);
+
+        let mut x = (visible.x0 / tick_step).floor() * tick_step;
+        while x <= visible.x1 + tick_step {
+            let screen_x = self.view.world_to_screen(plot, Point::new(x, 0.0)).x;
+            if screen_x >= plot.min.x && screen_x <= plot.max.x {
+                let major = ((x / label_step) - (x / label_step).round()).abs() < 1e-6;
+                let length = if major { 7.0 } else { 3.0 };
+                painter.line_segment(
+                    [
+                        egui::pos2(screen_x, plot.max.y),
+                        egui::pos2(screen_x, plot.max.y + length),
+                    ],
+                    Stroke::new(1.0, palette.ruler_line),
+                );
+                if major {
+                    painter.text(
+                        egui::pos2(screen_x + 2.0, full.max.y - 2.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        ruler_label(x, label_step),
+                        font.clone(),
+                        palette.ruler_text,
+                    );
+                }
+            }
+            x += tick_step;
+        }
+
+        let mut y = (visible.y0 / tick_step).floor() * tick_step;
+        while y <= visible.y1 + tick_step {
+            let screen_y = self.view.world_to_screen(plot, Point::new(0.0, y)).y;
+            if screen_y >= plot.min.y && screen_y <= plot.max.y {
+                let major = ((y / label_step) - (y / label_step).round()).abs() < 1e-6;
+                let length = if major { 7.0 } else { 3.0 };
+                painter.line_segment(
+                    [
+                        egui::pos2(plot.min.x - length, screen_y),
+                        egui::pos2(plot.min.x, screen_y),
+                    ],
+                    Stroke::new(1.0, palette.ruler_line),
+                );
+                if major {
+                    painter.text(
+                        egui::pos2(plot.min.x - 8.0, screen_y),
+                        egui::Align2::RIGHT_CENTER,
+                        ruler_label(y, label_step),
+                        font.clone(),
+                        palette.ruler_text,
+                    );
+                }
+            }
+            y += tick_step;
+        }
+
+        // Make the shared origin explicit even when a tick loop starts just
+        // outside the visible range.
+        let origin = self.view.world_to_screen(plot, Point::ORIGIN);
+        if origin.x >= full.min.x && origin.x <= plot.max.x {
+            painter.text(
+                egui::pos2(origin.x.max(plot.min.x) + 2.0, full.max.y - 2.0),
+                egui::Align2::LEFT_BOTTOM,
+                "0",
+                font.clone(),
+                palette.ruler_text,
+            );
+        }
+        if origin.y >= plot.min.y && origin.y <= plot.max.y + 1.0 {
+            painter.text(
+                egui::pos2(plot.min.x - 8.0, origin.y.min(plot.max.y)),
+                egui::Align2::RIGHT_CENTER,
+                "0",
+                font.clone(),
+                palette.ruler_text,
+            );
+        }
+        painter.text(
+            egui::pos2(full.min.x + 4.0, full.min.y + 4.0),
+            egui::Align2::LEFT_TOP,
+            "mm",
+            font,
+            palette.ruler_text,
+        );
     }
 
     fn grid_step(&self) -> f64 {
@@ -7221,6 +7386,18 @@ fn snap_point(point: Point, step: f64) -> Point {
     )
 }
 
+fn ruler_label(value: f64, step: f64) -> String {
+    let value = if value.abs() < step * 0.5 { 0.0 } else { value };
+    let decimals = if step < 0.1 {
+        2
+    } else if step < 1.0 {
+        1
+    } else {
+        0
+    };
+    format!("{value:.decimals$}")
+}
+
 fn nice_step(target: f64) -> f64 {
     if !target.is_finite() || target <= 0.0 {
         return 10.0;
@@ -7253,6 +7430,7 @@ fn format_duration(seconds: f64) -> String {
 
 impl eframe::App for OrleansApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        i18n::set_language(self.language);
         let ctx = ui.ctx().clone();
         self.pump_machine(&ctx);
         self.ensure_raster_textures(&ctx);
@@ -7433,7 +7611,7 @@ impl OrleansApp {
             return;
         };
         let mut choice = None;
-        egui::Window::new("PDF page")
+        egui::Window::new(tr!("PDF page"))
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -7454,7 +7632,7 @@ impl OrleansApp {
                     if ui.button("Open").clicked() {
                         choice = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr!("Cancel")).clicked() {
                         choice = Some(false);
                     }
                 });
@@ -7488,6 +7666,14 @@ impl Drop for OrleansApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ruler_labels_avoid_duplicate_rounded_values() {
+        assert_eq!(ruler_label(0.2, 0.2), "0.2");
+        assert_eq!(ruler_label(1.0, 1.0), "1");
+        assert_eq!(ruler_label(-0.0, 1.0), "0");
+        assert_eq!(ruler_label(20.0, 20.0), "20");
+    }
 
     #[test]
     fn grid_steps_are_round_numbers() {

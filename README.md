@@ -33,7 +33,7 @@ was decompiled or copied.
 | PDF / AI import (vector paths, page selection) | ✅ |
 | Raster engraving (threshold, Floyd–Steinberg/Atkinson/Bayer dither, grayscale, crop) | ✅ |
 | Tabs/bridges on contour cuts, automatic or manual, with canvas markers | ✅ |
-| GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
+| GUI viewer: layers, speed/power/passes, live stats, G-code export, mm rulers | ✅ |
 | Layer list: selection, Show/Cut, rename, colour, cut-order reorder | ✅ |
 | New layers; move/copy/delete objects between layers; delete empty layers | ✅ |
 | Duplicate selected objects and rectangular arrays | ✅ |
@@ -41,6 +41,7 @@ was decompiled or copied.
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
+| English/Italian interface with persisted language choice | ✅ |
 | Project save/load (`.orleans`, canonical layer/shape snapshot) | ✅ |
 | Import SVG/PDF/DXF/images into the current design, reusing matching colour layers | ✅ |
 | System-font outlining for SVG/DXF text | ✅ |
@@ -56,7 +57,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-159 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+161 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -128,6 +129,11 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   The canvas background, grid, page, bed, travel, selection handles and node
   markers change with it. The choice applies immediately and lasts for the
   session;
+* **Language** in the toolbar switches between English and Italiano. The choice
+  is saved in the user configuration directory and restored at startup;
+* millimetre rulers run along the left and bottom edges of the canvas. They use
+  the same world origin and pan/zoom with the drawing, so both rulers always
+  show aligned coordinates;
 * every SVG colour becomes a layer when a design is opened. When geometry is
   imported or pasted into an existing design, paths whose colour matches an
   existing vector layer are appended to that layer; new layers are created only
@@ -447,6 +453,11 @@ concept of a line and some bridges emit negotiation on connect.
 * SVG and DXF text use the host's system fonts. Missing or SHX fonts fall back
   to sans-serif, so outlines may not match the source exactly.
 * The simulator is protocol-level, not a motion model.
+* Interface localisation currently covers the main editor, layer, machine,
+  job and dialog controls; some diagnostics and platform file dialogs remain
+  in English.
+* Language preference is stored in `$XDG_CONFIG_HOME/orleans/ui.json` (or
+  `~/.config/orleans/ui.json`).
 * The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
   assumes work zero coincides with machine zero.
 * `.orleans` files use format 2 and are not backward-compatible with pre-release
