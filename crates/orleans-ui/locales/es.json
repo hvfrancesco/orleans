@@ -315,5 +315,14 @@
   "Reconnecting…": "Reconectando…",
   "Bed / max travel": "Cama / recorrido máx.",
   "object(s)": "objeto(s)",
-  "now": "ahora"
+  "now": "ahora",
+  "Top left": "Arriba izquierda",
+  "Top": "Arriba",
+  "Top right": "Arriba derecha",
+  "Left": "Izquierda",
+  "Centre": "Centro",
+  "Right": "Derecha",
+  "Bottom left": "Abajo izquierda",
+  "Bottom": "Abajo",
+  "Bottom right": "Abajo derecha"
 }

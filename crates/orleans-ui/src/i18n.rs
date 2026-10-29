@@ -485,6 +485,15 @@ fn italian(text: &str) -> Option<&'static str> {
         "Chinese UI needs a system CJK font (e.g. Noto Sans CJK)" => {
             "L'interfaccia cinese richiede un font CJK di sistema (ad es. Noto Sans CJK)"
         }
+        "Top left" => "In alto a sinistra",
+        "Top" => "In alto",
+        "Top right" => "In alto a destra",
+        "Left" => "Sinistra",
+        "Centre" => "Centro",
+        "Right" => "Destra",
+        "Bottom left" => "In basso a sinistra",
+        "Bottom" => "In basso",
+        "Bottom right" => "In basso a destra",
         _ => return None,
     })
 }

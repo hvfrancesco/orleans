@@ -315,5 +315,14 @@
   "Reconnecting…": "正在重新连接…",
   "Bed / max travel": "工作台 / 最大行程",
   "object(s)": "个对象",
-  "now": "当前"
+  "now": "当前",
+  "Top left": "左上",
+  "Top": "上",
+  "Top right": "右上",
+  "Left": "左",
+  "Centre": "居中",
+  "Right": "右",
+  "Bottom left": "左下",
+  "Bottom": "下",
+  "Bottom right": "右下"
 }

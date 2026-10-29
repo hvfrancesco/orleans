@@ -484,15 +484,15 @@ impl SelectionAnchor {
 
     fn label(self) -> &'static str {
         match self {
-            Self::TopLeft => "Top left",
-            Self::Top => "Top",
-            Self::TopRight => "Top right",
-            Self::Left => "Left",
-            Self::Center => "Centre",
-            Self::Right => "Right",
-            Self::BottomLeft => "Bottom left",
-            Self::Bottom => "Bottom",
-            Self::BottomRight => "Bottom right",
+            Self::TopLeft => tr!("Top left"),
+            Self::Top => tr!("Top"),
+            Self::TopRight => tr!("Top right"),
+            Self::Left => tr!("Left"),
+            Self::Center => tr!("Centre"),
+            Self::Right => tr!("Right"),
+            Self::BottomLeft => tr!("Bottom left"),
+            Self::Bottom => tr!("Bottom"),
+            Self::BottomRight => tr!("Bottom right"),
         }
     }
 

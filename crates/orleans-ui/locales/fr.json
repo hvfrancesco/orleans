@@ -315,5 +315,14 @@
   "Reconnecting…": "Reconnexion…",
   "Bed / max travel": "Plateau / course max.",
   "object(s)": "objet(s)",
-  "now": "maintenant"
+  "now": "maintenant",
+  "Top left": "En haut à gauche",
+  "Top": "En haut",
+  "Top right": "En haut à droite",
+  "Left": "Gauche",
+  "Centre": "Centre",
+  "Right": "Droite",
+  "Bottom left": "En bas à gauche",
+  "Bottom": "En bas",
+  "Bottom right": "En bas à droite"
 }

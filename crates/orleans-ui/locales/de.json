@@ -315,5 +315,14 @@
   "Reconnecting…": "Neu verbinden…",
   "Bed / max travel": "Bett / max. Verfahrweg",
   "object(s)": "Objekt(e)",
-  "now": "jetzt"
+  "now": "jetzt",
+  "Top left": "Oben links",
+  "Top": "Oben",
+  "Top right": "Oben rechts",
+  "Left": "Links",
+  "Centre": "Mitte",
+  "Right": "Rechts",
+  "Bottom left": "Unten links",
+  "Bottom": "Unten",
+  "Bottom right": "Unten rechts"
 }
