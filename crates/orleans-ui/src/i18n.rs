@@ -106,6 +106,22 @@ fn catalogs() -> &'static HashMap<Language, HashMap<String, String>> {
     })
 }
 
+/// Translate an owned status/error message when it is a known static key.
+pub fn tr_owned(text: String) -> String {
+    let language = language();
+    let translated = if language == Language::English {
+        None
+    } else if language == Language::Italiano {
+        italian(&text)
+    } else {
+        catalogs()
+            .get(&language)
+            .and_then(|catalog| catalog.get(&text))
+            .map(String::as_str)
+    };
+    translated.map_or(text, str::to_owned)
+}
+
 /// Translate a source string. Unknown keys stay in English.
 pub fn tr(text: &'static str) -> &'static str {
     let language = language();
@@ -323,6 +339,9 @@ fn italian(text: &str) -> Option<&'static str> {
         }
         "image" => "immagine",
         "images" => "immagini",
+        "connected" => "connesso",
+        "connecting" => "connessione",
+        "offline" => "offline",
         "h" => "h",
         "min" => "min",
         "s" => "s",
@@ -340,6 +359,63 @@ fn italian(text: &str) -> Option<&'static str> {
         "page" => "pagina",
         "of cutting" => "di taglio",
         "highest power" => "potenza massima",
+        "select objects to copy" => "seleziona oggetti da copiare",
+        "clipboard does not contain SVG objects" => "gli appunti non contengono oggetti SVG",
+        "clipboard SVG contains no paths; outline text first" => "l'SVG negli appunti non contiene tracciati; converti prima il testo in tracciati",
+        "clipboard SVG contains no visible geometry" => "l'SVG negli appunti non contiene geometria visibile",
+        "cannot place pasted objects" => "impossibile posizionare gli oggetti incollati",
+        "nothing to import" => "niente da importare",
+        "disconnected" => "disconnesso",
+        "framing job bounds (laser off)…" => "traccia i limiti del lavoro (laser spento)…",
+        "framing complete" => "inquadratura completata",
+        "framing stopped" => "inquadratura interrotta",
+        "enter an endpoint, e.g. tcp://192.168.1.10" => "inserisci un indirizzo, ad es. tcp://192.168.1.10",
+        "machine thread stopped" => "thread della macchina arrestato",
+        "nothing to send: the job has no cuts" => "niente da inviare: il lavoro non ha tagli",
+        "sending job…" => "invio del lavoro…",
+        "nothing to frame: no layers are set to Cut" => "niente da inquadrare: nessun livello è impostato su Taglia",
+        "refresh controller settings first" => "aggiorna prima le impostazioni del controller",
+        "applying controller settings…" => "applicazione impostazioni controller…",
+        "no controller settings changed" => "nessuna impostazione del controller modificata",
+        "select objects to delete" => "seleziona oggetti da eliminare",
+        "select a layer to delete" => "seleziona un livello da eliminare",
+        "only empty layers can be deleted" => "si possono eliminare solo livelli vuoti",
+        "select objects to duplicate" => "seleziona oggetti da duplicare",
+        "array spacing must be a finite number" => "la spaziatura della matrice deve essere un numero finito",
+        "an array needs at least two positions" => "una matrice richiede almeno due posizioni",
+        "array is too large (maximum 500 positions)" => "matrice troppo grande (massimo 500 posizioni)",
+        "select objects to move or copy" => "seleziona oggetti da spostare o copiare",
+        "choose a target layer" => "scegli un livello di destinazione",
+        "cannot put vector objects on a raster layer" => "impossibile inserire oggetti vettoriali in un livello raster",
+        "nothing to move or copy" => "niente da spostare o copiare",
+        "select at least two shapes to group" => "seleziona almeno due forme da raggruppare",
+        "selection is not grouped" => "la selezione non è raggruppata",
+        "already aligned" => "già allineato",
+        "select at least three objects to distribute" => "seleziona almeno tre oggetti da distribuire",
+        "already evenly spaced" => "già distribuito uniformemente",
+        "nothing to undo" => "niente da annullare",
+        "undid edit" => "modifica annullata",
+        "nothing to redo" => "niente da ripristinare",
+        "redid edit" => "modifica ripristinata",
+        "target position is not a finite number" => "la posizione di destinazione non è un numero finito",
+        "selection is already at that position" => "la selezione è già in quella posizione",
+        "added node" => "nodo aggiunto",
+        "select one anchor to delete" => "seleziona un'ancora da eliminare",
+        "select an anchor to delete" => "seleziona un'ancora da eliminare",
+        "cannot delete this node" => "impossibile eliminare questo nodo",
+        "deleted node" => "nodo eliminato",
+        "cannot break at this node" => "impossibile spezzare in questo nodo",
+        "select two endpoint anchors to join" => "seleziona due ancore finali da unire",
+        "cannot join these nodes" => "impossibile unire questi nodi",
+        "select exactly one shape to edit its nodes" => "seleziona esattamente una forma per modificarne i nodi",
+        "node editing: drag anchors and control points" => "modifica nodi: trascina ancore e punti di controllo",
+        "node editing finished" => "modifica nodi terminata",
+        "tab editing finished" => "modifica alette terminata",
+        "click a closed contour to place a tab" => "clicca un contorno chiuso per inserire un'aletta",
+        "removed tab" => "aletta rimossa",
+        "added tab" => "aletta aggiunta",
+        "nothing to export" => "niente da esportare",
+        "nothing to reload" => "niente da ricaricare",
         _ => return None,
     })
 }

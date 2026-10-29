@@ -194,14 +194,14 @@ struct Status {
 impl Status {
     fn ok(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
+            text: i18n::tr_owned(text.into()),
             error: false,
         }
     }
 
     fn error(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
+            text: i18n::tr_owned(text.into()),
             error: true,
         }
     }
@@ -4152,11 +4152,15 @@ impl OrleansApp {
                     ui.heading(tr!("Machine"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (text, color) = match self.link {
-                            LinkState::Connected => ("connected", Color32::from_rgb(120, 200, 130)),
-                            LinkState::Connecting | LinkState::Reconnecting => {
-                                ("connecting", Color32::from_rgb(230, 190, 90))
+                            LinkState::Connected => {
+                                (tr!("connected"), Color32::from_rgb(120, 200, 130))
                             }
-                            LinkState::Disconnected => ("offline", Color32::from_gray(140)),
+                            LinkState::Connecting | LinkState::Reconnecting => {
+                                (tr!("connecting"), Color32::from_rgb(230, 190, 90))
+                            }
+                            LinkState::Disconnected => {
+                                (tr!("offline"), Color32::from_gray(140))
+                            }
                         };
                         ui.label(RichText::new(text).color(self.accent(color)).small());
                     });
@@ -6472,8 +6476,8 @@ impl OrleansApp {
             );
         }
         painter.text(
-            egui::pos2(full.min.x + 4.0, full.min.y + 4.0),
-            egui::Align2::LEFT_TOP,
+            egui::pos2(full.min.x + 4.0, full.max.y - 4.0),
+            egui::Align2::LEFT_BOTTOM,
             "mm",
             font,
             palette.ruler_text,
