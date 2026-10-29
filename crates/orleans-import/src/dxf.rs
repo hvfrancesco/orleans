@@ -1073,6 +1073,11 @@ mod tests {
         let bounds = doc.bounds().expect("text bounds");
         assert!(bounds.width() > 5.0);
         assert!(bounds.height() > 3.0);
+        assert!(doc.layers[0].shapes[0]
+            .path
+            .elements()
+            .iter()
+            .any(|element| matches!(element, kurbo::PathEl::ClosePath)));
     }
 
     #[test]

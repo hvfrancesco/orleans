@@ -102,6 +102,9 @@ pub fn text_path(
                             let start = transform * glyph_point(p0);
                             let end = transform * glyph_point(p1);
                             if current != Some(start) {
+                                if current.is_some() {
+                                    path.close_path();
+                                }
                                 path.move_to(start);
                             }
                             path.line_to(end);
@@ -112,6 +115,9 @@ pub fn text_path(
                             let control = transform * glyph_point(p1);
                             let end = transform * glyph_point(p2);
                             if current != Some(start) {
+                                if current.is_some() {
+                                    path.close_path();
+                                }
                                 path.move_to(start);
                             }
                             path.quad_to(control, end);
@@ -123,6 +129,9 @@ pub fn text_path(
                             let c2 = transform * glyph_point(p2);
                             let end = transform * glyph_point(p3);
                             if current != Some(start) {
+                                if current.is_some() {
+                                    path.close_path();
+                                }
                                 path.move_to(start);
                             }
                             path.curve_to(c1, c2, end);
@@ -131,6 +140,9 @@ pub fn text_path(
                     };
                     current = Some(end);
                     any = true;
+                }
+                if current.is_some() {
+                    path.close_path();
                 }
             }
             pen_x += f64::from(font.h_advance_unscaled(glyph)) * scale * width_factor;
