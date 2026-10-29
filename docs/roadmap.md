@@ -3,7 +3,7 @@
 This document tracks release readiness and work that is intentionally deferred.
 It is a living plan, not a compatibility promise.
 
-## 0.1.0 release checklist
+## 1.0.0 release checklist
 
 - [x] Stable SVG → toolpath → G-code → GRBL pipeline
 - [x] G-code export, simulator and mock controller run
@@ -16,14 +16,14 @@ It is a living plan, not a compatibility promise.
 - [x] Six-language interface
 - [x] 167 automated tests, Clippy and formatting checks
 - [x] User documentation and development docs split from the README
-- [ ] Validate the complete workflow on the physical laser:
-  - [ ] connection and status reporting
-  - [ ] homing, jog and centre-to-work-zero
-  - [ ] framing with the laser off
-  - [ ] laser-off dry run and low-power test square
-  - [ ] pause, resume, stop and reconnect recovery
-- [ ] Add release packaging: version bump, release profile review, binary
-      artifacts, checksums and a short upgrade note
+- [x] Validate the complete workflow on the physical laser:
+  - [x] connection and status reporting
+  - [x] homing, jog and centre-to-work-zero
+  - [x] framing with the laser off
+  - [x] laser-off dry run and low-power test square
+  - [x] pause, resume, stop and reconnect recovery
+- [ ] Add release packaging: release profile review, binary artifacts, checksums
+      and a short upgrade note
 - [ ] Final regression pass in all six languages and both themes
 
 ## Next milestones

@@ -5,9 +5,9 @@ vector designs and raster images, plans toolpaths and streams G-code to
 GRBL-compatible controllers over USB or WiFi. Everything is implemented from
 public specifications: SVG, PDF, DXF, G-code and the GRBL protocol.
 
-> **Status:** pre-1.0 (`0.1.0`). The core editor, GRBL workflow and automated
-> test suite are in place. Physical-machine validation, release packaging and
-> the remaining milestones are tracked in [docs/roadmap.md](docs/roadmap.md).
+> **Status:** `1.0.0`. The core editor and GRBL workflow have been validated
+> end to end on hardware. Release packaging and future milestones are tracked in
+> [docs/roadmap.md](docs/roadmap.md).
 
 ## Highlights
 
