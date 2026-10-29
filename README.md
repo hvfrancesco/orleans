@@ -97,7 +97,7 @@ cargo fmt --all -- --check
 cargo build --release
 ```
 
-The suite currently contains **163 tests**, including the full SVG → toolpath →
+The suite currently contains **166 tests**, including the full SVG → toolpath →
 G-code → TCP controller integration run.
 
 The GUI is behind the default `gui` feature. Build with `--no-default-features`

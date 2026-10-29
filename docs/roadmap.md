@@ -14,7 +14,7 @@ It is a living plan, not a compatibility promise.
       pause/resume and stop
 - [x] Native `.orleans` project format
 - [x] Six-language interface
-- [x] 163 automated tests, Clippy and formatting checks
+- [x] 166 automated tests, Clippy and formatting checks
 - [x] User documentation and development docs split from the README
 - [ ] Validate the complete workflow on the physical laser:
   - [ ] connection and status reporting

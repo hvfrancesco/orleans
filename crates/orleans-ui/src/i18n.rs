@@ -280,7 +280,7 @@ fn italian(text: &str) -> Option<&'static str> {
         "To" => "A",
         "Choose layer" => "Scegli livello",
         "Done" => "Fatto",
-        "Delete node" => "Elimina nodo",
+        "Delete nodes" => "Elimina nodi",
         "Snap" => "Aggancia",
         "Geometry" => "Geometria",
         "No design loaded" => "Nessun progetto caricato",
@@ -325,7 +325,7 @@ fn italian(text: &str) -> Option<&'static str> {
             "Sposta il punto di riferimento selezionato su queste coordinate"
         }
         "Snap dragged nodes to the canvas grid" => "Aggancia i nodi trascinati alla griglia del piano",
-        "Delete the selected anchor (Del)" => "Elimina l'ancora selezionata (Canc)",
+        "Delete the selected anchors (Del)" => "Elimina le ancore selezionate (Canc)",
         "Velocity-scaled power. Required for a safe pause when $32=1." => {
             "Potenza proporzionale alla velocità. Necessaria per una pausa sicura con $32=1."
         }
@@ -407,10 +407,11 @@ fn italian(text: &str) -> Option<&'static str> {
         "target position is not a finite number" => "la posizione di destinazione non è un numero finito",
         "selection is already at that position" => "la selezione è già in quella posizione",
         "added node" => "nodo aggiunto",
-        "select one anchor to delete" => "seleziona un'ancora da eliminare",
+        "select one or more anchors to delete" => "seleziona una o più ancore da eliminare",
         "select an anchor to delete" => "seleziona un'ancora da eliminare",
-        "cannot delete this node" => "impossibile eliminare questo nodo",
+        "cannot delete these nodes" => "impossibile eliminare questi nodi",
         "deleted node" => "nodo eliminato",
+        "deleted nodes" => "nodi eliminati",
         "cannot break at this node" => "impossibile spezzare in questo nodo",
         "select two endpoint anchors to join" => "seleziona due ancore finali da unire",
         "cannot join these nodes" => "impossibile unire questi nodi",

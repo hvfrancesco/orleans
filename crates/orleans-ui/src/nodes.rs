@@ -400,6 +400,27 @@ pub fn delete_anchor(path: &mut BezPath, node: NodeRef) -> bool {
     true
 }
 
+/// Delete every selected anchor, in descending element order so later indices
+/// stay valid. Control points in `nodes` are ignored.
+///
+/// Returns the number of anchors actually removed. At least one drawing
+/// segment is always preserved by [`delete_anchor`].
+pub fn delete_anchors(path: &mut BezPath, nodes: &[NodeRef]) -> usize {
+    let mut anchors: Vec<NodeRef> = nodes
+        .iter()
+        .copied()
+        .filter(|node| node.kind == NodeKind::Anchor)
+        .collect();
+    anchors.sort_by_key(|node| std::cmp::Reverse(node.element));
+    let mut deleted = 0;
+    for node in anchors {
+        if delete_anchor(path, node) {
+            deleted += 1;
+        }
+    }
+    deleted
+}
+
 /// Break a path at an anchor. A closed contour opens at the anchor; an interior
 /// anchor of an open contour splits it into two subpaths. Endpoint anchors of
 /// open contours are already loose ends, so they cannot be broken.
@@ -1056,6 +1077,75 @@ mod tests {
                 PathEl::ClosePath,
             ]
         );
+    }
+
+    #[test]
+    fn deleting_several_anchors_uses_the_original_indices() {
+        let mut path = BezPath::from_svg("M0,0 L10,0 L10,10 L0,10 Z").expect("path");
+        let deleted = delete_anchors(
+            &mut path,
+            &[
+                NodeRef {
+                    element: 1,
+                    kind: NodeKind::Anchor,
+                },
+                NodeRef {
+                    element: 2,
+                    kind: NodeKind::Anchor,
+                },
+            ],
+        );
+        assert_eq!(deleted, 2);
+        assert_eq!(
+            path.elements(),
+            &[
+                PathEl::MoveTo(Point::new(0.0, 0.0)),
+                PathEl::LineTo(Point::new(0.0, 10.0)),
+                PathEl::ClosePath,
+            ]
+        );
+    }
+
+    #[test]
+    fn deleting_several_nodes_ignores_controls() {
+        let mut path = sample();
+        let deleted = delete_anchors(
+            &mut path,
+            &[
+                NodeRef {
+                    element: 1,
+                    kind: NodeKind::Anchor,
+                },
+                NodeRef {
+                    element: 2,
+                    kind: NodeKind::Control1,
+                },
+            ],
+        );
+        assert_eq!(deleted, 1);
+        assert!(path.elements().iter().all(
+            |element| !matches!(element, PathEl::LineTo(point) if *point == Point::new(10.0, 0.0))
+        ));
+    }
+
+    #[test]
+    fn deleting_several_anchors_preserves_a_segment() {
+        let mut path = BezPath::from_svg("M0,0 L10,0").expect("path");
+        let deleted = delete_anchors(
+            &mut path,
+            &[
+                NodeRef {
+                    element: 0,
+                    kind: NodeKind::Anchor,
+                },
+                NodeRef {
+                    element: 1,
+                    kind: NodeKind::Anchor,
+                },
+            ],
+        );
+        assert_eq!(deleted, 0);
+        assert_eq!(path.elements().len(), 2);
     }
 
     #[test]

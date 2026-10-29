@@ -657,6 +657,9 @@ pub struct OrleansApp {
     selected_raster: Option<usize>,
     raster_drag: Option<RasterDrag>,
     node_edit: Option<ShapeRef>,
+    /// When node editing was last left, used to avoid turning the second click
+    /// of an exit double-click into a fit.
+    node_edit_exit_at: Option<Instant>,
     selected_nodes: BTreeSet<NodeRef>,
     node_drag: Option<NodeDrag>,
     node_snap: bool,
@@ -754,6 +757,7 @@ impl OrleansApp {
             selected_raster: None,
             raster_drag: None,
             node_edit: None,
+            node_edit_exit_at: None,
             selected_nodes: BTreeSet::new(),
             node_drag: None,
             node_snap: false,
@@ -2137,6 +2141,19 @@ impl OrleansApp {
             .find(|group| group.members.contains(shape))
             .map(|group| group.members.clone())
             .unwrap_or_else(|| std::iter::once(shape.clone()).collect())
+    }
+
+    /// Select the vector shape or raster image under a canvas position.
+    fn select_canvas_hit(&mut self, position: Pos2, area: Rect, additive: bool) {
+        let world = self.view.screen_to_world(area, position);
+        if let Some(hit) = self.hit_test(world) {
+            self.select_shape_unit(&hit, additive, true);
+        } else if let Some(layer) = self.raster_at(world) {
+            self.select_raster_layer(layer);
+        } else if !additive {
+            self.selected_shapes.clear();
+            self.selected_raster = None;
+        }
     }
 
     /// Select a shape or its whole group. With `toggle`, an already fully
@@ -3833,6 +3850,17 @@ impl OrleansApp {
         best.map(|(_, _, node)| node)
     }
 
+    /// Whether a canvas position is still on the shape being node-edited.
+    /// Filled shapes count as inside, not only their outline.
+    fn node_target_at(&self, screen: Pos2, area: Rect) -> bool {
+        let Some(target) = self.node_edit.as_ref() else {
+            return false;
+        };
+        self.hit_test(self.view.screen_to_world(area, screen))
+            .as_ref()
+            == Some(target)
+    }
+
     fn begin_node_drag(&mut self, node: NodeRef, world: Point) {
         if self.node_edit.is_none() {
             return;
@@ -3989,39 +4017,26 @@ impl OrleansApp {
         true
     }
 
-    fn delete_selected_node(&mut self) {
-        let Some(node) = self
+    fn delete_selected_nodes(&mut self) {
+        let selected: Vec<NodeRef> = self
             .selected_nodes
             .iter()
-            .next()
             .copied()
-            .filter(|_| self.selected_nodes.len() == 1)
-        else {
-            self.set_status("select one anchor to delete", true);
-            return;
-        };
-        if node.kind != NodeKind::Anchor {
-            self.set_status("select an anchor to delete", true);
+            .filter(|node| node.kind == NodeKind::Anchor)
+            .collect();
+        if selected.is_empty() {
+            self.set_status("select one or more anchors to delete", true);
             return;
         }
         let Some(target) = self.node_edit.clone() else {
             return;
         };
-        let path = {
-            let Some(shape) = self
-                .doc
-                .layers
-                .iter()
-                .find(|layer| layer.index == target.layer)
-                .and_then(|layer| layer.shapes.iter().find(|shape| shape.id == target.shape))
-            else {
-                return;
-            };
-            shape.path.clone()
+        let Some(mut path) = self.node_path(&target) else {
+            return;
         };
-        let mut path = path;
-        if !nodes::delete_anchor(&mut path, node) {
-            self.set_status("cannot delete this node", true);
+        let deleted = nodes::delete_anchors(&mut path, &selected);
+        if deleted == 0 {
+            self.set_status("cannot delete these nodes", true);
             return;
         }
         self.push_selection_undo();
@@ -4045,7 +4060,14 @@ impl OrleansApp {
         self.selected_nodes.clear();
         self.node_drag = None;
         self.dirty = true;
-        self.set_status("deleted node", false);
+        self.set_status(
+            if deleted == 1 {
+                "deleted node"
+            } else {
+                "deleted nodes"
+            },
+            false,
+        );
     }
 
     fn node_path(&self, target: &ShapeRef) -> Option<kurbo::BezPath> {
@@ -4133,6 +4155,22 @@ impl OrleansApp {
         self.apply_node_edit(&target, path, "joined nodes");
     }
 
+    fn enter_node_edit(&mut self, target: ShapeRef) {
+        self.tab_edit_layer = None;
+        self.selected_shapes.clear();
+        self.selected_shapes.insert(target.clone());
+        self.selected_layer = Some(target.layer);
+        self.node_edit = Some(target);
+        self.node_edit_exit_at = None;
+        self.selected_nodes.clear();
+        self.node_drag = None;
+        self.selected_raster = None;
+        self.active_handle = None;
+        self.dragging_shape = false;
+        self.selection_box = None;
+        self.set_status("node editing: drag anchors and control points", false);
+    }
+
     fn toggle_node_edit(&mut self) {
         if self.node_edit.is_some() {
             self.exit_node_edit();
@@ -4142,20 +4180,16 @@ impl OrleansApp {
             self.set_status("select exactly one shape to edit its nodes", true);
             return;
         }
-        self.tab_edit_layer = None;
-        self.node_edit = self.selected_shapes.iter().next().cloned();
-        self.selected_nodes.clear();
-        self.node_drag = None;
-        self.selected_raster = None;
-        self.active_handle = None;
-        self.dragging_shape = false;
-        self.set_status("node editing: drag anchors and control points", false);
+        if let Some(target) = self.selected_shapes.iter().next().cloned() {
+            self.enter_node_edit(target);
+        }
     }
 
     fn exit_node_edit(&mut self) {
         if self.node_edit.take().is_some() {
             self.selected_nodes.clear();
             self.node_drag = None;
+            self.node_edit_exit_at = Some(Instant::now());
             self.set_status("node editing finished", false);
         }
     }
@@ -6372,6 +6406,10 @@ impl OrleansApp {
                                     ));
                             });
                             ui.horizontal(|ui| {
+                                let any_anchor = self
+                                    .selected_nodes
+                                    .iter()
+                                    .any(|node| node.kind == NodeKind::Anchor);
                                 let single_anchor = self.selected_nodes.len() == 1
                                     && self
                                         .selected_nodes
@@ -6383,11 +6421,11 @@ impl OrleansApp {
                                         .iter()
                                         .all(|node| node.kind == NodeKind::Anchor);
                                 if ui
-                                    .add_enabled(single_anchor, egui::Button::new(tr!("Delete node")))
-                                    .on_hover_text(tr!("Delete the selected anchor (Del)"))
+                                    .add_enabled(any_anchor, egui::Button::new(tr!("Delete nodes")))
+                                    .on_hover_text(tr!("Delete the selected anchors (Del)"))
                                     .clicked()
                                 {
-                                    self.delete_selected_node();
+                                    self.delete_selected_nodes();
                                 }
                                 if ui
                                     .add_enabled(single_anchor, egui::Button::new(tr!("Break")))
@@ -6583,22 +6621,16 @@ impl OrleansApp {
                             self.selected_nodes.clear();
                             self.selected_nodes.insert(node);
                         }
+                    } else if !self.node_target_at(position, area) {
+                        self.exit_node_edit();
+                        self.select_canvas_hit(position, area, additive);
                     } else if !additive {
                         self.selected_nodes.clear();
                     }
                 } else if self.selection_handle_at(position, area).is_none()
                     && self.raster_handle_at(position, area).is_none()
                 {
-                    let world = self.view.screen_to_world(area, position);
-                    let hit = self.hit_test(world);
-                    if let Some(hit) = hit {
-                        self.select_shape_unit(&hit, additive, true);
-                    } else if let Some(layer) = self.raster_at(world) {
-                        self.select_raster_layer(layer);
-                    } else if !additive {
-                        self.selected_shapes.clear();
-                        self.selected_raster = None;
-                    }
+                    self.select_canvas_hit(position, area, additive);
                 }
             }
         }
@@ -6782,16 +6814,32 @@ impl OrleansApp {
             }
         }
         if response.double_clicked() {
-            if node_editing {
-                if let Some(position) = response.interact_pointer_pos() {
-                    if self.node_at(position, area).is_none()
-                        && !self.insert_node_at(position, area)
+            if let Some(position) = response.interact_pointer_pos() {
+                if self.node_edit.is_some() {
+                    if self.node_at(position, area).is_none() && self.node_target_at(position, area)
                     {
-                        self.fit_pending = true;
+                        self.insert_node_at(position, area);
+                    } else if !self.node_target_at(position, area) {
+                        self.exit_node_edit();
+                    }
+                } else if !tab_editing {
+                    let world = self.view.screen_to_world(area, position);
+                    if let Some(hit) = self.hit_test(world) {
+                        self.enter_node_edit(hit);
+                    } else {
+                        // The first click of this double-click may have just
+                        // left node editing. Consume that exit instead of
+                        // immediately fitting the whole design.
+                        let just_exited = self
+                            .node_edit_exit_at
+                            .is_some_and(|at| at.elapsed() < Duration::from_millis(600));
+                        if just_exited {
+                            self.node_edit_exit_at = None;
+                        } else {
+                            self.fit_pending = true;
+                        }
                     }
                 }
-            } else if !tab_editing {
-                self.fit_pending = true;
             }
         }
     }
@@ -8171,7 +8219,7 @@ impl eframe::App for OrleansApp {
             Some(Action::Duplicate) => self.duplicate_selected(&[(0.0, 0.0)]),
             Some(Action::ExitNodes) => self.exit_node_edit(),
             Some(Action::ExitTabs) => self.exit_tab_edit(),
-            Some(Action::DeleteNode) => self.delete_selected_node(),
+            Some(Action::DeleteNode) => self.delete_selected_nodes(),
             Some(Action::DeleteObjects) => self.delete_selected_objects(),
             Some(Action::Reload) => {
                 if let Some(path) = self.project_path.clone() {

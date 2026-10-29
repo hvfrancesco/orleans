@@ -161,19 +161,25 @@ The **Selection** panel offers numeric Move, uniform Scale and Rotate operations
 The **Position** row places a chosen reference point (corner, edge or centre) at
 exact X/Y coordinates relative to the job origin `(0, 0)`; **Move to** applies it.
 
-With one shape selected, **Edit nodes** shows its anchors and Bézier controls:
+Double-click any vector object to enter node editing for that shape. The
+**Edit nodes** button in the Selection panel does the same for the selected
+shape.
+
+While editing:
 
 - Drag an anchor or control point to reshape the path.
 - Double-click a segment to insert an anchor.
-- Select an anchor and press `Delete` or **Delete node** to remove it.
-- `Ctrl`/`Shift`-click selects several anchors.
+- Select an anchor and press `Delete` or **Delete nodes** to remove it.
+- `Ctrl`/`Shift`-click selects several anchors. `Delete` removes all selected
+  anchors in one undoable operation.
 - **Break** opens a closed contour at the selected anchor or splits an open path
   there.
 - **Join** connects two selected endpoint anchors, closing the contour when both
   belong to the same open path.
 - **Snap** snaps node drags to the canvas grid.
 - **Geometry** snaps node drags to anchors and segments of other visible shapes.
-- Use **Done** or `Esc` to leave node mode.
+- Click outside the edited shape, double-click outside it, or use **Done** or
+  `Esc` to leave node mode.
 
 Breaking a closed contour leaves the same anchor at both open ends. Joining
 different contours inserts a straight line when the endpoints differ.
@@ -296,5 +302,5 @@ or `~/.local/share/orleans/job-history.json`. It can be cleared from the panel.
 | `Ctrl+C`, `Ctrl+X`, `Ctrl+V` | Copy, cut and paste SVG geometry |
 | `Ctrl+Enter` | Confirm and send a job |
 | `F`, double-click | Fit the design |
-| `Delete` | Delete selected objects or node |
+| `Delete` | Delete selected objects or anchors |
 | `Esc` | Leave tab or node mode |
