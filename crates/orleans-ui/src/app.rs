@@ -46,26 +46,26 @@ impl Theme {
         match self {
             Self::Dark => egui::Visuals::dark(),
             Self::Light => {
-                // egui's light theme is almost white; soften the panels and
-                // controls a little so the canvas is not the only mid-tone.
+                // A warm, mid-light grey set; egui's stock light theme is too
+                // close to white for a full-screen editor.
                 let mut visuals = egui::Visuals::light();
-                visuals.panel_fill = Color32::from_gray(228);
-                visuals.window_fill = Color32::from_gray(236);
-                visuals.faint_bg_color = Color32::from_gray(218);
-                visuals.extreme_bg_color = Color32::from_gray(245);
-                visuals.code_bg_color = Color32::from_gray(222);
-                visuals.window_stroke = Stroke::new(1.0, Color32::from_gray(180));
-                visuals.hyperlink_color = Color32::from_rgb(0, 105, 190);
-                visuals.selection.bg_fill = Color32::from_rgb(170, 205, 235);
-                visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0, 80, 130));
-                visuals.widgets.noninteractive.bg_fill = Color32::from_gray(228);
-                visuals.widgets.noninteractive.weak_bg_fill = Color32::from_gray(228);
-                visuals.widgets.inactive.bg_fill = Color32::from_gray(214);
-                visuals.widgets.inactive.weak_bg_fill = Color32::from_gray(214);
-                visuals.widgets.hovered.bg_fill = Color32::from_gray(202);
-                visuals.widgets.hovered.weak_bg_fill = Color32::from_gray(202);
-                visuals.widgets.active.bg_fill = Color32::from_gray(182);
-                visuals.widgets.active.weak_bg_fill = Color32::from_gray(182);
+                visuals.panel_fill = Color32::from_rgb(195, 195, 187);
+                visuals.window_fill = Color32::from_rgb(204, 204, 196);
+                visuals.faint_bg_color = Color32::from_rgb(184, 184, 176);
+                visuals.extreme_bg_color = Color32::from_rgb(232, 232, 225);
+                visuals.code_bg_color = Color32::from_rgb(188, 188, 180);
+                visuals.window_stroke = Stroke::new(1.0, Color32::from_gray(148));
+                visuals.hyperlink_color = Color32::from_rgb(0, 95, 170);
+                visuals.selection.bg_fill = Color32::from_rgb(160, 196, 226);
+                visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0, 70, 120));
+                visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(195, 195, 187);
+                visuals.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(195, 195, 187);
+                visuals.widgets.inactive.bg_fill = Color32::from_rgb(184, 184, 176);
+                visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(184, 184, 176);
+                visuals.widgets.hovered.bg_fill = Color32::from_rgb(171, 171, 163);
+                visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(171, 171, 163);
+                visuals.widgets.active.bg_fill = Color32::from_rgb(154, 154, 146);
+                visuals.widgets.active.weak_bg_fill = Color32::from_rgb(154, 154, 146);
                 visuals
             }
         }
@@ -127,17 +127,17 @@ impl CanvasPalette {
                 tab: Color32::from_rgb(110, 200, 230),
             },
             Theme::Light => Self {
-                background: Color32::from_rgb(232, 232, 228),
-                grid: Color32::from_gray(214),
-                axis_x: Color32::from_rgb(180, 80, 80),
-                axis_y: Color32::from_rgb(80, 140, 80),
-                page: Color32::from_gray(138),
-                travel: Color32::from_gray(178),
+                background: Color32::from_rgb(208, 208, 200),
+                grid: Color32::from_gray(186),
+                axis_x: Color32::from_rgb(165, 65, 65),
+                axis_y: Color32::from_rgb(65, 125, 65),
+                page: Color32::from_gray(105),
+                travel: Color32::from_gray(148),
                 bed_fill: Color32::from_rgba_unmultiplied(60, 100, 160, 20),
                 bed_stroke: Color32::from_rgb(60, 95, 150),
                 bed_text: Color32::from_rgb(60, 90, 135),
-                muted: Color32::from_gray(140),
-                selection: Color32::from_rgb(190, 130, 0),
+                muted: Color32::from_gray(108),
+                selection: Color32::from_rgb(165, 105, 0),
                 selection_bounds: Color32::from_rgb(205, 145, 20),
                 handle_fill: Color32::WHITE,
                 handle_stroke: Color32::from_rgb(120, 90, 30),
@@ -6062,7 +6062,7 @@ impl OrleansApp {
     }
 
     fn draw_page(&self, painter: &egui::Painter, area: Rect) {
-        if self.doc.width <= 0.0 || self.doc.height <= 0.0 {
+        if self.doc.is_empty() || self.doc.width <= 0.0 || self.doc.height <= 0.0 {
             return;
         }
         let a = self.view.world_to_screen(area, Point::new(0.0, 0.0));
@@ -6121,7 +6121,7 @@ impl OrleansApp {
                 1.4
             };
             if layer.mode == LayerMode::Fill {
-                let fill_stroke = Stroke::new(0.8, color.gamma_multiply(0.72));
+                let fill_stroke = Stroke::new(0.8, color.gamma_multiply(0.86));
                 if layer.output {
                     for op in &self.job.ops {
                         let Op::Cut {
@@ -6797,8 +6797,11 @@ fn display_color(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(lift(r), lift(g), lift(b))
 }
 
-/// Layer colours on the light canvas. Dark colours stay as imported; very
-/// bright colours are darkened so they remain visible on the pale background.
+/// Layer colours on the light canvas.
+///
+/// Keep the imported colour whenever it already contrasts with the canvas.
+/// Only very bright colours (yellow, white and pale tints) are scaled toward
+/// black, preserving their hue instead of washing them out.
 fn layer_color(rgb: [u8; 3], light: bool) -> Color32 {
     if !light {
         return display_color(rgb);
@@ -6806,14 +6809,14 @@ fn layer_color(rgb: [u8; 3], light: bool) -> Color32 {
     let r = f32::from(rgb[0]);
     let g = f32::from(rgb[1]);
     let b = f32::from(rgb[2]);
-    let brightest = r.max(g).max(b);
-    if brightest <= 220.0 {
+    let luma = 0.299 * r + 0.587 * g + 0.114 * b;
+    const MAX_LUMA: f32 = 155.0;
+    if luma <= MAX_LUMA {
         return Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
     }
-    let t = (brightest - 220.0) / 35.0;
-    let factor = 1.0 - 0.55 * t;
-    let darken = |c: f32| (c * factor).round() as u8;
-    Color32::from_rgb(darken(r), darken(g), darken(b))
+    let factor = MAX_LUMA / luma;
+    let scale = |c: f32| (c * factor).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(scale(r), scale(g), scale(b))
 }
 
 fn unique_layer_name(used: &mut BTreeSet<String>, base: &str) -> String {
@@ -7103,7 +7106,10 @@ mod tests {
             Color32::from_rgb(20, 40, 60)
         );
         let white = layer_color([255, 255, 255], true);
-        assert!(white.r() < 150 && white.g() < 150 && white.b() < 150);
+        assert!(white.r() < 180 && white.g() < 180 && white.b() < 180);
+        // Saturated colours keep their exact imported value on the light canvas.
+        assert_eq!(layer_color([255, 0, 0], true), Color32::from_rgb(255, 0, 0));
+        assert_eq!(layer_color([0, 128, 0], true), Color32::from_rgb(0, 128, 0));
         // The dark canvas still lifts dark colours.
         assert_eq!(
             layer_color([0, 0, 0], false),
