@@ -317,6 +317,26 @@ fn italian(text: &str) -> Option<&'static str> {
         "waiting for the link…" => "in attesa del collegamento…",
         "Sending…" => "Invio…",
         "Framing…" => "Inquadratura…",
+        "{} layers · {} shapes{} · {} cuts" => "{} livelli · {} forme{} · {} tagli",
+        "cut {:.1} mm · travel {:.1} mm · ~{}" => {
+            "taglio {:.1} mm · spostamento {:.1} mm · ~{}"
+        }
+        "image" => "immagine",
+        "images" => "immagini",
+        "layers" => "livelli",
+        "shape" => "forma",
+        "shapes" => "forme",
+        "shown" => "visibili",
+        "line" => "linea",
+        "fill" => "riempimento",
+        "raster" => "raster",
+        "contours" => "contorni",
+        "cuts" => "tagli",
+        "cut" => "taglio",
+        "travel" => "spostamento",
+        "page" => "pagina",
+        "of cutting" => "di taglio",
+        "highest power" => "potenza massima",
         _ => return None,
     })
 }

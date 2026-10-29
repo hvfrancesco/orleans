@@ -168,5 +168,22 @@
   "Sending…": "Senden…",
   "Framing…": "Rahmung…",
   "cut": "Schnitt",
-  "frame": "Rahmung"
+  "frame": "Rahmung",
+  "{} layers · {} shapes{} · {} cuts": "{} Ebenen · {} Formen{} · {} Schnitte",
+  "cut {:.1} mm · travel {:.1} mm · ~{}": "Schnitt {:.1} mm · Fahrweg {:.1} mm · ~{}",
+  "image": "Bild",
+  "images": "Bilder",
+  "layers": "Ebenen",
+  "shapes": "Formen",
+  "cuts": "Schnitte",
+  "travel": "Fahrweg",
+  "contours": "Konturen",
+  "page": "Seite",
+  "of cutting": "Schnitt",
+  "highest power": "höchste Leistung",
+  "shape": "Form",
+  "shown": "sichtbar",
+  "line": "Linie",
+  "fill": "Füllen",
+  "raster": "Raster"
 }

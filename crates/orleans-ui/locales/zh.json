@@ -168,5 +168,22 @@
   "Sending…": "正在发送…",
   "Framing…": "正在框选…",
   "cut": "切割",
-  "frame": "框选"
+  "frame": "框选",
+  "{} layers · {} shapes{} · {} cuts": "{} 个图层 · {} 个形状{} · {} 次切割",
+  "cut {:.1} mm · travel {:.1} mm · ~{}": "切割 {:.1} mm · 移动 {:.1} mm · 约{}",
+  "image": "张图像",
+  "images": "张图像",
+  "layers": "个图层",
+  "shapes": "个形状",
+  "cuts": "次切割",
+  "travel": "移动",
+  "contours": "条轮廓",
+  "page": "页",
+  "of cutting": "切割长度",
+  "highest power": "最高功率",
+  "shape": "个形状",
+  "shown": "显示",
+  "line": "线条",
+  "fill": "填充",
+  "raster": "位图"
 }

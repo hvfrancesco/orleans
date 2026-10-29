@@ -168,5 +168,22 @@
   "Sending…": "Envoi…",
   "Framing…": "Cadrage…",
   "cut": "découpe",
-  "frame": "cadrage"
+  "frame": "cadrage",
+  "{} layers · {} shapes{} · {} cuts": "{} calques · {} formes{} · {} découpes",
+  "cut {:.1} mm · travel {:.1} mm · ~{}": "coupe {:.1} mm · déplacement {:.1} mm · ~{}",
+  "image": "image",
+  "images": "images",
+  "layers": "calques",
+  "shapes": "formes",
+  "cuts": "découpes",
+  "travel": "déplacement",
+  "contours": "contours",
+  "page": "page",
+  "of cutting": "de coupe",
+  "highest power": "puissance maximale",
+  "shape": "forme",
+  "shown": "affichés",
+  "line": "ligne",
+  "fill": "remplissage",
+  "raster": "raster"
 }

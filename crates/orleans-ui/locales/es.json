@@ -168,5 +168,22 @@
   "Sending…": "Enviando…",
   "Framing…": "Encuadrando…",
   "cut": "corte",
-  "frame": "encuadre"
+  "frame": "encuadre",
+  "{} layers · {} shapes{} · {} cuts": "{} capas · {} formas{} · {} cortes",
+  "cut {:.1} mm · travel {:.1} mm · ~{}": "corte {:.1} mm · recorrido {:.1} mm · ~{}",
+  "image": "imagen",
+  "images": "imágenes",
+  "layers": "capas",
+  "shapes": "formas",
+  "cuts": "cortes",
+  "travel": "recorrido",
+  "contours": "contornos",
+  "page": "página",
+  "of cutting": "de corte",
+  "highest power": "potencia máxima",
+  "shape": "forma",
+  "shown": "visibles",
+  "line": "línea",
+  "fill": "relleno",
+  "raster": "raster"
 }

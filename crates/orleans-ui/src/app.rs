@@ -831,14 +831,12 @@ impl OrleansApp {
                 self.raster_textures.clear();
                 self.raster_texture_keys.clear();
                 self.replan();
-                self.status = Status::ok(format!(
-                    "{}: {} layers, {} shapes, {} contours",
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.display().to_string()),
+                self.status = Status::ok(document_summary(
+                    &path,
                     self.doc.layers.len(),
                     self.doc.shape_count(),
-                    self.preview.contour_count()
+                    self.preview.contour_count(),
+                    None,
                 ));
                 self.path = Some(path);
                 self.project_path = None;
@@ -882,14 +880,12 @@ impl OrleansApp {
                 self.raster_textures.clear();
                 self.raster_texture_keys.clear();
                 self.replan();
-                self.status = Status::ok(format!(
-                    "{}: {} layers, {} shapes, {} contours",
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.display().to_string()),
+                self.status = Status::ok(document_summary(
+                    &path,
                     self.doc.layers.len(),
                     self.doc.shape_count(),
-                    self.preview.contour_count()
+                    self.preview.contour_count(),
+                    None,
                 ));
                 self.path = Some(path);
                 self.project_path = None;
@@ -955,19 +951,12 @@ impl OrleansApp {
                 self.raster_textures.clear();
                 self.raster_texture_keys.clear();
                 self.replan();
-                self.status = Status::ok(format!(
-                    "{}: {} layers, {} shapes, {} contours{}",
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.display().to_string()),
+                self.status = Status::ok(document_summary(
+                    &path,
                     self.doc.layers.len(),
                     self.doc.shape_count(),
                     self.preview.contour_count(),
-                    if page == 0 {
-                        String::new()
-                    } else {
-                        format!(" (page {})", page + 1)
-                    }
+                    (page > 0).then_some(page + 1),
                 ));
                 self.path = Some(path);
                 self.project_path = None;
@@ -4425,8 +4414,9 @@ impl OrleansApp {
                 });
                 ui.label(
                     RichText::new(format!(
-                        "{} cuts · {:.1} mm · ~{}",
+                        "{} {} · {:.1} mm · ~{}",
                         self.job.cuts().count(),
+                        tr!("cuts"),
                         self.job.stats.cut_mm,
                         format_duration(self.job.stats.seconds)
                     ))
@@ -4734,13 +4724,18 @@ impl OrleansApp {
                     .map(|layer| layer.cut.power)
                     .fold(0.0, f64::max);
                 ui.label(format!(
-                    "{cuts} cuts · {:.1} mm of cutting · ~{}",
+                    "{cuts} {} · {:.1} mm {} · ~{}",
+                    tr!("cuts"),
                     self.job.stats.cut_mm,
+                    tr!("of cutting"),
                     format_duration(self.job.stats.seconds)
                 ));
                 ui.label(format!(
-                    "{} layers · highest power {max_power:.0}% · max S {}",
+                    "{} {} · {} {max_power:.0}% · {} {}",
                     self.doc.layers.len(),
+                    tr!("layers"),
+                    tr!("highest power"),
+                    tr!("Max S"),
                     self.gcode_opts.max_s
                 ));
                 ui.add_space(4.0);
@@ -4919,9 +4914,13 @@ impl OrleansApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if total > 0 {
                             ui.label(
-                                RichText::new(format!("{cutting} cut · {visible} shown"))
-                                    .small()
-                                    .weak(),
+                                RichText::new(format!(
+                                    "{cutting} {} · {visible} {}",
+                                    tr!("cut"),
+                                    tr!("shown")
+                                ))
+                                .small()
+                                .weak(),
                             );
                         }
                     });
@@ -4958,12 +4957,19 @@ impl OrleansApp {
                                     format!("{}×{} px", raster.width, raster.height)
                                 } else {
                                     let shapes = layer.shapes.len();
-                                    format!("{shapes} shape{}", if shapes == 1 { "" } else { "s" })
+                                    format!(
+                                        "{shapes} {}",
+                                        if shapes == 1 {
+                                            tr!("shape")
+                                        } else {
+                                            tr!("shapes")
+                                        }
+                                    )
                                 };
                                 let mode = match layer.mode {
-                                    LayerMode::Line => "line",
-                                    LayerMode::Fill => "fill",
-                                    LayerMode::Raster => "raster",
+                                    LayerMode::Line => tr!("line"),
+                                    LayerMode::Fill => tr!("fill"),
+                                    LayerMode::Raster => tr!("raster"),
                                 };
                                 let summary = format!(
                                     "{:.0} mm/min  ·  {:.0}%  ·  ×{}  ·  {mode}",
@@ -6045,20 +6051,31 @@ impl OrleansApp {
                 } else {
                     let rasters = self.doc.raster_count();
                     let images = if rasters > 0 {
-                        format!(" · {rasters} image{}", if rasters == 1 { "" } else { "s" })
+                        let noun = if rasters == 1 {
+                            tr!("image")
+                        } else {
+                            tr!("images")
+                        };
+                        format!(" · {rasters} {noun}")
                     } else {
                         String::new()
                     };
                     ui.label(format!(
-                        "{} layers · {} shapes{images} · {} cuts",
+                        "{} {} · {} {}{} · {} {}",
                         self.doc.layers.len(),
+                        tr!("layers"),
                         self.doc.shape_count(),
-                        self.job.cuts().count()
+                        tr!("shapes"),
+                        images,
+                        self.job.cuts().count(),
+                        tr!("cuts")
                     ));
                     ui.separator();
                     ui.label(format!(
-                        "cut {:.1} mm · travel {:.1} mm · ~{}",
+                        "{} {:.1} mm · {} {:.1} mm · ~{}",
+                        tr!("cut"),
                         self.job.stats.cut_mm,
+                        tr!("travel"),
                         self.job.stats.travel_mm,
                         format_duration(self.job.stats.seconds)
                     ));
@@ -7421,6 +7438,29 @@ fn nice_step(target: f64) -> f64 {
         10.0
     };
     m * base
+}
+
+fn document_summary(
+    path: &std::path::Path,
+    layers: usize,
+    shapes: usize,
+    contours: usize,
+    page: Option<usize>,
+) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let mut summary = format!(
+        "{name}: {layers} {}, {shapes} {}, {contours} {}",
+        tr!("layers"),
+        tr!("shapes"),
+        tr!("contours")
+    );
+    if let Some(page) = page {
+        summary.push_str(&format!(" ({} {page})", tr!("page")));
+    }
+    summary
 }
 
 fn format_duration(seconds: f64) -> String {
