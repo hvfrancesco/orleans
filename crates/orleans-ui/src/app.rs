@@ -772,6 +772,9 @@ impl OrleansApp {
             pending_pdf: None,
         };
         app.apply_theme(&cc.egui_ctx);
+        if language == Language::Chinese && !crate::cjk::install(&cc.egui_ctx) {
+            app.status = Status::error("Chinese UI needs a system CJK font (e.g. Noto Sans CJK)");
+        }
         if let Some(path) = initial {
             app.open_path(path);
         }
@@ -4871,6 +4874,9 @@ impl OrleansApp {
                             self.language = language;
                             i18n::set_language(language);
                             i18n::save_language(language);
+                            if language == Language::Chinese {
+                                crate::cjk::install(ui.ctx());
+                            }
                         }
                     }
                 });

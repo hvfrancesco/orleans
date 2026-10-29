@@ -5,6 +5,7 @@
 //! and streams it to a GRBL controller.
 
 mod app;
+mod cjk;
 mod history;
 mod i18n;
 mod machine;

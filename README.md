@@ -41,7 +41,7 @@ was decompiled or copied.
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
-| English/Italian interface with persisted language choice | ✅ |
+| English, Italian, French, Spanish, German and Chinese interface | ✅ |
 | Project save/load (`.orleans`, canonical layer/shape snapshot) | ✅ |
 | Import SVG/PDF/DXF/images into the current design, reusing matching colour layers | ✅ |
 | System-font outlining for SVG/DXF text | ✅ |
@@ -129,8 +129,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   The canvas background, grid, page, bed, travel, selection handles and node
   markers change with it. The choice applies immediately and lasts for the
   session;
-* **Language** in the toolbar switches between English and Italiano. The choice
-  is saved in the user configuration directory and restored at startup;
+* **Language** in the toolbar switches between English, Italiano, Français,
+  Español, Deutsch and 简体中文. The choice is saved in the user configuration
+  directory and restored at startup. Chinese uses a system CJK font fallback;
 * millimetre rulers run along the left and bottom edges of the canvas. They use
   the same world origin and pan/zoom with the drawing, so both rulers always
   show aligned coordinates;
@@ -455,9 +456,12 @@ concept of a line and some bridges emit negotiation on connect.
 * The simulator is protocol-level, not a motion model.
 * Interface localisation currently covers the main editor, layer, machine,
   job and dialog controls; some diagnostics and platform file dialogs remain
-  in English.
+  in English. Chinese requires a system CJK font such as Noto Sans CJK or
+  Source Han Sans.
 * Language preference is stored in `$XDG_CONFIG_HOME/orleans/ui.json` (or
-  `~/.config/orleans/ui.json`).
+  `~/.config/orleans/ui.json`). Translation catalogs live in
+  `crates/orleans-ui/locales/*.json`; English source strings are the fallback
+  keys.
 * The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
   assumes work zero coincides with machine zero.
 * `.orleans` files use format 2 and are not backward-compatible with pre-release

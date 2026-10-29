@@ -3,26 +3,43 @@
 //! English source text doubles as the translation key. Missing translations
 //! fall back to English, so adding a language never leaves a blank label.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Language {
     #[default]
     English,
     Italiano,
+    French,
+    Spanish,
+    German,
+    Chinese,
 }
 
 impl Language {
-    pub const ALL: [Self; 2] = [Self::English, Self::Italiano];
+    pub const ALL: [Self; 6] = [
+        Self::English,
+        Self::Italiano,
+        Self::French,
+        Self::Spanish,
+        Self::German,
+        Self::Chinese,
+    ];
 
     pub fn native_name(self) -> &'static str {
         match self {
             Self::English => "English",
             Self::Italiano => "Italiano",
+            Self::French => "Français",
+            Self::Spanish => "Español",
+            Self::German => "Deutsch",
+            Self::Chinese => "简体中文",
         }
     }
 
@@ -30,8 +47,14 @@ impl Language {
         for variable in ["LC_ALL", "LC_MESSAGES", "LANG"] {
             if let Ok(value) = std::env::var(variable) {
                 let value = value.to_ascii_lowercase();
-                if value == "it" || value.starts_with("it_") || value.starts_with("it-") {
-                    return Self::Italiano;
+                let code = value.split(['_', '-', '.']).next().unwrap_or_default();
+                match code {
+                    "it" => return Self::Italiano,
+                    "fr" => return Self::French,
+                    "es" => return Self::Spanish,
+                    "de" => return Self::German,
+                    "zh" => return Self::Chinese,
+                    _ => {}
                 }
             }
         }
@@ -42,29 +65,60 @@ impl Language {
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 
 pub fn set_language(language: Language) {
-    CURRENT.store(
-        match language {
-            Language::English => 0,
-            Language::Italiano => 1,
-        },
-        Ordering::Relaxed,
-    );
+    let index = match language {
+        Language::English => 0,
+        Language::Italiano => 1,
+        Language::French => 2,
+        Language::Spanish => 3,
+        Language::German => 4,
+        Language::Chinese => 5,
+    };
+    CURRENT.store(index, Ordering::Relaxed);
 }
 
 pub fn language() -> Language {
     match CURRENT.load(Ordering::Relaxed) {
         1 => Language::Italiano,
+        2 => Language::French,
+        3 => Language::Spanish,
+        4 => Language::German,
+        5 => Language::Chinese,
         _ => Language::English,
     }
 }
 
+static CATALOGS: OnceLock<HashMap<Language, HashMap<String, String>>> = OnceLock::new();
+
+fn catalogs() -> &'static HashMap<Language, HashMap<String, String>> {
+    CATALOGS.get_or_init(|| {
+        let mut catalogs = HashMap::new();
+        for (language, json) in [
+            (Language::French, include_str!("../locales/fr.json")),
+            (Language::Spanish, include_str!("../locales/es.json")),
+            (Language::German, include_str!("../locales/de.json")),
+            (Language::Chinese, include_str!("../locales/zh.json")),
+        ] {
+            if let Ok(entries) = serde_json::from_str::<HashMap<String, String>>(json) {
+                catalogs.insert(language, entries);
+            }
+        }
+        catalogs
+    })
+}
+
 /// Translate a source string. Unknown keys stay in English.
 pub fn tr(text: &'static str) -> &'static str {
-    if language() == Language::Italiano {
-        italian(text).unwrap_or(text)
-    } else {
-        text
+    let language = language();
+    if language == Language::English {
+        return text;
     }
+    if language == Language::Italiano {
+        return italian(text).unwrap_or(text);
+    }
+    catalogs()
+        .get(&language)
+        .and_then(|catalog| catalog.get(text))
+        .map_or(text, String::as_str)
 }
 
 fn italian(text: &str) -> Option<&'static str> {
@@ -308,9 +362,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn italian_dictionary_has_core_labels_and_falls_back() {
+    fn catalogs_cover_core_labels_and_fall_back() {
         assert_eq!(italian("Cut"), Some("Taglia"));
         assert_eq!(italian("Layers"), Some("Livelli"));
         assert_eq!(italian("not a real label"), None);
+
+        let previous = language();
+        set_language(Language::French);
+        assert_eq!(tr("Layers"), "Calques");
+        set_language(Language::Spanish);
+        assert_eq!(tr("Layers"), "Capas");
+        set_language(Language::German);
+        assert_eq!(tr("Layers"), "Ebenen");
+        set_language(Language::Chinese);
+        assert_eq!(tr("Layers"), "图层");
+        assert_eq!(tr("not a real label"), "not a real label");
+        set_language(previous);
     }
 }
