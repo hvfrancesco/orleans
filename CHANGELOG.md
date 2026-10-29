@@ -49,7 +49,8 @@ First stable release.
 ### Release packaging
 
 - Linux x86_64 archive with the binary, docs, licenses and sample design.
-- Linux x86_64 AppImage with desktop integration and icon.
+- Linux x86_64 AppImage with desktop integration and icon; double-clicking it
+  opens the editor, while explicit CLI commands still work.
 - SHA-256 checksums included next to both artifacts.
 - Release builds use thin LTO and stripped symbols.
 

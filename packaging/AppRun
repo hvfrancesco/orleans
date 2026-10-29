@@ -1,4 +1,18 @@
 #!/bin/sh
 set -eu
 HERE="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+
+# Double-clicking the AppImage should open the editor. Explicit CLI commands
+# and version/help flags continue to behave like the normal binary.
+case "${1:-}" in
+    "")
+        set -- gui
+        ;;
+    gui|info|gcode|run|stop|unlock|status|help|-h|--help|-V|--version)
+        ;;
+    *)
+        set -- gui "$@"
+        ;;
+esac
+
 exec "$HERE/usr/bin/orleans" "$@"
