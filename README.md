@@ -42,7 +42,7 @@ was decompiled or copied.
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
 | Project save/load (`.orleans`, canonical layer/shape snapshot) | ✅ |
-| Import SVG/PDF/DXF/images into the current design (hybrid jobs) | ✅ |
+| Import SVG/PDF/DXF/images into the current design, reusing matching colour layers | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
@@ -55,7 +55,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-153 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+154 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -124,7 +124,10 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   The canvas background, grid, page, bed, travel, selection handles and node
   markers change with it. The choice applies immediately and lasts for the
   session;
-* every SVG colour becomes a layer. The left panel is a compact, scrollable
+* every SVG colour becomes a layer when a design is opened. When geometry is
+  imported or pasted into an existing design, paths whose colour matches an
+  existing vector layer are appended to that layer; new layers are created only
+  for colours that are not present yet. The left panel is a compact, scrollable
   layer list; select one layer to edit its name, colour, speed, power and
   passes. **Cut** decides whether the layer is planned, framed and sent;
   **Show** controls whether it is drawn. A visible layer with Cut off remains
@@ -141,11 +144,13 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   place and selects the copies. The **Array** rows keep the original and create
   a grid of copies from column/row counts and `dx`/`dy` spacing; groups are
   duplicated as groups. `Ctrl+V` pastes SVG at the canvas pointer, including
-  objects copied from Inkscape. `Ctrl+C` and `Ctrl+X` place selected objects on
-  the system clipboard as SVG text; pasting that back into orleans recreates
-  them, while applications that expect a vector MIME type may receive only the
-  SVG source as text. Clipboard round-trips preserve paths and colours but not
-  editor groups or manual tabs; outline text in Inkscape before copying;
+  objects copied from Inkscape; pasted paths join an existing layer with the
+  same colour, and new layers appear only for new colours. `Ctrl+C` and `Ctrl+X`
+  place selected objects on the system clipboard as SVG text; pasting that back
+  into orleans recreates them, while applications that expect a vector MIME
+  type may receive only the SVG source as text. Clipboard round-trips preserve
+  paths and colours but not editor groups or manual tabs; outline text in
+  Inkscape before copying;
 * choose **Line** or **Fill** for each layer. Fill mode adds **Fill spacing**,
   **Angle**, **Overlap**, **Alternate**, **Cross** and **Outline**; it hatches
   closed contours and previews the fill. **Cross** adds a second pass at 90°,
@@ -172,8 +177,9 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   separate vector layer for outlines;
 * PDF files open or import as vector paths, grouped by stroke colour (or fill
   colour for fill-only paths). PDF-compatible `.ai` files work too. The first
-  page is imported. Text must be converted to outlines, and raster images,
-  clipping paths, gradients and patterns are not imported;
+  page is imported. Imports append to matching existing colour layers instead
+  of creating duplicates. Text must be converted to outlines, and raster
+  images, clipping paths, gradients and patterns are not imported;
 * DXF files open or import as one layer per DXF layer, using the layer's ACI or
   true colour. `LINE`, `LWPOLYLINE`/`POLYLINE` (including bulges), `CIRCLE`,
   `ARC`, `ELLIPSE` and `SPLINE` are read; `$INSUNITS` sets the millimetre
@@ -452,7 +458,9 @@ concept of a line and some bridges emit negotiation on connect.
   Imported vector layers are self-contained: they are not linked to their
   source file, and later source edits are not tracked.
 * Only empty vector layers can be deleted. Delete all their objects first; a
-  raster layer disappears only when the design is replaced.
+  raster layer disappears only when the design is replaced. Imported raster
+  images always get a new raster layer, even when a vector layer has the same
+  colour.
 * Arrays are rectangular only: there is no polar/circular array, and copies
   follow fixed `dx`/`dy` spacing. Duplicate places copies exactly on top of the
   originals, ready to be dragged away.

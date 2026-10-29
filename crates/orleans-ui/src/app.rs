@@ -1021,27 +1021,8 @@ impl OrleansApp {
             }
         }
         let shape_count = imported.shape_count();
-        let start_index = self
-            .doc
-            .layers
-            .iter()
-            .map(|layer| layer.index)
-            .max()
-            .map_or(0, |index| index + 1);
-        self.merge_imported(imported, None);
+        let pasted = self.merge_imported(imported, None);
         self.fit_pending = false;
-        let pasted: BTreeSet<ShapeRef> = self
-            .doc
-            .layers
-            .iter()
-            .filter(|layer| layer.index >= start_index)
-            .flat_map(|layer| {
-                layer.shapes.iter().map(move |shape| ShapeRef {
-                    layer: layer.index,
-                    shape: shape.id.clone(),
-                })
-            })
-            .collect();
         if let Some(first) = pasted.iter().next() {
             self.selected_layer = Some(first.layer);
             self.selected_raster = None;
@@ -1089,13 +1070,20 @@ impl OrleansApp {
         self.merge_imported(doc, image_name);
     }
 
-    fn merge_imported(&mut self, mut imported: Document, image_name: Option<String>) {
-        if imported.layers.is_empty() {
+    /// Merge imported vector layers into existing layers with the same colour.
+    /// Raster layers always keep their own layer (they cannot share a vector
+    /// layer), and new layers are allocated only for colours not present yet.
+    fn merge_imported(
+        &mut self,
+        imported: Document,
+        image_name: Option<String>,
+    ) -> BTreeSet<ShapeRef> {
+        if !imported.layers.iter().any(|layer| !layer.is_empty()) {
             self.set_status("nothing to import", true);
-            return;
+            return BTreeSet::new();
         }
         self.push_structure_undo();
-        let start_index = self
+        let mut next_index = self
             .doc
             .layers
             .iter()
@@ -1108,32 +1096,70 @@ impl OrleansApp {
             .iter()
             .map(|layer| layer.name.clone())
             .collect();
-        let mut first_new = None;
-        let mut layer_count = 0;
+        let mut first_target = None;
+        let mut first_raster = None;
+        let mut new_layers = 0;
         let mut shape_count = 0;
-        for (offset, mut layer) in imported.layers.drain(..).enumerate() {
-            if layer.raster.is_some() {
-                if let Some(name) = &image_name {
-                    layer.name.clone_from(name);
-                }
+        let mut inserted = BTreeSet::new();
+
+        for mut layer in imported.layers {
+            if layer.is_empty() {
+                continue;
             }
-            let index = start_index + offset;
-            layer.index = index;
-            layer.name = unique_layer_name(&mut used_names, &layer.name);
             shape_count += layer.shapes.len();
-            first_new.get_or_insert(index);
-            self.doc.layers.push(layer);
-            layer_count += 1;
-        }
-        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
-        self.selected_layer = first_new;
-        self.selected_raster = first_new.and_then(|index| {
-            self.doc
+            let mut imported_shapes = std::mem::take(&mut layer.shapes);
+            let target_position = if layer.raster.is_some() {
+                None
+            } else {
+                matching_vector_layer(&self.doc, layer.color)
+            };
+
+            let target_index = if let Some(position) = target_position {
+                self.doc.layers[position].index
+            } else {
+                if layer.raster.is_some() {
+                    if let Some(name) = &image_name {
+                        layer.name.clone_from(name);
+                    }
+                }
+                let index = next_index;
+                next_index += 1;
+                layer.index = index;
+                layer.name = unique_layer_name(&mut used_names, &layer.name);
+                self.doc.layers.push(layer);
+                new_layers += 1;
+                index
+            };
+            first_target.get_or_insert(target_index);
+
+            let target_position = self
+                .doc
                 .layers
                 .iter()
-                .find(|layer| layer.index == index)
-                .and_then(|layer| layer.raster.as_ref().map(|_| index))
-        });
+                .position(|existing| existing.index == target_index)
+                .expect("import target layer exists");
+            let mut used_ids: BTreeSet<String> = self.doc.layers[target_position]
+                .shapes
+                .iter()
+                .map(|shape| shape.id.clone())
+                .collect();
+            let target = &mut self.doc.layers[target_position];
+            if target.raster.is_some() {
+                first_raster.get_or_insert(target_index);
+            }
+            for mut shape in imported_shapes.drain(..) {
+                shape.id = unique_shape_id(&shape.id, &mut used_ids);
+                inserted.insert(ShapeRef {
+                    layer: target_index,
+                    shape: shape.id.clone(),
+                });
+                target.shapes.push(shape);
+            }
+        }
+
+        self.preview = Preview::build(&self.doc, DISPLAY_TOLERANCE);
+        self.selected_layer = first_target;
+        self.selected_raster = first_raster;
         self.selected_shapes.clear();
         self.selected_nodes.clear();
         self.node_edit = None;
@@ -1141,13 +1167,16 @@ impl OrleansApp {
         self.tab_edit_layer = None;
         self.dragging_shape = false;
         self.active_handle = None;
-        self.transfer_layer = first_new;
+        self.transfer_layer = first_target;
         self.fit_pending = true;
         self.dirty = true;
-        self.set_status(
-            format!("imported {layer_count} layer(s), {shape_count} shape(s)"),
-            false,
-        );
+        let message = match new_layers {
+            0 => format!("imported {shape_count} shape(s) into existing layers"),
+            1 => format!("imported {shape_count} shape(s), 1 new layer"),
+            count => format!("imported {shape_count} shape(s), {count} new layers"),
+        };
+        self.set_status(message, false);
+        inserted
     }
 
     fn load_image(&mut self, path: PathBuf) {
@@ -6938,6 +6967,12 @@ fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
     (point - projected).hypot()
 }
 
+fn matching_vector_layer(doc: &Document, color: [u8; 3]) -> Option<usize> {
+    doc.layers
+        .iter()
+        .position(|layer| layer.raster.is_none() && layer.color == color)
+}
+
 fn looks_like_svg(text: &str) -> bool {
     let text = text.trim_start_matches('\u{feff}').trim_start();
     text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg"))
@@ -7368,6 +7403,32 @@ mod tests {
             layer_color([0, 0, 0], false),
             Color32::from_rgb(150, 150, 150)
         );
+    }
+
+    #[test]
+    fn imported_colours_reuse_the_first_matching_vector_layer() {
+        let mut doc = Document::new(100.0, 100.0);
+        doc.layers.push(Layer::new(
+            3,
+            "C00",
+            [255, 0, 0],
+            orleans_core::CutParams::default(),
+        ));
+        doc.layers.push(Layer::new(
+            7,
+            "C01",
+            [0, 0, 255],
+            orleans_core::CutParams::default(),
+        ));
+        doc.layers.push(Layer::new(
+            9,
+            "C02",
+            [255, 0, 0],
+            orleans_core::CutParams::default(),
+        ));
+        assert_eq!(matching_vector_layer(&doc, [255, 0, 0]), Some(0));
+        assert_eq!(matching_vector_layer(&doc, [0, 0, 255]), Some(1));
+        assert_eq!(matching_vector_layer(&doc, [0, 255, 0]), None);
     }
 
     #[test]
