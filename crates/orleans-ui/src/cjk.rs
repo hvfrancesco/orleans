@@ -1,4 +1,4 @@
-//! Load a system CJK font as an egui fallback when Chinese is selected.
+//! Load the UI fallback fonts: a system CJK font and the Phosphor icon font.
 
 use std::sync::{Arc, OnceLock};
 
@@ -65,32 +65,34 @@ fn find_font() -> Option<CjkFont> {
     None
 }
 
-/// Install one CJK fallback font, once. Returns true when a font was found.
+/// Install the CJK and icon fallback fonts, once.
+/// Returns true when a system CJK font was found.
 pub fn install(ctx: &Context) -> bool {
     static FONT: OnceLock<Option<CjkFont>> = OnceLock::new();
     static APPLIED: OnceLock<()> = OnceLock::new();
-    let Some(font) = FONT.get_or_init(find_font) else {
-        return false;
-    };
+    let font = FONT.get_or_init(find_font);
     if APPLIED.set(()).is_err() {
-        return true;
+        return font.is_some();
     }
-    let name = "orleans-cjk".to_owned();
     let mut definitions = FontDefinitions::default();
-    definitions.font_data.insert(
-        name.clone(),
-        Arc::new(FontData {
-            index: font.index,
-            ..FontData::from_owned(font.data.clone())
-        }),
-    );
-    for family in [FontFamily::Proportional, FontFamily::Monospace] {
-        definitions
-            .families
-            .entry(family)
-            .or_default()
-            .push(name.clone());
+    if let Some(font) = font {
+        let name = "orleans-cjk".to_owned();
+        definitions.font_data.insert(
+            name.clone(),
+            Arc::new(FontData {
+                index: font.index,
+                ..FontData::from_owned(font.data.clone())
+            }),
+        );
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            definitions
+                .families
+                .entry(family)
+                .or_default()
+                .push(name.clone());
+        }
     }
+    egui_phosphor::add_to_fonts(&mut definitions, egui_phosphor::Variant::Regular);
     ctx.set_fonts(definitions);
-    true
+    font.is_some()
 }
