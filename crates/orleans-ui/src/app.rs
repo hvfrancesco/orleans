@@ -49,23 +49,35 @@ impl Theme {
                 // A warm, mid-light grey set; egui's stock light theme is too
                 // close to white for a full-screen editor.
                 let mut visuals = egui::Visuals::light();
-                visuals.panel_fill = Color32::from_rgb(195, 195, 187);
-                visuals.window_fill = Color32::from_rgb(204, 204, 196);
-                visuals.faint_bg_color = Color32::from_rgb(184, 184, 176);
-                visuals.extreme_bg_color = Color32::from_rgb(232, 232, 225);
-                visuals.code_bg_color = Color32::from_rgb(188, 188, 180);
-                visuals.window_stroke = Stroke::new(1.0, Color32::from_gray(148));
-                visuals.hyperlink_color = Color32::from_rgb(0, 95, 170);
+                visuals.panel_fill = Color32::from_rgb(190, 190, 182);
+                visuals.window_fill = Color32::from_rgb(200, 200, 192);
+                visuals.faint_bg_color = Color32::from_rgb(180, 180, 172);
+                // Input fields are lighter than panels; a strong outline makes
+                // them readable without making the whole theme dark.
+                visuals.extreme_bg_color = Color32::from_rgb(242, 242, 235);
+                visuals.code_bg_color = Color32::from_rgb(184, 184, 176);
+                visuals.window_stroke = Stroke::new(1.0, Color32::from_gray(128));
+                visuals.hyperlink_color = Color32::from_rgb(0, 85, 160);
                 visuals.selection.bg_fill = Color32::from_rgb(160, 196, 226);
                 visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0, 70, 120));
-                visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(195, 195, 187);
-                visuals.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(195, 195, 187);
-                visuals.widgets.inactive.bg_fill = Color32::from_rgb(184, 184, 176);
-                visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(184, 184, 176);
-                visuals.widgets.hovered.bg_fill = Color32::from_rgb(171, 171, 163);
-                visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(171, 171, 163);
-                visuals.widgets.active.bg_fill = Color32::from_rgb(154, 154, 146);
-                visuals.widgets.active.weak_bg_fill = Color32::from_rgb(154, 154, 146);
+                visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(190, 190, 182);
+                visuals.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(190, 190, 182);
+                visuals.widgets.noninteractive.bg_stroke =
+                    Stroke::new(1.0, Color32::from_gray(130));
+                visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_gray(32));
+                visuals.widgets.inactive.bg_fill = Color32::from_rgb(170, 170, 162);
+                visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(170, 170, 162);
+                visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_gray(112));
+                visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_gray(24));
+                visuals.widgets.hovered.bg_fill = Color32::from_rgb(155, 155, 147);
+                visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(155, 155, 147);
+                visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_gray(85));
+                visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_gray(16));
+                visuals.widgets.active.bg_fill = Color32::from_rgb(138, 138, 130);
+                visuals.widgets.active.weak_bg_fill = Color32::from_rgb(138, 138, 130);
+                visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_gray(65));
+                visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_gray(10));
+                visuals.widgets.open = visuals.widgets.active;
                 visuals
             }
         }
@@ -127,12 +139,12 @@ impl CanvasPalette {
                 tab: Color32::from_rgb(110, 200, 230),
             },
             Theme::Light => Self {
-                background: Color32::from_rgb(208, 208, 200),
-                grid: Color32::from_gray(186),
+                background: Color32::from_rgb(204, 204, 196),
+                grid: Color32::from_gray(182),
                 axis_x: Color32::from_rgb(165, 65, 65),
                 axis_y: Color32::from_rgb(65, 125, 65),
-                page: Color32::from_gray(105),
-                travel: Color32::from_gray(148),
+                page: Color32::from_gray(100),
+                travel: Color32::from_gray(145),
                 bed_fill: Color32::from_rgba_unmultiplied(60, 100, 160, 20),
                 bed_stroke: Color32::from_rgb(60, 95, 150),
                 bed_text: Color32::from_rgb(60, 90, 135),
