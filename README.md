@@ -39,6 +39,7 @@ was decompiled or copied.
 | Duplicate selected objects and rectangular arrays | ✅ |
 | Paste SVG objects from Inkscape via the system clipboard | ✅ |
 | Canvas: selection, drag-move, handles, live size/position, undo/redo | ✅ |
+| Window selection: left→right contains, right→left intersects, shapes or nodes | ✅ |
 | Shape groups and align/distribute | ✅ |
 | Dark or light interface and canvas theme | ✅ |
 | English, Italian, French, Spanish, German and Chinese interface | ✅ |
@@ -57,7 +58,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-161 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+162 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -124,7 +125,12 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
 
 `orleans gui [design.svg|design.orleans]` opens the editor:
 
-* wheel to zoom at the cursor, drag to pan, `F` or double-click to fit;
+* wheel to zoom at the cursor, right/middle-drag to pan, `F` or double-click to
+  fit;
+* drag on empty canvas from left to right to select fully enclosed shapes,
+  or right to left to select intersecting shapes. Hold Ctrl/Shift to add to
+  the selection. In node editing the same window selects nodes. The overlay is
+  blue for contained selection and amber for crossing selection;
 * the **theme** dropdown in the toolbar switches between dark and light
   interfaces. The canvas background, grid, page, bed, travel, selection
   handles and node markers change with it. The choice applies immediately and

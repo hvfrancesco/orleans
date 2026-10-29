@@ -131,6 +131,10 @@ struct CanvasPalette {
     selected_node: Color32,
     origin: Color32,
     tab: Color32,
+    selection_box_include: Color32,
+    selection_box_include_fill: Color32,
+    selection_box_crossing: Color32,
+    selection_box_crossing_fill: Color32,
     ruler_bg: Color32,
     ruler_line: Color32,
     ruler_text: Color32,
@@ -160,6 +164,10 @@ impl CanvasPalette {
                 selected_node: Color32::WHITE,
                 origin: Color32::from_rgb(230, 190, 90),
                 tab: Color32::from_rgb(110, 200, 230),
+                selection_box_include: Color32::from_rgb(100, 170, 255),
+                selection_box_include_fill: Color32::from_rgba_unmultiplied(80, 150, 240, 28),
+                selection_box_crossing: Color32::from_rgb(245, 190, 80),
+                selection_box_crossing_fill: Color32::from_rgba_unmultiplied(235, 170, 50, 28),
                 ruler_bg: Color32::from_gray(24),
                 ruler_line: Color32::from_gray(75),
                 ruler_text: Color32::from_gray(155),
@@ -185,6 +193,10 @@ impl CanvasPalette {
                 selected_node: Color32::from_rgb(30, 70, 140),
                 origin: Color32::from_rgb(180, 130, 30),
                 tab: Color32::from_rgb(0, 120, 160),
+                selection_box_include: Color32::from_rgb(35, 100, 190),
+                selection_box_include_fill: Color32::from_rgba_unmultiplied(45, 105, 200, 25),
+                selection_box_crossing: Color32::from_rgb(190, 120, 20),
+                selection_box_crossing_fill: Color32::from_rgba_unmultiplied(205, 135, 25, 25),
                 ruler_bg: Color32::from_rgb(181, 181, 174),
                 ruler_line: Color32::from_gray(120),
                 ruler_text: Color32::from_gray(55),
@@ -541,6 +553,13 @@ enum RasterDrag {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SelectionBox {
+    start: Point,
+    current: Point,
+    additive: bool,
+}
+
 #[derive(Clone, Debug)]
 struct PendingJob {
     started: Instant,
@@ -648,6 +667,7 @@ pub struct OrleansApp {
     fit_pending: bool,
     /// Last world point under the canvas pointer, used to place pasted objects.
     last_pointer_world: Option<Point>,
+    selection_box: Option<SelectionBox>,
     show_grid: bool,
     show_travel: bool,
     show_bed: bool,
@@ -745,6 +765,7 @@ impl OrleansApp {
             dirty: false,
             fit_pending: true,
             last_pointer_world: None,
+            selection_box: None,
             show_grid: true,
             show_travel: false,
             show_bed: true,
@@ -1969,6 +1990,111 @@ impl OrleansApp {
             });
         }
         bounds
+    }
+
+    fn begin_selection_box(&mut self, start: Point, additive: bool) {
+        self.selection_box = Some(SelectionBox {
+            start,
+            current: start,
+            additive,
+        });
+        self.dragging_shape = false;
+    }
+
+    fn apply_selection_box(&mut self, selection: SelectionBox) {
+        let rect = world_rect(selection.start, selection.current);
+        if rect.width() < 1e-9 && rect.height() < 1e-9 {
+            return;
+        }
+        let include = selection.current.x >= selection.start.x;
+
+        if let Some(target) = self.node_edit.clone() {
+            let Some(shape) = self.node_shape() else {
+                return;
+            };
+            let nodes: BTreeSet<NodeRef> = nodes::nodes(&shape.path)
+                .into_iter()
+                .filter(|node| rect.contains(node.point))
+                .map(|node| node.node)
+                .collect();
+            if selection.additive {
+                self.selected_nodes.extend(nodes);
+            } else {
+                self.selected_nodes = nodes;
+            }
+            self.selected_layer = Some(target.layer);
+            self.selected_raster = None;
+            return;
+        }
+
+        let mut chosen = BTreeSet::new();
+        for layer in self.doc.layers.iter().filter(|layer| layer.visible) {
+            let Some(preview) = self.preview.layer(layer.index) else {
+                continue;
+            };
+            for shape in &preview.shapes {
+                let matches = if include {
+                    !shape.contours.is_empty()
+                        && shape.contours.iter().all(|contour| {
+                            !contour.points.is_empty()
+                                && contour.points.iter().all(|point| rect.contains(*point))
+                        })
+                } else {
+                    preview_shape_crosses_rect(preview, &shape.id, rect)
+                };
+                if matches {
+                    chosen.insert(ShapeRef {
+                        layer: layer.index,
+                        shape: shape.id.clone(),
+                    });
+                }
+            }
+        }
+        let groups = self.groups.clone();
+        for group in &groups {
+            if group.members.iter().any(|member| chosen.contains(member)) {
+                chosen.extend(group.members.iter().cloned());
+            }
+        }
+        if selection.additive {
+            self.selected_shapes.extend(chosen);
+        } else {
+            self.selected_shapes = chosen;
+        }
+        self.selected_layer = self
+            .selected_shapes
+            .iter()
+            .next()
+            .map(|selection| selection.layer);
+        self.selected_raster = None;
+        self.selected_nodes.clear();
+        self.node_edit = None;
+        self.node_drag = None;
+        self.tab_edit_layer = None;
+    }
+
+    fn draw_selection_box(&self, painter: &egui::Painter, area: Rect) {
+        let Some(selection) = self.selection_box else {
+            return;
+        };
+        let start = self.view.world_to_screen(area, selection.start);
+        let current = self.view.world_to_screen(area, selection.current);
+        let rect = Rect::from_two_pos(start, current);
+        let include = selection.current.x >= selection.start.x;
+        let palette = self.palette();
+        let (fill, stroke) = if include {
+            (
+                palette.selection_box_include_fill,
+                palette.selection_box_include,
+            )
+        } else {
+            (
+                palette.selection_box_crossing_fill,
+                palette.selection_box_crossing,
+            )
+        };
+        painter.rect_filled(rect, 0.0, fill);
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, stroke), StrokeKind::Inside);
     }
 
     fn press_on_selection(&self, point: Point) -> bool {
@@ -6183,13 +6309,17 @@ impl OrleansApp {
         self.draw_nodes(&painter, area);
         self.draw_raster_selection(&painter, area);
         self.draw_origin(&painter, area);
+        self.draw_selection_box(&painter, area);
         self.draw_rulers(&painter, full, area);
 
         let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
         let node_editing = self.node_edit.is_some();
         let tab_editing = self.tab_edit_layer.is_some();
 
-        if response.clicked_by(egui::PointerButton::Primary) {
+        if response.clicked_by(egui::PointerButton::Primary)
+            && self.selection_box.is_none()
+            && !response.dragged()
+        {
             if let Some(position) = response.interact_pointer_pos() {
                 if tab_editing {
                     self.tab_edit_click(position, area);
@@ -6236,6 +6366,9 @@ impl OrleansApp {
                     if let Some(node) = self.node_at(position, area) {
                         let world = self.view.screen_to_world(area, position);
                         self.begin_node_drag(node, world);
+                    } else {
+                        let world = self.view.screen_to_world(area, position);
+                        self.begin_selection_box(world, additive);
                     }
                 }
             } else {
@@ -6279,11 +6412,17 @@ impl OrleansApp {
                         self.dragging_shape = true;
                     } else if !started {
                         self.dragging_shape = false;
+                        if let Some(world) = world {
+                            self.begin_selection_box(world, additive);
+                        }
                     }
                 }
             }
         }
         if response.drag_stopped() {
+            if let Some(selection) = self.selection_box.take() {
+                self.apply_selection_box(selection);
+            }
             self.dragging_shape = false;
             if let Some(active) = self.active_handle.take() {
                 let count = self.selected_shapes.len();
@@ -6311,7 +6450,11 @@ impl OrleansApp {
         {
             self.view.pan(response.drag_delta());
         } else if response.dragged_by(egui::PointerButton::Primary) {
-            if self.raster_drag.is_some() {
+            if let Some(selection) = self.selection_box.as_mut() {
+                if let Some(position) = response.interact_pointer_pos() {
+                    selection.current = self.view.screen_to_world(area, position);
+                }
+            } else if self.raster_drag.is_some() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let world = self.view.screen_to_world(area, position);
                     self.update_raster_drag(world);
@@ -7257,6 +7400,95 @@ fn distance_to_contour(contour: &crate::preview::PreviewContour, point: Point) -
     best
 }
 
+fn world_rect(a: Point, b: Point) -> kurbo::Rect {
+    kurbo::Rect::new(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y))
+}
+
+fn preview_shape_crosses_rect(
+    preview: &crate::preview::LayerPreview,
+    shape_id: &str,
+    rect: kurbo::Rect,
+) -> bool {
+    let Some(shape) = preview.shapes.iter().find(|shape| shape.id == shape_id) else {
+        return false;
+    };
+    for contour in &shape.contours {
+        if contour.points.iter().any(|point| rect.contains(*point)) {
+            return true;
+        }
+        for pair in contour.points.windows(2) {
+            if segment_intersects_rect(pair[0], pair[1], rect) {
+                return true;
+            }
+        }
+        if contour.closed
+            && contour.points.len() >= 2
+            && segment_intersects_rect(
+                contour.points[contour.points.len() - 1],
+                contour.points[0],
+                rect,
+            )
+        {
+            return true;
+        }
+        if contour.closed
+            && contour.points.len() >= 3
+            && point_in_polygon(rect.center(), &contour.points)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn segment_intersects_rect(a: Point, b: Point, rect: kurbo::Rect) -> bool {
+    if rect.contains(a) || rect.contains(b) {
+        return true;
+    }
+    let corners = [
+        Point::new(rect.x0, rect.y0),
+        Point::new(rect.x1, rect.y0),
+        Point::new(rect.x1, rect.y1),
+        Point::new(rect.x0, rect.y1),
+    ];
+    for index in 0..4 {
+        if segments_intersect(a, b, corners[index], corners[(index + 1) % 4]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn segments_intersect(a: Point, b: Point, c: Point, d: Point) -> bool {
+    let orientation = |p: Point, q: Point, r: Point| {
+        let value = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
+        if value.abs() < 1e-9 {
+            0
+        } else if value > 0.0 {
+            1
+        } else {
+            -1
+        }
+    };
+    let on_segment = |p: Point, q: Point, r: Point| {
+        q.x <= p.x.max(r.x) + 1e-9
+            && q.x >= p.x.min(r.x) - 1e-9
+            && q.y <= p.y.max(r.y) + 1e-9
+            && q.y >= p.y.min(r.y) - 1e-9
+    };
+    let o1 = orientation(a, b, c);
+    let o2 = orientation(a, b, d);
+    let o3 = orientation(c, d, a);
+    let o4 = orientation(c, d, b);
+    if o1 != o2 && o3 != o4 {
+        return true;
+    }
+    (o1 == 0 && on_segment(a, c, b))
+        || (o2 == 0 && on_segment(a, d, b))
+        || (o3 == 0 && on_segment(c, a, d))
+        || (o4 == 0 && on_segment(c, b, d))
+}
+
 fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
     let ab = b - a;
     let ap = point - a;
@@ -7778,6 +8010,30 @@ impl Drop for OrleansApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_box_segment_intersection_handles_crossing_and_misses() {
+        let rect = kurbo::Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert!(segment_intersects_rect(
+            Point::new(-5.0, 5.0),
+            Point::new(15.0, 5.0),
+            rect
+        ));
+        assert!(segment_intersects_rect(
+            Point::new(2.0, 2.0),
+            Point::new(8.0, 8.0),
+            rect
+        ));
+        assert!(!segment_intersects_rect(
+            Point::new(-5.0, -5.0),
+            Point::new(-1.0, -1.0),
+            rect
+        ));
+        assert_eq!(
+            world_rect(Point::new(10.0, 10.0), Point::new(0.0, 0.0)),
+            rect
+        );
+    }
 
     #[test]
     fn ruler_labels_avoid_duplicate_rounded_values() {
