@@ -16,7 +16,8 @@ optional: start with an empty document and import or draw geometry later.
 - Selected shapes are highlighted with their bounds and a group box. Drag any
   selected shape to move the whole selection.
 - Drag a corner handle to scale uniformly around the opposite corner. Drag the
-  circular handle above the box to rotate around the selection centre.
+  circular handle above the box to rotate around the selection centre. Hold
+  `Ctrl` while rotating to snap to 15° increments.
 
 Millimetre rulers run along the left and bottom edges of the canvas. They share
 the canvas world origin and pan and zoom with the drawing.
@@ -100,9 +101,9 @@ rotation stay fixed when the crop changes.
 
 The raster is shown as a translucent image with engraving scanlines over it.
 Click an image or select its layer to show handles. Drag inside to move, drag a
-corner to resize and drag the top handle to rotate. Raster layers with Cut
-disabled show the preview but not the engraving scan lines. Use a separate
-vector layer for outlines.
+corner to resize and drag the top handle to rotate. Hold `Ctrl` while rotating
+to snap to 15° increments. Raster layers with Cut disabled show the preview but
+not the engraving scan lines. Use a separate vector layer for outlines.
 
 An imported raster always gets its own raster layer, even when a vector layer
 has the same colour.

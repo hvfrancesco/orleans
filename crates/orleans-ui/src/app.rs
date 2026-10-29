@@ -39,6 +39,7 @@ macro_rules! tr {
 const DISPLAY_TOLERANCE: f64 = 0.05;
 const RULER_LEFT: f32 = 38.0;
 const RULER_BOTTOM: f32 = 22.0;
+const ROTATION_SNAP_DEGREES: f64 = 15.0;
 
 const NEW_LAYER_COLORS: [[u8; 3]; 6] = [
     [200, 60, 50],
@@ -587,8 +588,18 @@ struct PendingPdf {
 
 #[derive(Clone, Copy, Debug)]
 enum ActiveHandle {
-    Scale { anchor: Point, last_distance: f64 },
-    Rotate { center: Point, last_angle: f64 },
+    Scale {
+        anchor: Point,
+        last_distance: f64,
+    },
+    Rotate {
+        center: Point,
+        last_angle: f64,
+        /// Pointer rotation since the drag began.
+        total_angle: f64,
+        /// Rotation already applied to the document.
+        applied_angle: f64,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3447,13 +3458,15 @@ impl OrleansApp {
                 self.active_handle = Some(ActiveHandle::Rotate {
                     center,
                     last_angle: angle,
+                    total_angle: 0.0,
+                    applied_angle: 0.0,
                 });
                 self.dragging_shape = false;
             }
         }
     }
 
-    fn update_handle_drag(&mut self, world: Point) {
+    fn update_handle_drag(&mut self, world: Point, snap_rotation: bool) {
         let Some(mut active) = self.active_handle else {
             return;
         };
@@ -3471,13 +3484,25 @@ impl OrleansApp {
                     *last_distance = distance;
                 }
             }
-            ActiveHandle::Rotate { center, last_angle } => {
+            ActiveHandle::Rotate {
+                center,
+                last_angle,
+                total_angle,
+                applied_angle,
+            } => {
                 let angle = (world.y - center.y).atan2(world.x - center.x);
-                let delta = normalize_angle(angle - *last_angle);
+                *total_angle += normalize_angle(angle - *last_angle);
+                *last_angle = angle;
+                let target = if snap_rotation {
+                    snap_rotation_angle(*total_angle)
+                } else {
+                    *total_angle
+                };
+                let delta = target - *applied_angle;
                 if delta.abs() > 1e-9 {
                     self.apply_affine_to_selection(rotate_about(*center, delta));
+                    *applied_angle = target;
                 }
-                *last_angle = angle;
             }
         }
         self.active_handle = Some(active);
@@ -3655,7 +3680,7 @@ impl OrleansApp {
         });
     }
 
-    fn update_raster_drag(&mut self, pointer: Point) {
+    fn update_raster_drag(&mut self, pointer: Point, snap_rotation: bool) {
         let Some(drag) = self.raster_drag else {
             return;
         };
@@ -3723,7 +3748,10 @@ impl OrleansApp {
                 initial_angle,
             } => {
                 let angle = (pointer.y - center.y).atan2(pointer.x - center.x);
-                let delta = normalize_angle(angle - start_angle);
+                let mut delta = normalize_angle(angle - start_angle);
+                if snap_rotation {
+                    delta = snap_rotation_angle(delta);
+                }
                 if let Some(raster) = self
                     .doc
                     .layers
@@ -6732,6 +6760,7 @@ impl OrleansApp {
         {
             self.view.pan(response.drag_delta());
         } else if response.dragged_by(egui::PointerButton::Primary) {
+            let rotation_snap = ui.input(|input| input.modifiers.ctrl);
             if let Some(selection) = self.selection_box.as_mut() {
                 if let Some(position) = response.interact_pointer_pos() {
                     selection.current = self.view.screen_to_world(area, position);
@@ -6739,7 +6768,7 @@ impl OrleansApp {
             } else if self.raster_drag.is_some() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let world = self.view.screen_to_world(area, position);
-                    self.update_raster_drag(world);
+                    self.update_raster_drag(world, rotation_snap);
                 }
             } else if self.node_drag.is_some() {
                 if let Some(position) = response.interact_pointer_pos() {
@@ -6749,7 +6778,7 @@ impl OrleansApp {
             } else if self.active_handle.is_some() {
                 if let Some(position) = response.interact_pointer_pos() {
                     let world = self.view.screen_to_world(area, position);
-                    self.update_handle_drag(world);
+                    self.update_handle_drag(world, rotation_snap);
                 }
             } else if self.dragging_shape {
                 let delta = response.drag_delta();
@@ -7660,6 +7689,11 @@ fn rotate_about(center: Point, radians: f64) -> Affine {
     Affine::translate((center.x, center.y))
         * Affine::rotate(radians)
         * Affine::translate((-center.x, -center.y))
+}
+
+fn snap_rotation_angle(radians: f64) -> f64 {
+    let degrees = radians.to_degrees();
+    (degrees / ROTATION_SNAP_DEGREES).round() * ROTATION_SNAP_DEGREES * std::f64::consts::PI / 180.0
 }
 
 fn corner_point(bounds: kurbo::Rect, corner: HandleCorner) -> Point {
@@ -8597,6 +8631,14 @@ mod tests {
         assert!((normalize_angle(3.0 * FRAC_PI_2) + FRAC_PI_2).abs() < 1e-9);
         assert!((normalize_angle(-3.0 * FRAC_PI_2) - FRAC_PI_2).abs() < 1e-9);
         assert!((normalize_angle(PI) - PI).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotation_snaps_to_fifteen_degree_steps() {
+        assert!((snap_rotation_angle(7.0_f64.to_radians()).to_degrees()).abs() < 1e-9);
+        assert!((snap_rotation_angle(8.0_f64.to_radians()).to_degrees() - 15.0).abs() < 1e-9);
+        assert!((snap_rotation_angle(-23.0_f64.to_radians()).to_degrees() + 30.0).abs() < 1e-9);
+        assert!((snap_rotation_angle(360.0_f64.to_radians()).to_degrees() - 360.0).abs() < 1e-9);
     }
 
     #[test]
