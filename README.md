@@ -6,8 +6,8 @@ GRBL-compatible controllers over USB or WiFi. Everything is implemented from
 public specifications: SVG, PDF, DXF, G-code and the GRBL protocol.
 
 > **Status:** `1.0.0`. The core editor and GRBL workflow have been validated
-> end to end on hardware. Release packaging and future milestones are tracked in
-> [docs/roadmap.md](docs/roadmap.md).
+> end to end on hardware. See [CHANGELOG.md](CHANGELOG.md) for release notes and
+> [docs/roadmap.md](docs/roadmap.md) for future milestones.
 
 ## Highlights
 
@@ -56,11 +56,13 @@ machine for the first time.
 
 | Document | Contents |
 |---|---|
+| [Release notes](CHANGELOG.md) | What changed in each release |
 | [GUI guide](docs/gui.md) | Editor, layers, transforms, fills, raster import, machine panel |
 | [CLI reference](docs/cli.md) | Commands, options and examples |
 | [Project format](docs/project-format.md) | Native `.orleans` JSON structure |
 | [Troubleshooting](docs/troubleshooting.md) | WiFi, GRBL status and recovery |
 | [Development](docs/development.md) | Architecture, design decisions and known limitations |
+| [Releasing](docs/releasing.md) | Versioning, packaging, checksums and tagging |
 | [Roadmap](docs/roadmap.md) | Release checklist and planned milestones |
 
 ## Architecture
@@ -105,7 +107,8 @@ for a headless binary without the windowing stack.
 
 ## License
 
-MIT OR Apache-2.0.
+Released under the MIT or Apache-2.0 license. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
 
 The interface uses [Phosphor Icons](https://phosphoricons.com/), available under
 the MIT or Apache-2.0 license.

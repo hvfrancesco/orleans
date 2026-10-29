@@ -22,9 +22,9 @@ It is a living plan, not a compatibility promise.
   - [x] framing with the laser off
   - [x] laser-off dry run and low-power test square
   - [x] pause, resume, stop and reconnect recovery
-- [ ] Add release packaging: release profile review, binary artifacts, checksums
+- [x] Add release packaging: release profile review, binary artifacts, checksums
       and a short upgrade note
-- [ ] Final regression pass in all six languages and both themes
+- [x] Final regression pass in all six languages and both themes
 
 ## Next milestones
 
