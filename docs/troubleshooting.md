@@ -7,6 +7,26 @@
 3. Run a framing pass or a laser-off dry run before the first cut.
 4. Keep physical access to the machine's emergency stop.
 
+## AppImage and USB serial
+
+The AppImage is not sandboxed, so WiFi and USB access work like the plain
+binary. USB serial still requires:
+
+- the host kernel driver (`ch341`, `ftdi_sio`, `cdc_acm`, etc.) for the board;
+- read/write permission on `/dev/ttyUSB*` or `/dev/ttyACM*`;
+- membership in `dialout` on Debian/Ubuntu, or `uucp` on Arch and similar
+  distributions, followed by a new login session.
+
+Check the device and permissions with:
+
+```bash
+ls -l /dev/ttyUSB0
+id
+```
+
+The AppImage does not bundle GPU drivers or system CJK fonts. It uses the host
+X11/Wayland stack, OpenGL drivers and installed fonts.
+
 ## WiFi and Telnet checks
 
 ```bash

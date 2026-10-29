@@ -49,7 +49,8 @@ First stable release.
 ### Release packaging
 
 - Linux x86_64 archive with the binary, docs, licenses and sample design.
-- SHA-256 checksum included next to the archive.
+- Linux x86_64 AppImage with desktop integration and icon.
+- SHA-256 checksums included next to both artifacts.
 - Release builds use thin LTO and stripped symbols.
 
 ### Upgrade notes

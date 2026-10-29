@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=orleans
+GenericName=Laser CAM
+Comment=Open CAM for laser cutters
+Exec=orleans gui %f
+Icon=orleans
+Terminal=false
+Categories=Graphics;2DGraphics;
+Keywords=laser;cutter;cam;grbl;svg;dxf;gcode;
+StartupNotify=true
+StartupWMClass=orleans
+MimeType=image/svg+xml;application/pdf;image/png;image/jpeg;

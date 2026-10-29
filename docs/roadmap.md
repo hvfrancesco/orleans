@@ -22,8 +22,8 @@ It is a living plan, not a compatibility promise.
   - [x] framing with the laser off
   - [x] laser-off dry run and low-power test square
   - [x] pause, resume, stop and reconnect recovery
-- [x] Add release packaging: release profile review, binary artifacts, checksums
-      and a short upgrade note
+- [x] Add release packaging: release profile review, binary archive, AppImage,
+      checksums and a short upgrade note
 - [x] Final regression pass in all six languages and both themes
 
 ## Next milestones

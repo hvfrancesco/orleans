@@ -99,6 +99,13 @@ cargo fmt --all -- --check
 cargo build --release
 ```
 
+Release packaging is reproducible:
+
+```bash
+./scripts/package-release.sh   # binary archive + SHA-256
+./scripts/package-appimage.sh  # Linux AppImage + SHA-256
+```
+
 The suite currently contains **167 tests**, including the full SVG → toolpath →
 G-code → TCP controller integration run.
 

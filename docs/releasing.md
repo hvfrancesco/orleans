@@ -38,6 +38,31 @@ sha256sum -c orleans-<version>-<target>.tar.gz.sha256
 ./orleans-<version>-<target>/orleans --version
 ```
 
+## Build the AppImage
+
+```bash
+./scripts/package-appimage.sh
+```
+
+This builds an AppDir with `linuxdeploy` and writes:
+
+```text
+dist/orleans-<version>-<target>.AppImage
+dist/orleans-<version>-<target>.AppImage.sha256
+```
+
+The AppImage uses the host X11/Wayland stack, OpenGL drivers and system fonts.
+It is not sandboxed. USB serial access therefore depends only on the host's
+kernel driver and device permissions, exactly like the plain binary. See
+[troubleshooting.md](troubleshooting.md) for serial permissions.
+
+Run the smoke test without mounting FUSE:
+
+```bash
+APPIMAGE_EXTRACT_AND_RUN=1 \
+  ./dist/orleans-<version>-<target>.AppImage run examples/coaster.svg --mock
+```
+
 ## Tag and publish
 
 After the package and documentation are final:
