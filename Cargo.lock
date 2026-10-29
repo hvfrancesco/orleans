@@ -2884,6 +2884,7 @@ dependencies = [
 name = "orleans-import"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "image",
  "kurbo 0.11.3",
  "lopdf",

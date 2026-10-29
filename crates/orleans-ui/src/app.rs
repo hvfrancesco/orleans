@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
@@ -16,7 +16,8 @@ use orleans_geom::{
     point_in_polygon, tab_span_polylines, HatchOptions,
 };
 use orleans_import::{
-    import_dxf, import_image, import_pdf, import_svg, ImportOptions, DEFAULT_RASTER_DPI,
+    import_dxf, import_image, import_pdf, import_svg, pdf_page_count, ImportOptions,
+    DEFAULT_RASTER_DPI,
 };
 use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 
@@ -531,6 +532,14 @@ struct PendingJob {
     lines_total: usize,
 }
 
+struct PendingPdf {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    pages: usize,
+    page: usize,
+    replace: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ActiveHandle {
     Scale { anchor: Point, last_distance: f64 },
@@ -646,6 +655,7 @@ pub struct OrleansApp {
     job_history: JobHistory,
     history_path: PathBuf,
     pending_job: Option<PendingJob>,
+    pending_pdf: Option<PendingPdf>,
 }
 
 impl OrleansApp {
@@ -737,6 +747,7 @@ impl OrleansApp {
             job_history,
             history_path,
             pending_job: None,
+            pending_pdf: None,
         };
         app.apply_theme(&cc.egui_ctx);
         if let Some(path) = initial {
@@ -874,7 +885,27 @@ impl OrleansApp {
                 return;
             }
         };
-        match import_pdf(&bytes, &ImportOptions::default()) {
+        if let Ok(pages) = pdf_page_count(&bytes) {
+            if pages > 1 {
+                self.pending_pdf = Some(PendingPdf {
+                    path,
+                    bytes,
+                    pages,
+                    page: 1,
+                    replace: true,
+                });
+                return;
+            }
+        }
+        self.load_pdf_bytes(path, &bytes, 0);
+    }
+
+    fn load_pdf_bytes(&mut self, path: PathBuf, bytes: &[u8], page: usize) {
+        let opt = ImportOptions {
+            pdf_page: page,
+            ..ImportOptions::default()
+        };
+        match import_pdf(bytes, &opt) {
             Ok(doc) if doc.is_empty() => {
                 self.status = Status::error(format!(
                     "{} contains no vector paths; outline text first",
@@ -900,18 +931,45 @@ impl OrleansApp {
                 self.raster_texture_keys.clear();
                 self.replan();
                 self.status = Status::ok(format!(
-                    "{}: {} layers, {} shapes, {} contours",
+                    "{}: {} layers, {} shapes, {} contours{}",
                     path.file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.display().to_string()),
                     self.doc.layers.len(),
                     self.doc.shape_count(),
-                    self.preview.contour_count()
+                    self.preview.contour_count(),
+                    if page == 0 {
+                        String::new()
+                    } else {
+                        format!(" (page {})", page + 1)
+                    }
                 ));
                 self.path = Some(path);
                 self.project_path = None;
                 self.fit_pending = true;
                 self.dirty = false;
+            }
+            Err(err) => {
+                self.status = Status::error(format!("importing {}: {err}", path.display()));
+            }
+        }
+    }
+
+    fn import_pdf_bytes(&mut self, path: &Path, bytes: &[u8], page: usize) {
+        let opt = ImportOptions {
+            pdf_page: page,
+            ..ImportOptions::default()
+        };
+        match import_pdf(bytes, &opt) {
+            Ok(doc) if doc.is_empty() => {
+                self.status =
+                    Status::error(format!("{} contains no supported geometry", path.display()));
+            }
+            Ok(doc) => {
+                let image_name = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned());
+                self.merge_imported(doc, image_name);
             }
             Err(err) => {
                 self.status = Status::error(format!("importing {}: {err}", path.display()));
@@ -1043,6 +1101,20 @@ impl OrleansApp {
                 return;
             }
         };
+        if is_pdf_path(&path) {
+            if let Ok(pages) = pdf_page_count(&bytes) {
+                if pages > 1 {
+                    self.pending_pdf = Some(PendingPdf {
+                        path,
+                        bytes,
+                        pages,
+                        page: 1,
+                        replace: false,
+                    });
+                    return;
+                }
+            }
+        }
         let image_name = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned());
@@ -7351,6 +7423,55 @@ impl eframe::App for OrleansApp {
         self.home_dialog(&ctx);
         self.send_dialog(&ctx);
         self.settings_window(&ctx);
+        self.pdf_page_dialog(&ctx);
+    }
+}
+
+impl OrleansApp {
+    fn pdf_page_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_pdf.as_mut() else {
+            return;
+        };
+        let mut choice = None;
+        egui::Window::new("PDF page")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{} has {} pages.",
+                    pending
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| pending.path.display().to_string()),
+                    pending.pages
+                ));
+                ui.horizontal(|ui| {
+                    ui.label("Page");
+                    ui.add(egui::DragValue::new(&mut pending.page).range(1..=pending.pages));
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Open").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        match choice {
+            Some(true) => {
+                let pending = self.pending_pdf.take().expect("pending PDF");
+                let page = pending.page.clamp(1, pending.pages) - 1;
+                if pending.replace {
+                    self.load_pdf_bytes(pending.path, &pending.bytes, page);
+                } else {
+                    self.import_pdf_bytes(&pending.path, &pending.bytes, page);
+                }
+            }
+            Some(false) => self.pending_pdf = None,
+            None => {}
+        }
     }
 }
 

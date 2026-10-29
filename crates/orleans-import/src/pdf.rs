@@ -19,9 +19,10 @@ const MAX_FORM_DEPTH: usize = 12;
 
 /// Parse a PDF (or a PDF-compatible `.ai` file) into millimetres, Y up.
 ///
-/// Only the first page is imported. PDF vector paths are grouped by their
-/// stroke colour, or by fill colour when they have no stroke. PDF coordinates
-/// are already physical and Y-up, so `dpi` and `flip_y` do not apply.
+/// Import one page (`opt.pdf_page`, zero-based). PDF vector paths are grouped
+/// by their stroke colour, or by fill colour when they have no stroke. PDF
+/// coordinates are already physical and Y-up, so `dpi` and `flip_y` do not
+/// apply. The default page is the first one.
 pub fn import_pdf(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportError> {
     if !looks_like_pdf(data) {
         return Err(ImportError::Pdf(
@@ -30,11 +31,14 @@ pub fn import_pdf(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportEr
     }
 
     let pdf = PdfDocument::load_mem(data).map_err(pdf_error)?;
-    let (_, page_id) = pdf
-        .get_pages()
-        .into_iter()
-        .next()
-        .ok_or_else(|| ImportError::Pdf("PDF contains no pages".to_owned()))?;
+    let pages = pdf.get_pages();
+    let page_count = pages.len();
+    let (_, page_id) = pages.into_iter().nth(opt.pdf_page).ok_or_else(|| {
+        ImportError::Pdf(format!(
+            "PDF page {} does not exist (document has {page_count} page(s))",
+            opt.pdf_page + 1
+        ))
+    })?;
     let media = page_box(&pdf, page_id, b"MediaBox")
         .ok_or_else(|| ImportError::Pdf("PDF page has no valid MediaBox".to_owned()))?;
     let crop = page_box(&pdf, page_id, b"CropBox")
@@ -84,6 +88,21 @@ fn looks_like_pdf(data: &[u8]) -> bool {
         && data[..data.len().min(1024)]
             .windows(5)
             .any(|window| window == b"%PDF-")
+}
+
+/// Number of pages in a PDF / PDF-compatible AI file.
+pub fn pdf_page_count(data: &[u8]) -> Result<usize, ImportError> {
+    if !looks_like_pdf(data) {
+        return Err(ImportError::Pdf(
+            "not a PDF stream; save Illustrator files with PDF compatibility enabled".to_owned(),
+        ));
+    }
+    let pdf = PdfDocument::load_mem(data).map_err(pdf_error)?;
+    let count = pdf.get_pages().len();
+    if count == 0 {
+        return Err(ImportError::Pdf("PDF contains no pages".to_owned()));
+    }
+    Ok(count)
 }
 
 fn pdf_error(error: impl Display) -> ImportError {
@@ -691,6 +710,48 @@ mod tests {
         bytes
     }
 
+    fn pdf_pages(contents: &[&str]) -> Vec<u8> {
+        let mut pdf = PdfDocument::with_version("1.4");
+        let pages_id = pdf.new_object_id();
+        let mut page_ids = Vec::new();
+        for content in contents {
+            let content_id =
+                pdf.add_object(Stream::new(Dictionary::new(), content.as_bytes().to_vec()));
+            page_ids.push(pdf.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![
+                    Object::Real(0.0),
+                    Object::Real(0.0),
+                    Object::Real(100.0),
+                    Object::Real(100.0),
+                ],
+                "Contents" => content_id,
+                "Resources" => Dictionary::new(),
+                "Rotate" => Object::Integer(0),
+            }));
+        }
+        pdf.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids
+                    .into_iter()
+                    .map(Object::Reference)
+                    .collect::<Vec<_>>(),
+                "Count" => contents.len() as i64,
+            }),
+        );
+        let catalog_id = pdf.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog_id);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).expect("write multi-page PDF");
+        bytes
+    }
+
     fn import(content: &str) -> Document {
         import_pdf(
             &pdf_bytes(content, [0.0, 0.0, 200.0, 100.0], 0),
@@ -817,6 +878,30 @@ mod tests {
         assert_eq!(doc.layers.len(), 1);
         assert_eq!(doc.layers[0].color, [255, 0, 0]);
         assert_eq!(doc.shape_count(), 1);
+    }
+
+    #[test]
+    fn selects_a_pdf_page() {
+        let bytes = pdf_pages(&[
+            "1 0 0 RG 10 10 m 20 10 l h S",
+            "0 0 1 RG 20 20 m 30 20 l h S",
+        ]);
+        assert_eq!(pdf_page_count(&bytes).expect("page count"), 2);
+
+        let options = ImportOptions {
+            pdf_page: 1,
+            ..ImportOptions::default()
+        };
+        let doc = import_pdf(&bytes, &options).expect("second page");
+        assert_eq!(doc.layers[0].color, [0, 0, 255]);
+        let bounds = doc.bounds().expect("bounds");
+        assert!((bounds.x0 - 20.0 * MM_PER_POINT).abs() < 1e-9);
+
+        let options = ImportOptions {
+            pdf_page: 2,
+            ..options
+        };
+        assert!(import_pdf(&bytes, &options).is_err());
     }
 
     #[test]

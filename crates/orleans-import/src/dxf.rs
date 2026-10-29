@@ -6,10 +6,10 @@
 
 use std::collections::BTreeMap;
 
-use kurbo::{Arc, BezPath, Ellipse, Point, Shape as _, Vec2};
+use kurbo::{Affine, Arc, BezPath, Ellipse, Point, Shape as _, Vec2};
 use orleans_core::{Document, Layer, LayerMode, Shape};
 
-use crate::{ImportError, ImportOptions};
+use crate::{fonts, ImportError, ImportOptions};
 
 const DXF_TOLERANCE: f64 = 0.02;
 
@@ -119,60 +119,102 @@ pub fn import_dxf(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportEr
             1.0
         };
     let colors = parse_layers(&pairs);
+    let styles = parse_text_styles(&pairs);
+    let blocks = parse_blocks(&pairs);
     let records = entities(&pairs);
     let mut accumulator = Accumulator::new();
 
+    process_entities(
+        &records,
+        Affine::scale(unit_scale),
+        None,
+        None,
+        &blocks,
+        &colors,
+        &styles,
+        &mut accumulator,
+        0,
+    );
+
+    let mut doc = Document::new(1.0, 1.0);
+    for (index, name) in accumulator.names.iter().enumerate() {
+        let color = accumulator.colors.get(name).copied().unwrap_or([0, 0, 0]);
+        let mut layer = Layer::new(index, name.clone(), color, opt.default_cut);
+        layer.mode = LayerMode::Line;
+        layer.shapes = accumulator.shapes.remove(name).unwrap_or_default();
+        doc.layers.push(layer);
+    }
+    if let Some(bounds) = doc.bounds() {
+        doc.width = bounds.x1.max(1.0);
+        doc.height = bounds.y1.max(1.0);
+    }
+    Ok(doc)
+}
+
+#[derive(Clone, Debug)]
+struct Block {
+    base: Point,
+    entities: Vec<Entity>,
+}
+
+#[derive(Clone, Debug)]
+struct TextStyle {
+    family: Option<String>,
+    height: f64,
+    width_factor: f64,
+    oblique: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_entities(
+    records: &[Entity],
+    transform: Affine,
+    inherited_layer: Option<&str>,
+    inherited_color: Option<[u8; 3]>,
+    blocks: &BTreeMap<String, Block>,
+    colors: &BTreeMap<String, [u8; 3]>,
+    styles: &BTreeMap<String, TextStyle>,
+    accumulator: &mut Accumulator,
+    depth: usize,
+) {
+    if depth > 16 {
+        return;
+    }
     let mut index = 0;
     while index < records.len() {
         let entity = &records[index];
-        let layer = entity.text(8).unwrap_or("0");
+        let layer_name = entity.text(8).unwrap_or("0");
+        let layer = if layer_name == "0" {
+            inherited_layer.unwrap_or("0")
+        } else {
+            layer_name
+        };
         let color = entity
             .color()
+            .or(inherited_color)
             .or_else(|| colors.get(layer).copied())
             .unwrap_or([0, 0, 0]);
+
         match entity.kind.as_str() {
             "LINE" => {
                 if let (Some(start), Some(end)) = (entity.point(10, 20), entity.point(11, 21)) {
                     let mut path = BezPath::new();
-                    path.move_to(scale_point(start, unit_scale));
-                    path.line_to(scale_point(end, unit_scale));
-                    accumulator.add(layer, color, path, false);
+                    path.move_to(start);
+                    path.line_to(end);
+                    add_path(accumulator, layer, color, path, transform, false);
                 }
             }
             "LWPOLYLINE" => {
                 let closed = entity.integer(70).is_some_and(|flags| flags & 1 != 0);
-                if let Some(path) =
-                    polyline_path(&lw_vertices(entity), closed, unit_scale, DXF_TOLERANCE)
-                {
-                    accumulator.add(layer, color, path, false);
+                if let Some(path) = polyline_path(&lw_vertices(entity), closed, DXF_TOLERANCE) {
+                    add_path(accumulator, layer, color, path, transform, false);
                 }
             }
             "POLYLINE" => {
                 let closed = entity.integer(70).is_some_and(|flags| flags & 1 != 0);
-                let mut vertices = Vec::new();
-                let mut next = index + 1;
-                while next < records.len() {
-                    match records[next].kind.as_str() {
-                        "VERTEX" => {
-                            if let (Some(x), Some(y)) =
-                                (records[next].number(10), records[next].number(20))
-                            {
-                                vertices.push(Vertex {
-                                    point: Point::new(x, y),
-                                    bulge: records[next].number(42).unwrap_or(0.0),
-                                });
-                            }
-                            next += 1;
-                        }
-                        "SEQEND" => {
-                            next += 1;
-                            break;
-                        }
-                        _ => break,
-                    }
-                }
-                if let Some(path) = polyline_path(&vertices, closed, unit_scale, DXF_TOLERANCE) {
-                    accumulator.add(layer, color, path, false);
+                let (vertices, next) = polyline_vertices(records, index + 1);
+                if let Some(path) = polyline_path(&vertices, closed, DXF_TOLERANCE) {
+                    add_path(accumulator, layer, color, path, transform, false);
                 }
                 index = next;
                 continue;
@@ -180,12 +222,9 @@ pub fn import_dxf(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportEr
             "CIRCLE" => {
                 if let (Some(center), Some(radius)) = (entity.point(10, 20), entity.number(40)) {
                     if radius > 1e-9 {
-                        let ellipse = Ellipse::new(
-                            scale_point(center, unit_scale),
-                            Vec2::new(radius * unit_scale, radius * unit_scale),
-                            0.0,
-                        );
-                        accumulator.add(layer, color, ellipse.to_path(DXF_TOLERANCE), false);
+                        let path = Ellipse::new(center, Vec2::new(radius, radius), 0.0)
+                            .to_path(DXF_TOLERANCE);
+                        add_path(accumulator, layer, color, path, transform, false);
                     }
                 }
             }
@@ -202,14 +241,10 @@ pub fn import_dxf(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportEr
                         if end <= start {
                             end += std::f64::consts::TAU;
                         }
-                        let arc = Arc::new(
-                            scale_point(center, unit_scale),
-                            Vec2::new(radius * unit_scale, radius * unit_scale),
-                            start,
-                            end - start,
-                            0.0,
-                        );
-                        accumulator.add(layer, color, arc.to_path(DXF_TOLERANCE), false);
+                        let path =
+                            Arc::new(center, Vec2::new(radius, radius), start, end - start, 0.0)
+                                .to_path(DXF_TOLERANCE);
+                        add_path(accumulator, layer, color, path, transform, false);
                     }
                 }
             }
@@ -224,42 +259,366 @@ pub fn import_dxf(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportEr
                             end += std::f64::consts::TAU;
                         }
                         let rotation = major.y.atan2(major.x);
-                        let center = scale_point(center, unit_scale);
-                        let radii =
-                            Vec2::new(major_length * unit_scale, major_length * ratio * unit_scale);
+                        let radii = Vec2::new(major_length, major_length * ratio);
                         let path = if (end - start) >= std::f64::consts::TAU - 1e-9 {
                             Ellipse::new(center, radii, rotation).to_path(DXF_TOLERANCE)
                         } else {
                             Arc::new(center, radii, start, end - start, rotation)
                                 .to_path(DXF_TOLERANCE)
                         };
-                        accumulator.add(layer, color, path, false);
+                        add_path(accumulator, layer, color, path, transform, false);
                     }
                 }
             }
             "SPLINE" => {
-                if let Some(path) = spline_path(entity, unit_scale) {
-                    accumulator.add(layer, color, path, false);
+                if let Some(path) = spline_path(entity) {
+                    add_path(accumulator, layer, color, path, transform, false);
                 }
+            }
+            "TEXT" | "MTEXT" => {
+                add_text(
+                    entity,
+                    entity.kind == "MTEXT",
+                    layer,
+                    color,
+                    transform,
+                    styles,
+                    accumulator,
+                );
+            }
+            "INSERT" => {
+                let Some(name) = entity.text(2) else {
+                    index += 1;
+                    continue;
+                };
+                let Some(block) = blocks.get(name) else {
+                    index += 1;
+                    continue;
+                };
+                let insertion = entity.point(10, 20).unwrap_or(Point::ORIGIN);
+                let scale_x = entity.number(41).unwrap_or(1.0);
+                let scale_y = entity.number(42).unwrap_or(1.0);
+                let rotation = entity.number(50).unwrap_or(0.0).to_radians();
+                let local = Affine::translate((insertion.x, insertion.y))
+                    * Affine::rotate(rotation)
+                    * Affine::scale_non_uniform(scale_x, scale_y)
+                    * Affine::translate((-block.base.x, -block.base.y));
+                process_entities(
+                    &block.entities,
+                    transform * local,
+                    Some(layer),
+                    Some(color),
+                    blocks,
+                    colors,
+                    styles,
+                    accumulator,
+                    depth + 1,
+                );
             }
             _ => {}
         }
         index += 1;
     }
+}
 
-    let mut doc = Document::new(1.0, 1.0);
-    for (index, name) in accumulator.names.iter().enumerate() {
-        let color = accumulator.colors.get(name).copied().unwrap_or([0, 0, 0]);
-        let mut layer = Layer::new(index, name.clone(), color, opt.default_cut);
-        layer.mode = LayerMode::Line;
-        layer.shapes = accumulator.shapes.remove(name).unwrap_or_default();
-        doc.layers.push(layer);
+fn add_path(
+    accumulator: &mut Accumulator,
+    layer: &str,
+    color: [u8; 3],
+    mut path: BezPath,
+    transform: Affine,
+    is_fill: bool,
+) {
+    if path.elements().is_empty() {
+        return;
     }
-    if let Some(bounds) = doc.bounds() {
-        doc.width = bounds.x1.max(1.0);
-        doc.height = bounds.y1.max(1.0);
+    path.apply_affine(transform);
+    accumulator.add(layer, color, path, is_fill);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_text(
+    entity: &Entity,
+    is_mtext: bool,
+    layer: &str,
+    color: [u8; 3],
+    transform: Affine,
+    styles: &BTreeMap<String, TextStyle>,
+    accumulator: &mut Accumulator,
+) {
+    let style = entity.text(7).and_then(|name| styles.get(name));
+    let height = entity
+        .number(40)
+        .filter(|height| height.is_finite() && *height > 0.0)
+        .or_else(|| {
+            style
+                .map(|style| style.height)
+                .filter(|height| *height > 0.0)
+        })
+        .unwrap_or(2.5);
+    let width_factor = entity
+        .number(41)
+        .filter(|factor| factor.is_finite() && *factor > 0.0)
+        .or_else(|| style.map(|style| style.width_factor))
+        .unwrap_or(1.0);
+    let oblique = entity
+        .number(51)
+        .or_else(|| style.map(|style| style.oblique))
+        .unwrap_or(0.0);
+    let family = style
+        .and_then(|style| style.family.clone())
+        .unwrap_or_else(|| "sans-serif".to_owned());
+    let text = if is_mtext {
+        clean_mtext(&mtext_string(entity))
+    } else {
+        entity.text(1).unwrap_or("").to_owned()
+    };
+    let Some(path) = fonts::text_path(&text, &family, height, width_factor, oblique) else {
+        return;
+    };
+    let bounds = path.bounding_box();
+    let insertion = if is_mtext {
+        entity.point(10, 20).unwrap_or(Point::ORIGIN)
+    } else {
+        let horizontal = entity.integer(72).unwrap_or(0);
+        let vertical = entity.integer(73).unwrap_or(0);
+        if horizontal != 0 || vertical != 0 {
+            entity
+                .point(11, 21)
+                .or_else(|| entity.point(10, 20))
+                .unwrap_or(Point::ORIGIN)
+        } else {
+            entity.point(10, 20).unwrap_or(Point::ORIGIN)
+        }
+    };
+    let (dx, dy) = if is_mtext {
+        mtext_offset(entity.integer(71).unwrap_or(1), bounds)
+    } else {
+        text_offset(
+            entity.integer(72).unwrap_or(0),
+            entity.integer(73).unwrap_or(0),
+            bounds,
+        )
+    };
+    let rotation = entity.number(50).unwrap_or(0.0).to_radians();
+    let local = Affine::translate((insertion.x, insertion.y))
+        * Affine::rotate(rotation)
+        * Affine::translate((dx, dy));
+    let mut path = path;
+    path.apply_affine(transform * local);
+    accumulator.add(layer, color, path, true);
+}
+
+fn text_offset(horizontal: i64, vertical: i64, bounds: kurbo::Rect) -> (f64, f64) {
+    let dx = match horizontal {
+        1 => -bounds.width() * 0.5,
+        2 => -bounds.width(),
+        _ => 0.0,
+    };
+    let dy = match vertical {
+        1 => -bounds.y0,
+        2 => -bounds.center().y,
+        3 => -bounds.y1,
+        _ => 0.0,
+    };
+    (dx, dy)
+}
+
+fn mtext_offset(attachment: i64, bounds: kurbo::Rect) -> (f64, f64) {
+    let attachment = attachment.clamp(1, 9);
+    let column = (attachment - 1) % 3;
+    let row = (attachment - 1) / 3;
+    let dx = match column {
+        1 => -bounds.width() * 0.5,
+        2 => -bounds.width(),
+        _ => 0.0,
+    };
+    let dy = match row {
+        0 => -bounds.y1,
+        1 => -bounds.center().y,
+        _ => -bounds.y0,
+    };
+    (dx, dy)
+}
+
+fn mtext_string(entity: &Entity) -> String {
+    let mut text = String::new();
+    for pair in &entity.fields {
+        if pair.code == 3 || pair.code == 1 {
+            text.push_str(&pair.value);
+        }
     }
-    Ok(doc)
+    text
+}
+
+fn clean_mtext(text: &str) -> String {
+    let mut output = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\\' => match chars.next() {
+                Some('P') => output.push('\n'),
+                Some('~') => output.push(' '),
+                Some('{') => output.push('{'),
+                Some('}') => output.push('}'),
+                Some('U') if chars.peek() == Some(&'+') => {
+                    chars.next();
+                    let mut hex = String::new();
+                    for _ in 0..4 {
+                        if let Some(next) = chars.peek().copied() {
+                            if next.is_ascii_hexdigit() {
+                                hex.push(next);
+                                chars.next();
+                            }
+                        }
+                    }
+                    if let Ok(value) = u32::from_str_radix(&hex, 16) {
+                        if let Some(character) = char::from_u32(value) {
+                            output.push(character);
+                        }
+                    }
+                }
+                Some(_) => {
+                    while let Some(next) = chars.peek().copied() {
+                        chars.next();
+                        if next == ';' {
+                            break;
+                        }
+                    }
+                }
+                None => output.push('\\'),
+            },
+            '{' | '}' => {}
+            _ => output.push(character),
+        }
+    }
+    output
+}
+
+fn parse_text_styles(pairs: &[Pair]) -> BTreeMap<String, TextStyle> {
+    let mut styles = BTreeMap::new();
+    let Some(table) = section(pairs, "TABLES") else {
+        return styles;
+    };
+    let mut index = 0;
+    while index < table.len() {
+        if table[index].code == 0 && table[index].value == "STYLE" {
+            let mut name = None;
+            let mut family = None;
+            let mut height = 2.5;
+            let mut width_factor = 1.0;
+            let mut oblique = 0.0;
+            index += 1;
+            while index < table.len() && table[index].code != 0 {
+                match table[index].code {
+                    2 => name = Some(table[index].value.clone()),
+                    3 => family = style_family(&table[index].value),
+                    40 => {
+                        if let Ok(value) = table[index].value.parse::<f64>() {
+                            if value > 0.0 {
+                                height = value;
+                            }
+                        }
+                    }
+                    41 => {
+                        if let Ok(value) = table[index].value.parse::<f64>() {
+                            if value > 0.0 {
+                                width_factor = value;
+                            }
+                        }
+                    }
+                    50 => {
+                        if let Ok(value) = table[index].value.parse::<f64>() {
+                            oblique = value;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            if let Some(name) = name {
+                styles.insert(
+                    name,
+                    TextStyle {
+                        family,
+                        height,
+                        width_factor,
+                        oblique,
+                    },
+                );
+            }
+        } else {
+            index += 1;
+        }
+    }
+    styles
+}
+
+fn style_family(font: &str) -> Option<String> {
+    let path = std::path::Path::new(font);
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("shx"))
+    {
+        return None;
+    }
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
+}
+
+fn parse_blocks(pairs: &[Pair]) -> BTreeMap<String, Block> {
+    let mut blocks = BTreeMap::new();
+    let Some(section) = section(pairs, "BLOCKS") else {
+        return blocks;
+    };
+    let records = entity_records(section);
+    let mut index = 0;
+    while index < records.len() {
+        if records[index].kind != "BLOCK" {
+            index += 1;
+            continue;
+        }
+        let block = &records[index];
+        let Some(name) = block.text(2) else {
+            index += 1;
+            continue;
+        };
+        let base = block.point(10, 20).unwrap_or(Point::ORIGIN);
+        let mut entities = Vec::new();
+        index += 1;
+        while index < records.len() && records[index].kind != "ENDBLK" {
+            entities.push(records[index].clone());
+            index += 1;
+        }
+        blocks.insert(name.to_owned(), Block { base, entities });
+    }
+    blocks
+}
+
+fn polyline_vertices(records: &[Entity], start: usize) -> (Vec<Vertex>, usize) {
+    let mut vertices = Vec::new();
+    let mut index = start;
+    while index < records.len() {
+        match records[index].kind.as_str() {
+            "VERTEX" => {
+                if let (Some(x), Some(y)) = (records[index].number(10), records[index].number(20)) {
+                    vertices.push(Vertex {
+                        point: Point::new(x, y),
+                        bulge: records[index].number(42).unwrap_or(0.0),
+                    });
+                }
+                index += 1;
+            }
+            "SEQEND" => {
+                index += 1;
+                break;
+            }
+            _ => break,
+        }
+    }
+    (vertices, index)
 }
 
 fn parse_pairs(text: &str) -> Vec<Pair> {
@@ -358,6 +717,10 @@ fn entities(pairs: &[Pair]) -> Vec<Entity> {
     let Some(section) = section(pairs, "ENTITIES") else {
         return Vec::new();
     };
+    entity_records(section)
+}
+
+fn entity_records(section: &[Pair]) -> Vec<Entity> {
     let mut entities = Vec::new();
     let mut current: Option<Entity> = None;
     for pair in section {
@@ -407,17 +770,17 @@ fn lw_vertices(entity: &Entity) -> Vec<Vertex> {
     vertices
 }
 
-fn polyline_path(vertices: &[Vertex], closed: bool, scale: f64, tolerance: f64) -> Option<BezPath> {
+fn polyline_path(vertices: &[Vertex], closed: bool, tolerance: f64) -> Option<BezPath> {
     if vertices.len() < 2 {
         return None;
     }
     let mut path = BezPath::new();
-    path.move_to(scale_point(vertices[0].point, scale));
+    path.move_to(vertices[0].point);
     for index in 1..vertices.len() {
         append_segment(
             &mut path,
-            scale_point(vertices[index - 1].point, scale),
-            scale_point(vertices[index].point, scale),
+            vertices[index - 1].point,
+            vertices[index].point,
             vertices[index - 1].bulge,
             tolerance,
         );
@@ -425,8 +788,8 @@ fn polyline_path(vertices: &[Vertex], closed: bool, scale: f64, tolerance: f64) 
     if closed {
         append_segment(
             &mut path,
-            scale_point(vertices[vertices.len() - 1].point, scale),
-            scale_point(vertices[0].point, scale),
+            vertices[vertices.len() - 1].point,
+            vertices[0].point,
             vertices[vertices.len() - 1].bulge,
             tolerance,
         );
@@ -453,11 +816,7 @@ fn append_segment(path: &mut BezPath, start: Point, end: Point, bulge: f64, tole
     path.extend(arc.to_path(tolerance).elements().iter().skip(1).copied());
 }
 
-fn scale_point(point: Point, scale: f64) -> Point {
-    Point::new(point.x * scale, point.y * scale)
-}
-
-fn spline_path(entity: &Entity, scale: f64) -> Option<BezPath> {
+fn spline_path(entity: &Entity) -> Option<BezPath> {
     let mut control = Vec::new();
     let mut fit = Vec::new();
     let mut x = None;
@@ -501,10 +860,7 @@ fn spline_path(entity: &Entity, scale: f64) -> Option<BezPath> {
     if points.len() < 2 {
         return None;
     }
-    let points: Vec<Point> = points
-        .into_iter()
-        .map(|point| scale_point(point, scale))
-        .collect();
+    let points: Vec<Point> = points;
 
     let mut path = BezPath::new();
     if knots.len() > points.len() + degree {
@@ -679,6 +1035,44 @@ mod tests {
         let bounds = doc.bounds().expect("bounds");
         assert!((bounds.width() - 10.0).abs() < 0.1);
         assert!((bounds.height() - 7.5).abs() < 0.2);
+    }
+
+    #[test]
+    fn expands_inserted_blocks_with_transform() {
+        let dxf = "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n0\nLAYER\n2\nCUT\n62\n1\n0\nENDTAB\n0\nENDSEC\n                   0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nB1\n10\n0\n20\n0\n                   0\nLINE\n8\n0\n10\n0\n20\n0\n11\n10\n21\n0\n                   0\nENDBLK\n0\nENDSEC\n                   0\nSECTION\n2\nENTITIES\n0\nINSERT\n8\nCUT\n2\nB1\n10\n20\n20\n10\n41\n2\n42\n2\n50\n90\n                   0\nENDSEC\n0\nEOF\n";
+        let doc = import_dxf(dxf.as_bytes(), &ImportOptions::default()).expect("dxf");
+        assert_eq!(doc.shape_count(), 1);
+        assert_eq!(doc.layers[0].name, "CUT");
+        assert_eq!(doc.layers[0].color, [255, 0, 0]);
+        let bounds = doc.bounds().expect("bounds");
+        assert!((bounds.x0 - 20.0).abs() < 0.1, "{bounds:?}");
+        assert!((bounds.y0 - 10.0).abs() < 0.1);
+        assert!((bounds.height() - 20.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn imports_mtext_with_paragraph_breaks() {
+        if fonts::database().is_empty() {
+            return;
+        }
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n8\n0\n10\n0\n20\n20\n40\n5\n71\n1\n1\nHello\\PWorld\n0\nENDSEC\n0\nEOF\n";
+        let doc = import_dxf(dxf.as_bytes(), &ImportOptions::default()).expect("dxf");
+        assert_eq!(doc.shape_count(), 1);
+        let bounds = doc.bounds().expect("text bounds");
+        assert!(bounds.height() > 8.0, "{bounds:?}");
+    }
+
+    #[test]
+    fn imports_dxf_text_as_outlines() {
+        if fonts::database().is_empty() {
+            return;
+        }
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nTEXT\n8\n0\n10\n0\n20\n0\n40\n10\n1\nAB\n0\nENDSEC\n0\nEOF\n";
+        let doc = import_dxf(dxf.as_bytes(), &ImportOptions::default()).expect("dxf");
+        assert_eq!(doc.shape_count(), 1);
+        let bounds = doc.bounds().expect("text bounds");
+        assert!(bounds.width() > 5.0);
+        assert!(bounds.height() > 3.0);
     }
 
     #[test]

@@ -17,7 +17,7 @@ was decompiled or copied.
 
 | Capability | Status |
 |---|---|
-| SVG import (shapes→paths, transforms, CSS, physical units) | ✅ |
+| SVG import (shapes→paths, transforms, CSS, physical units, text via system fonts) | ✅ |
 | Image import (PNG/JPEG/BMP) | ✅ |
 | Colours → layers, per-layer speed/power/passes | ✅ |
 | Kerf compensation via Clipper2 (outer shrinks, holes grow) | ✅ |
@@ -29,8 +29,8 @@ was decompiled or copied.
 | GRBL streaming: character-counting flow control, `ok`/`error`, progress, status, feed hold, resume, soft reset, automatic stop on failure | ✅ |
 | USB serial and WiFi TCP/Telnet (Grbl_ESP32, FluidNC, ESP3D) | ✅ |
 | Hardware-free GRBL simulator | ✅ |
-| DXF import (common 2D entities) | ✅ |
-| PDF / AI import (PDF vector paths, first page) | ✅ |
+| DXF import (common 2D entities, blocks/INSERT, TEXT/MTEXT) | ✅ |
+| PDF / AI import (vector paths, page selection) | ✅ |
 | Raster engraving (threshold, Floyd–Steinberg/Atkinson/Bayer dither, grayscale, crop) | ✅ |
 | Tabs/bridges on contour cuts, automatic or manual, with canvas markers | ✅ |
 | GUI viewer: layers, speed/power/passes, live stats, G-code export | ✅ |
@@ -43,6 +43,7 @@ was decompiled or copied.
 | Dark or light interface and canvas theme | ✅ |
 | Project save/load (`.orleans`, canonical layer/shape snapshot) | ✅ |
 | Import SVG/PDF/DXF/images into the current design, reusing matching colour layers | ✅ |
+| System-font outlining for SVG/DXF text | ✅ |
 | Machine bed/travel from `$130`/`$131` drawn on the canvas | ✅ |
 | GUI machine control: connect, status, home, unlock, stop | ✅ |
 | GUI job streaming: progress, stop, automatic idle wait | ✅ |
@@ -55,7 +56,7 @@ was decompiled or copied.
 | Ruida, TopWisdom, galvo/fiber, rotary | ❌ |
 | LBRN2 project files | ❌ |
 
-154 unit and integration tests, including a full SVG → toolpath → G-code → TCP
+159 unit and integration tests, including a full SVG → toolpath → G-code → TCP
 controller run against a local GRBL server.
 
 ## Quick start
@@ -74,6 +75,9 @@ cargo run -q -- gui drawing.dxf
 
 # Open a PDF or a PDF-compatible Illustrator file
 cargo run -q -- gui drawing.pdf
+
+# Import a specific PDF page (1-based)
+cargo run -q -- info drawing.pdf --page 2
 
 # Open a PNG/JPEG/BMP as a raster-engraving layer
 cargo run -q -- gui photo.png
@@ -176,15 +180,17 @@ The GUI is behind the `gui` Cargo feature, which is on by default. Build with
   move, drag a corner to resize and drag the top handle to rotate. Use a
   separate vector layer for outlines;
 * PDF files open or import as vector paths, grouped by stroke colour (or fill
-  colour for fill-only paths). PDF-compatible `.ai` files work too. The first
-  page is imported. Imports append to matching existing colour layers instead
-  of creating duplicates. Text must be converted to outlines, and raster
-  images, clipping paths, gradients and patterns are not imported;
+  colour for fill-only paths). PDF-compatible `.ai` files work too. Multi-page
+  PDFs ask which page to import; the CLI accepts `--page N`. Imports append to
+  matching existing colour layers instead of creating duplicates. PDF text must
+  be converted to outlines, and raster images, clipping paths, gradients and
+  patterns are not imported;
 * DXF files open or import as one layer per DXF layer, using the layer's ACI or
   true colour. `LINE`, `LWPOLYLINE`/`POLYLINE` (including bulges), `CIRCLE`,
-  `ARC`, `ELLIPSE` and `SPLINE` are read; `$INSUNITS` sets the millimetre
-  scale. Blocks/`INSERT`, `HATCH`, text, dimensions and binary DXF are not
-  expanded;
+  `ARC`, `ELLIPSE`, `SPLINE`, `INSERT`/blocks, `TEXT` and `MTEXT` are read;
+  `$INSUNITS` sets the millimetre scale. Text is outlined with system fonts;
+  SHX fonts fall back to a sans-serif face. `HATCH`, dimensions, meshes and
+  binary DXF are skipped;
 * **Import…** adds SVG, DXF or raster layers to the current document instead of
   replacing it. Imported layers are appended at the end of the cut order with
   unique names, and the action is undoable. This is how hybrid vector/raster
@@ -282,7 +288,7 @@ remains available. Framing can always be paused because it holds `M5`.
 crates/
   orleans-core/      document model: Document → Layer → Shape, CutParams, Job
   orleans-geom/      flattening, area, containment, Clipper2 offsets/booleans
-  orleans-import/    SVG → Document (via usvg), ASCII DXF, raster images
+  orleans-import/    SVG/PDF/DXF → Document, system-font text, raster images
   orleans-toolpath/  Document → Job: nesting, ordering, passes, time estimate
   orleans-driver/    Job → G-code, Transport trait, serial/TCP, GRBL client, simulator
   orleans-cli/       the `orleans` binary
@@ -438,8 +444,8 @@ concept of a line and some bridges emit negotiation on connect.
 * Curves are flattened at import/plan time (default 0.02 mm), so G-code grows
   with detail. Arcs (`G2`/`G3`) are not emitted.
 * No acceleration model in the time estimate; it is distance / feed rate.
-* Text in SVG needs a font database wired into `usvg::Options`; without it,
-  text elements are dropped.
+* SVG and DXF text use the host's system fonts. Missing or SHX fonts fall back
+  to sans-serif, so outlines may not match the source exactly.
 * The simulator is protocol-level, not a motion model.
 * The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, it
   assumes work zero coincides with machine zero.
@@ -448,15 +454,14 @@ concept of a line and some bridges emit negotiation on connect.
   SVG but no longer depend on re-import or index matching.
 * Interactive handles scale uniformly around the opposite corner and rotate
   around the selection centre. There is no non-uniform/skewed scaling.
-* PDF import reads the first page's vector paths and form XObjects only. Text
-  must be outlined; raster images, clip paths, gradients, patterns,
-  transparency groups, annotations and later pages are skipped. Illustrator
-  files must be saved with PDF compatibility. Imported paths are not linked to
-  their source file.
-* DXF import covers ASCII files and the listed entities only. Blocks,
-  `INSERT`, `HATCH`, text, dimensions, meshes and binary DXF are skipped.
-  Imported vector layers are self-contained: they are not linked to their
-  source file, and later source edits are not tracked.
+* PDF import reads one page's vector paths and form XObjects. Text must be
+  outlined; raster images, clip paths, gradients, patterns, transparency groups
+  and annotations are skipped. Illustrator files must be saved with PDF
+  compatibility. Imported paths are not linked to their source file.
+* DXF import covers ASCII files and the listed entities only. `HATCH`,
+  dimensions, meshes, binary DXF and block attributes are skipped. Imported
+  vector layers are self-contained: they are not linked to their source file,
+  and later source edits are not tracked.
 * Only empty vector layers can be deleted. Delete all their objects first; a
   raster layer disappears only when the design is replaced. Imported raster
   images always get a new raster layer, even when a vector layer has the same
@@ -501,7 +506,7 @@ concept of a line and some bridges emit negotiation on connect.
 
 ## Roadmap
 
-1. **More importers** — PDF page selection, HPGL, DXF blocks/text.
+1. **More importers** — HPGL, DXF hatches/dimensions, better SHX/CAD text.
 2. **Second driver** — Marlin, then Ruida over UDP.
 3. **Job control extras** — feed/power overrides, rotary setup.
 

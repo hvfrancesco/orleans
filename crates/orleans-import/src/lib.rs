@@ -8,12 +8,13 @@ use std::rc::Rc;
 
 use kurbo::{BezPath, Point};
 use orleans_core::{CutParams, Document, Layer, LayerMode, RasterImage, RasterMode, Shape};
-use usvg::tiny_skia_path::PathSegment;
+use usvg::tiny_skia_path::{PathSegment, Transform};
 
 mod dxf;
+mod fonts;
 mod pdf;
 pub use dxf::import_dxf;
-pub use pdf::import_pdf;
+pub use pdf::{import_pdf, pdf_page_count};
 
 /// 96 CSS pixels per inch, the SVG/CSS reference resolution.
 pub const DEFAULT_DPI: f64 = 96.0;
@@ -36,6 +37,8 @@ pub struct ImportOptions {
     pub default_cut: CutParams,
     /// Group geometry by stroke/fill colour into separate layers.
     pub group_by_color: bool,
+    /// Zero-based PDF page to import. Other importers ignore it.
+    pub pdf_page: usize,
 }
 
 impl Default for ImportOptions {
@@ -46,6 +49,7 @@ impl Default for ImportOptions {
             scale: 1.0,
             default_cut: CutParams::default(),
             group_by_color: true,
+            pdf_page: 0,
         }
     }
 }
@@ -120,20 +124,22 @@ pub fn import_image(data: &[u8], dpi: f64) -> Result<Document, ImportError> {
 
 /// Parse SVG bytes into a [`Document`] in millimetres, Y up.
 pub fn import_svg(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportError> {
-    let usvg_opt = usvg::Options {
-        dpi: DEFAULT_DPI as f32,
-        ..Default::default()
+    let dpi = if opt.dpi.is_finite() && opt.dpi > 0.0 {
+        opt.dpi
+    } else {
+        DEFAULT_DPI
     };
+    let usvg_opt = fonts::usvg_options(dpi as f32);
     let tree = usvg::Tree::from_data(data, &usvg_opt)?;
 
-    let mm_per_px = 25.4 / opt.dpi * opt.scale;
+    let mm_per_px = 25.4 / dpi * opt.scale;
     let width_mm = f64::from(tree.size().width()) * mm_per_px;
     let height_mm = f64::from(tree.size().height()) * mm_per_px;
 
     let mut doc = Document::new(width_mm, height_mm);
     let mut path_index = 0usize;
 
-    let mut visit = |node: &usvg::Node| {
+    let mut visit = |node: &usvg::Node, extra: Transform| {
         let usvg::Node::Path(path) = node else {
             return;
         };
@@ -149,7 +155,7 @@ pub fn import_svg(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportEr
             path.id().to_owned()
         };
 
-        let tf = path.abs_transform();
+        let tf = extra.pre_concat(path.abs_transform());
         let map = |p: usvg::tiny_skia_path::Point| -> Point {
             let mut p = p;
             tf.map_point(&mut p);
@@ -181,17 +187,26 @@ pub fn import_svg(data: &[u8], opt: &ImportOptions) -> Result<Document, ImportEr
             .shapes
             .push(Shape::new(id, bez, path.fill().is_some()));
     };
-    walk(tree.root().children(), &mut visit);
+    walk(tree.root().children(), Transform::default(), &mut visit);
 
     Ok(doc)
 }
 
 /// Depth-first walk over the resolved node tree.
-fn walk(nodes: &[usvg::Node], f: &mut impl FnMut(&usvg::Node)) {
+fn walk(nodes: &[usvg::Node], extra: Transform, f: &mut impl FnMut(&usvg::Node, Transform)) {
     for node in nodes {
-        f(node);
-        if let usvg::Node::Group(group) = node {
-            walk(group.children(), f);
+        f(node, extra);
+        match node {
+            usvg::Node::Group(group) => walk(group.children(), extra, f),
+            // usvg keeps text as a laid-out node with a flattened group of
+            // glyph paths. Those paths do not inherit Text::abs_transform, so
+            // carry it into the flattened children explicitly.
+            usvg::Node::Text(text) => walk(
+                text.flattened().children(),
+                extra.pre_concat(text.abs_transform()),
+                f,
+            ),
+            usvg::Node::Path(_) | usvg::Node::Image(_) => {}
         }
     }
 }
@@ -281,6 +296,24 @@ mod tests {
         // SVG y=2mm from the top becomes y=8mm from the bottom.
         assert!((bounds.y0 - 5.0).abs() < 1e-3, "{bounds:?}");
         assert!((bounds.y1 - 8.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn outlines_svg_text_with_system_fonts() {
+        if fonts::database().is_empty() {
+            return;
+        }
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="50mm" height="20mm" viewBox="0 0 50 20">
+            <text x="5" y="15" font-family="sans-serif" font-size="10" fill="#ff0000">ORLEANS</text>
+        </svg>"##;
+        let doc = doc_for(svg);
+        assert_eq!(doc.shape_count(), 1);
+        assert_eq!(doc.layers[0].color, [255, 0, 0]);
+        let bounds = doc.bounds().expect("text bounds");
+        assert!(bounds.width() > 5.0);
+        // SVG y=15 is 5 mm above the bottom of a 20 mm page.
+        assert!(bounds.y0 < 10.0, "{bounds:?}");
+        assert!(bounds.y1 > 5.0, "{bounds:?}");
     }
 
     #[test]

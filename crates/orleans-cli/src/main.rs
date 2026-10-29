@@ -156,6 +156,9 @@ struct Common {
     /// Cut travel order optimisation off.
     #[arg(long)]
     no_optimize: bool,
+    /// PDF page number, starting at 1.
+    #[arg(long, default_value_t = 1)]
+    page: usize,
 }
 
 impl Common {
@@ -168,6 +171,7 @@ impl Common {
             scale: self.scale,
             default_cut: orleans_core::CutParams::new(self.speed, self.power, self.passes),
             group_by_color: true,
+            pdf_page: self.page.saturating_sub(1),
         };
         let is_dxf = self
             .input

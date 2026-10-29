@@ -9,4 +9,5 @@ usvg.workspace = true
 thiserror.workspace = true
 image.workspace = true
 lopdf.workspace = true
+ab_glyph.workspace = true
 orleans-core = { path = "../orleans-core" }
