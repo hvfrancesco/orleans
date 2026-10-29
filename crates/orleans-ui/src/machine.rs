@@ -23,6 +23,7 @@ pub enum Command {
     Stop,
     Run(String),
     Jog { dx: f64, dy: f64, feed: f64 },
+    JogTo { x: f64, y: f64, feed: f64 },
     JogCancel,
     SetOrigin,
     SaveOrigin,
@@ -133,6 +134,10 @@ impl Machine {
 
     pub fn jog(&self, dx: f64, dy: f64, feed: f64) -> bool {
         self.tx.send(Command::Jog { dx, dy, feed }).is_ok()
+    }
+
+    pub fn jog_to(&self, x: f64, y: f64, feed: f64) -> bool {
+        self.tx.send(Command::JogTo { x, y, feed }).is_ok()
     }
 
     pub fn jog_cancel(&self) -> bool {
@@ -299,6 +304,16 @@ fn worker(
                 }
                 None => message(&events, "not connected", true),
             },
+            Ok(Command::JogTo { x, y, feed }) => match client.as_mut() {
+                Some(connected) => {
+                    let line = jog_absolute_line(x, y, feed);
+                    match connected.write_command(&line) {
+                        Ok(()) => message(&events, format!("jog to X{x:.2} Y{y:.2} mm"), false),
+                        Err(err) => message(&events, format!("jog failed: {err}"), true),
+                    }
+                }
+                None => message(&events, "not connected", true),
+            },
             Ok(Command::JogCancel) => match client.as_mut() {
                 Some(connected) => match connected.jog_cancel() {
                     Ok(()) => message(&events, "jog cancelled", false),
@@ -449,6 +464,10 @@ fn worker(
 
 fn jog_line(dx: f64, dy: f64, feed: f64) -> String {
     format!("$J=G91 G21 X{dx:.3} Y{dy:.3} F{feed:.0}")
+}
+
+fn jog_absolute_line(x: f64, y: f64, feed: f64) -> String {
+    format!("$J=G90 G21 X{x:.3} Y{y:.3} F{feed:.0}")
 }
 
 type Connected = (GrblClient<Box<dyn Transport>>, String, Settings);
@@ -781,6 +800,18 @@ mod tests {
             }
         });
         (port, rx, handle)
+    }
+
+    #[test]
+    fn absolute_jog_uses_current_work_coordinates() {
+        assert_eq!(
+            jog_absolute_line(0.0, 0.0, 1000.0),
+            "$J=G90 G21 X0.000 Y0.000 F1000"
+        );
+        assert_eq!(
+            jog_absolute_line(12.5, -3.25, 250.0),
+            "$J=G90 G21 X12.500 Y-3.250 F250"
+        );
     }
 
     #[test]

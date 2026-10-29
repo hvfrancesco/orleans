@@ -4601,11 +4601,13 @@ impl OrleansApp {
                                 Some(Instant::now() + Duration::from_millis(250));
                         }
                         if ui
-                            .add_enabled(can_cancel_jog, pad("■"))
-                            .on_hover_text(tr!("Cancel jog (realtime 0x85)"))
+                            .add_enabled(can_jog, pad("0"))
+                            .on_hover_text(tr!("Move to work zero (0, 0)"))
                             .clicked()
                         {
-                            self.machine.jog_cancel();
+                            self.machine.jog_to(0.0, 0.0, self.jog_feed);
+                            self.jog_pending_until =
+                                Some(Instant::now() + Duration::from_millis(250));
                         }
                         if ui
                             .add_enabled(can_jog, pad("X+"))
@@ -4631,6 +4633,14 @@ impl OrleansApp {
                         ui.label("");
                         ui.end_row();
                     });
+
+                if ui
+                    .add_enabled(can_cancel_jog, egui::Button::new(tr!("Cancel jog")))
+                    .on_hover_text(tr!("Cancel jog (realtime 0x85)"))
+                    .clicked()
+                {
+                    self.machine.jog_cancel();
+                }
 
                 ui.horizontal(|ui| {
                     if ui

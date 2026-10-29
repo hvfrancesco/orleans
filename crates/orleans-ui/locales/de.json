@@ -349,5 +349,7 @@
   "select closed shapes to offset": "geschlossene Formen zum Versetzen auswählen",
   "offset distance must be non-zero": "der Versatzabstand muss ungleich null sein",
   "offset produced no geometry": "der Versatz ergab keine Geometrie",
-  "offset complete": "Versatz abgeschlossen"
+  "offset complete": "Versatz abgeschlossen",
+  "Move to work zero (0, 0)": "Zum Werkstücknullpunkt (0, 0) fahren",
+  "Cancel jog": "Jog abbrechen"
 }

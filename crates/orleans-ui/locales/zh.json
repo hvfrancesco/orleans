@@ -349,5 +349,7 @@
   "select closed shapes to offset": "选择要偏移的闭合形状",
   "offset distance must be non-zero": "偏移距离不能为零",
   "offset produced no geometry": "偏移没有生成几何图形",
-  "offset complete": "偏移完成"
+  "offset complete": "偏移完成",
+  "Move to work zero (0, 0)": "移动到工件零点 (0, 0)",
+  "Cancel jog": "取消点动"
 }

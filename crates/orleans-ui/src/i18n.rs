@@ -521,6 +521,8 @@ fn italian(text: &str) -> Option<&'static str> {
         "offset distance must be non-zero" => "la distanza dell'offset deve essere diversa da zero",
         "offset produced no geometry" => "l'offset non ha prodotto geometria",
         "offset complete" => "offset completato",
+        "Move to work zero (0, 0)" => "Vai allo zero di lavoro (0, 0)",
+        "Cancel jog" => "Annulla jog",
         _ => return None,
     })
 }

@@ -349,5 +349,7 @@
   "select closed shapes to offset": "selecciona formas cerradas para desplazar",
   "offset distance must be non-zero": "la distancia de desplazamiento debe ser distinta de cero",
   "offset produced no geometry": "el desplazamiento no produjo geometría",
-  "offset complete": "desplazamiento completado"
+  "offset complete": "desplazamiento completado",
+  "Move to work zero (0, 0)": "Ir al cero de trabajo (0, 0)",
+  "Cancel jog": "Cancelar jog"
 }

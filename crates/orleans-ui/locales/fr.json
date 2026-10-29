@@ -349,5 +349,7 @@
   "select closed shapes to offset": "sélectionnez des formes fermées à décaler",
   "offset distance must be non-zero": "la distance de décalage doit être non nulle",
   "offset produced no geometry": "le décalage n'a produit aucune géométrie",
-  "offset complete": "décalage terminé"
+  "offset complete": "décalage terminé",
+  "Move to work zero (0, 0)": "Aller au zéro de travail (0, 0)",
+  "Cancel jog": "Annuler le jog"
 }
