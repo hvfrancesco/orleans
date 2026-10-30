@@ -8147,9 +8147,37 @@ impl OrleansApp {
                     .iter()
                     .map(|point| self.view.world_to_screen(area, *point))
                     .collect();
-                if points.len() >= 2 {
-                    painter.add(egui::Shape::line(points, Stroke::new(3.0, palette.tab)));
+                if points.len() < 2 {
+                    continue;
                 }
+                painter.add(egui::Shape::line(
+                    points.clone(),
+                    Stroke::new(3.0, palette.tab),
+                ));
+                // A ring with a small cross makes tabs visible even when the
+                // contour itself is thin, dark or crowded.
+                let center = Pos2::new(
+                    (points[0].x + points[points.len() - 1].x) * 0.5,
+                    (points[0].y + points[points.len() - 1].y) * 0.5,
+                );
+                let radius = 5.0;
+                painter.circle_filled(center, radius, palette.background);
+                painter.circle_stroke(center, radius, Stroke::new(1.8, palette.tab));
+                let arm = 2.4;
+                painter.line_segment(
+                    [
+                        Pos2::new(center.x - arm, center.y - arm),
+                        Pos2::new(center.x + arm, center.y + arm),
+                    ],
+                    Stroke::new(1.8, palette.tab),
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(center.x - arm, center.y + arm),
+                        Pos2::new(center.x + arm, center.y - arm),
+                    ],
+                    Stroke::new(1.8, palette.tab),
+                );
             }
         }
     }

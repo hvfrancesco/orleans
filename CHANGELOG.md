@@ -8,6 +8,8 @@ All notable changes to orleans are recorded here.
 
 - Use the Phosphor `unite-square`, `subtract-square` and `intersect-square`
   icons for the boolean operation buttons.
+- Make tab markers on the canvas easier to see with a contrasting ring and
+  cross at each tab, in addition to the cyan segment.
 
 ### Machine profiles and safety
 
