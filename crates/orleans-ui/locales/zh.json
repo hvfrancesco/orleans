@@ -359,5 +359,14 @@
   "offset produced no geometry": "偏移没有生成几何图形",
   "offset complete": "偏移完成",
   "Move to work zero (0, 0)": "移动到工件零点 (0, 0)",
-  "Cancel jog": "取消点动"
+  "Cancel jog": "取消点动",
+  "Home (G28)": "回零 (G28)",
+  "Unlock (M999)": "解锁 (M999)",
+  "Move the head to the limit switches.": "将机头移动到限位开关。",
+  "Restart a halted Marlin controller.": "重启已停止的 Marlin 控制器。",
+  "Stop the current jog (M410)": "停止当前点动 (M410)",
+  "Emergency stop (M112); switches the laser off. Unlock (M999) restarts.": "急停 (M112)；关闭激光。解锁 (M999) 可重启。",
+  "Marlin configuration is defined in the firmware.": "Marlin 配置由固件定义。",
+  "Marlin does not persist a work zero; use Set zero (G92).": "Marlin 不会保存工件零点；请使用设置零点 (G92)。",
+  "Pause is not available on Marlin; use Stop.": "Marlin 不支持暂停；请使用停止。"
 }

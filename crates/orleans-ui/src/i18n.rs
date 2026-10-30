@@ -218,8 +218,27 @@ fn italian(text: &str) -> Option<&'static str> {
         "Save zero (G54)" => "Salva zero (G54)",
         "Control" => "Controllo",
         "Home ($H)" => "Home ($H)",
+        "Home (G28)" => "Home (G28)",
         "Unlock ($X)" => "Sblocca ($X)",
+        "Unlock (M999)" => "Sblocca (M999)",
         "Stop" => "Arresta",
+        "Move the head to the limit switches." => {
+            "Sposta la testa fino ai finecorsa."
+        }
+        "Restart a halted Marlin controller." => "Riavvia un controller Marlin fermato.",
+        "Stop the current jog (M410)" => "Ferma il jog corrente (M410)",
+        "Emergency stop (M112); switches the laser off. Unlock (M999) restarts." => {
+            "Arresto di emergenza (M112); spegne il laser. Sblocca (M999) riavvia."
+        }
+        "Marlin configuration is defined in the firmware." => {
+            "La configurazione Marlin è definita nel firmware."
+        }
+        "Marlin does not persist a work zero; use Set zero (G92)." => {
+            "Marlin non salva lo zero di lavoro; usa Zero temporaneo (G92)."
+        }
+        "Pause is not available on Marlin; use Stop." => {
+            "La pausa non è disponibile su Marlin; usa Arresta."
+        }
         "Jogging and homing move the head. Clear the bed first." => {
             "Il movimento manuale e l'home spostano la testa. Libera il piano prima."
         }

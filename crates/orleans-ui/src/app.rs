@@ -10,7 +10,8 @@ use kurbo::{Affine, Point};
 use orleans_core::{
     Document, Job, Layer, LayerMode, ManualTabs, Op, RasterCrop, RasterImage, RasterMode, Shape,
 };
-use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
+use orleans_driver::gcode::{self, GcodeDialect, GcodeOptions, LaserMode};
+use orleans_driver::Protocol;
 use orleans_geom::{
     difference, flatten_path, hatch_contours, intersection, nearest_along_closed, offset_region,
     point_at_fraction, point_in_polygon, tab_span_polylines, union, HatchOptions,
@@ -1483,6 +1484,7 @@ impl OrleansApp {
         self.plan_opts.optimize = project.optimize;
         self.gcode_opts.laser_mode = project.laser_mode();
         self.gcode_opts.max_s = project.max_s;
+        self.clamp_max_s_for_protocol();
         self.project_path = Some(path.clone());
         self.path = project
             .source
@@ -1655,6 +1657,7 @@ impl OrleansApp {
                 .unwrap_or(true)
         {
             self.homing = false;
+            self.home_pending_until = None;
         }
         while let Some(event) = self.machine.try_recv() {
             match event {
@@ -1709,6 +1712,8 @@ impl OrleansApp {
                                     || (self.saw_home && status.state == "Idle")
                                 {
                                     self.homing = false;
+                                    self.home_pending_until = None;
+                                    self.saw_home = false;
                                 }
                             }
                             self.machine_status = Some(status);
@@ -1721,6 +1726,7 @@ impl OrleansApp {
                         .as_ref()
                         .and_then(|settings| settings.bed)
                         .is_some();
+                    self.clamp_max_s_for_protocol();
                     if let Some(laser) = settings.laser_mode {
                         self.setting_laser = laser;
                     }
@@ -1865,7 +1871,7 @@ impl OrleansApp {
             return;
         }
         self.job_uses_m4 = self.gcode_opts.laser_mode == LaserMode::M4;
-        let program = gcode::write(&self.job, &self.gcode_opts);
+        let program = gcode::write(&self.job, &self.machine_gcode_options());
         if self.machine.run(&program) {
             self.begin_pending_job(JobKind::Cut);
             self.job_running = true;
@@ -1891,7 +1897,7 @@ impl OrleansApp {
             self.set_status("nothing to frame: no layers are set to Cut", true);
             return;
         };
-        let program = frame_program(bounds, FRAME_FEED);
+        let program = frame_program(bounds, FRAME_FEED, self.gcode_dialect());
         if self.machine.run(&program) {
             self.begin_pending_job(JobKind::Frame);
             self.job_running = true;
@@ -1926,6 +1932,10 @@ impl OrleansApp {
             self.set_status("refresh controller settings first", true);
             return;
         };
+        if settings.protocol != Protocol::Grbl {
+            self.set_status("Marlin settings are defined in the firmware", true);
+            return;
+        }
         let current_laser = settings.laser_mode.unwrap_or(true);
         let current_max_s = settings.max_s.unwrap_or(1000);
         let current_homing = settings.homing.unwrap_or(false);
@@ -3100,6 +3110,7 @@ impl OrleansApp {
         }
         if let Some(settings) = snapshot.settings {
             settings.apply(&mut self.doc, &mut self.plan_opts, &mut self.gcode_opts);
+            self.clamp_max_s_for_protocol();
         }
         if let Some(groups) = snapshot.groups {
             self.groups = groups;
@@ -4387,8 +4398,43 @@ impl OrleansApp {
         self.dirty = true;
     }
 
+    fn protocol(&self) -> Protocol {
+        self.settings
+            .as_ref()
+            .map(|settings| settings.protocol)
+            .unwrap_or(Protocol::Grbl)
+    }
+
+    fn gcode_dialect(&self) -> GcodeDialect {
+        match self.protocol() {
+            Protocol::Grbl => GcodeDialect::Grbl,
+            Protocol::Marlin => GcodeDialect::Marlin,
+        }
+    }
+
+    /// G-code options for the connected machine. The dialect is derived from
+    /// the live protocol instead of being stored in the project, so undo or a
+    /// reconnect can never emit GRBL workspace words to Marlin.
+    fn machine_gcode_options(&self) -> GcodeOptions {
+        let mut options = self.gcode_opts.clone();
+        options.dialect = self.gcode_dialect();
+        options
+    }
+
+    fn clamp_max_s_for_protocol(&mut self) {
+        // Marlin PWM is commonly 0..=255. Clamp values inherited from a GRBL
+        // project when the connection is established or a project/undo restores
+        // them, so a 20 % layer cannot silently become full power.
+        if self.protocol() == Protocol::Marlin
+            && self.gcode_opts.max_s > Protocol::Marlin.default_max_s()
+        {
+            self.gcode_opts.max_s = Protocol::Marlin.default_max_s();
+        }
+    }
+
     fn pause_is_safe(&self) -> bool {
-        self.job_uses_m4
+        self.protocol().supports_pause()
+            && self.job_uses_m4
             && self
                 .settings
                 .as_ref()
@@ -4473,39 +4519,37 @@ impl OrleansApp {
         }
 
         if let Some(settings) = &self.settings {
-            let mut parts = Vec::new();
-            if let Some(laser) = settings.laser_mode {
-                parts.push(format!("$32={}", if laser { "1" } else { "0" }));
-            }
-            if let Some(max_s) = settings.max_s {
-                parts.push(format!("$30={max_s}"));
-            }
-            if let Some(homing) = settings.homing {
-                parts.push(format!("$22={}", if homing { "1" } else { "0" }));
-            }
-            if parts.is_empty() {
-                ui.label(
-                    RichText::new(tr!("controller settings unavailable ($$)"))
-                        .small()
-                        .weak(),
-                );
+            let mut parts = vec![settings.protocol.label().to_owned()];
+            if settings.protocol == Protocol::Marlin {
+                if let Some(max_s) = settings.max_s {
+                    parts.push(format!("{} {max_s}", tr!("Max S")));
+                }
             } else {
-                ui.add(
-                    egui::Label::new(RichText::new(parts.join(" · ")).small().weak()).truncate(),
-                );
+                if let Some(laser) = settings.laser_mode {
+                    parts.push(format!("$32={}", if laser { "1" } else { "0" }));
+                }
+                if let Some(max_s) = settings.max_s {
+                    parts.push(format!("$30={max_s}"));
+                }
+                if let Some(homing) = settings.homing {
+                    parts.push(format!("$22={}", if homing { "1" } else { "0" }));
+                }
             }
-            if settings.laser_mode == Some(false) {
+            ui.add(egui::Label::new(RichText::new(parts.join(" · ")).small().weak()).truncate());
+            if settings.protocol == Protocol::Grbl && settings.laser_mode == Some(false) {
                 ui.colored_label(
                     self.accent(Color32::from_rgb(235, 120, 110)),
                     "laser mode is off ($32=0)",
                 );
             }
-            if let Some(max_s) = settings.max_s {
-                if max_s != self.gcode_opts.max_s {
-                    ui.colored_label(
-                        self.accent(Color32::from_rgb(230, 190, 90)),
-                        format!("Max S {} differs from $30={max_s}", self.gcode_opts.max_s),
-                    );
+            if settings.protocol == Protocol::Grbl {
+                if let Some(max_s) = settings.max_s {
+                    if max_s != self.gcode_opts.max_s {
+                        ui.colored_label(
+                            self.accent(Color32::from_rgb(230, 190, 90)),
+                            format!("Max S {} differs from $30={max_s}", self.gcode_opts.max_s),
+                        );
+                    }
                 }
             }
         } else if self.link == LinkState::Connected {
@@ -4701,7 +4745,11 @@ impl OrleansApp {
 
                 if ui
                     .add_enabled(can_cancel_jog, egui::Button::new(tr!("Cancel jog")))
-                    .on_hover_text(tr!("Cancel jog (realtime 0x85)"))
+                    .on_hover_text(if self.protocol() == Protocol::Marlin {
+                        tr!("Stop the current jog (M410)")
+                    } else {
+                        tr!("Cancel jog (realtime 0x85)")
+                    })
                     .clicked()
                 {
                     self.machine.jog_cancel();
@@ -4720,11 +4768,18 @@ impl OrleansApp {
                         self.set_status("machine thread stopped", true);
                     }
                     if ui
-                        .add_enabled(can_jog, egui::Button::new(tr!("Save zero (G54)")))
-                        .on_hover_text(tr!(
-                            "Stored G54 work zero (G10 L20 P1) at the current position. \
-                             Survives a reset on most GRBL builds."
-                        ))
+                        .add_enabled(
+                            can_jog && self.protocol().supports_saved_origin(),
+                            egui::Button::new(tr!("Save zero (G54)")),
+                        )
+                        .on_hover_text(if self.protocol().supports_saved_origin() {
+                            tr!(
+                                "Stored G54 work zero (G10 L20 P1) at the current position. \
+                                 Survives a reset on most GRBL builds."
+                            )
+                        } else {
+                            tr!("Marlin does not persist a work zero; use Set zero (G92).")
+                        })
                         .clicked()
                         && !self.machine.save_origin()
                     {
@@ -4742,7 +4797,8 @@ impl OrleansApp {
                             .text(format!("{} / {}", self.job_done, self.job_total)),
                     );
                     ui.horizontal(|ui| {
-                        let pause_safe = self.frame_job || self.pause_is_safe();
+                        let pause_safe = self.protocol().supports_pause()
+                            && (self.frame_job || self.pause_is_safe());
                         if ui
                             .add_enabled(!self.job_paused && pause_safe, egui::Button::new(tr!("Pause")))
                             .on_hover_text(if self.frame_job {
@@ -4765,7 +4821,13 @@ impl OrleansApp {
                             self.set_status("resuming…", false);
                         }
                     });
-                    if !self.frame_job && !self.pause_is_safe() {
+                    if !self.protocol().supports_pause() {
+                        ui.label(
+                            RichText::new(tr!("Pause is not available on Marlin; use Stop."))
+                                .small()
+                                .weak(),
+                        );
+                    } else if !self.frame_job && !self.pause_is_safe() {
                         ui.label(
                             RichText::new(tr!("Pause requires M4 + $32=1; use Stop."))
                                 .small()
@@ -4923,9 +4985,19 @@ impl OrleansApp {
                         .map(|status| status.can_home())
                         .unwrap_or(false);
 
+                let marlin = self.protocol() == Protocol::Marlin;
                 if ui
-                    .add_enabled(can_home, egui::Button::new(tr!("Home ($H)")))
-                    .on_hover_text(if homing_enabled {
+                    .add_enabled(
+                        can_home,
+                        egui::Button::new(if marlin {
+                            tr!("Home (G28)")
+                        } else {
+                            tr!("Home ($H)")
+                        }),
+                    )
+                    .on_hover_text(if marlin {
+                        tr!("Move the head to the limit switches.")
+                    } else if homing_enabled {
                         tr!("Move the head to the limit switches. \
                          Enabled when the controller is idle or in alarm.")
                     } else {
@@ -4938,9 +5010,17 @@ impl OrleansApp {
                 if ui
                     .add_enabled(
                         connected && !self.job_running,
-                        egui::Button::new(tr!("Unlock ($X)")),
+                        egui::Button::new(if marlin {
+                            tr!("Unlock (M999)")
+                        } else {
+                            tr!("Unlock ($X)")
+                        }),
                     )
-                    .on_hover_text(tr!("Clear a GRBL alarm."))
+                    .on_hover_text(if marlin {
+                        tr!("Restart a halted Marlin controller.")
+                    } else {
+                        tr!("Clear a GRBL alarm.")
+                    })
                     .clicked()
                     && !self.machine.unlock()
                 {
@@ -4951,7 +5031,11 @@ impl OrleansApp {
                     .fill(Color32::from_rgb(145, 40, 40));
                 if ui
                     .add_enabled(connected, stop)
-                    .on_hover_text(tr!("Feed hold and soft reset; switches the laser off."))
+                    .on_hover_text(if self.protocol() == Protocol::Marlin {
+                        tr!("Emergency stop (M112); switches the laser off. Unlock (M999) restarts.")
+                    } else {
+                        tr!("Feed hold and soft reset; switches the laser off.")
+                    })
                     .clicked()
                 {
                     if self.job_running {
@@ -4990,7 +5074,14 @@ impl OrleansApp {
                 ui.horizontal(|ui| {
                     if ui.button(tr!("Home")).clicked() {
                         if self.machine.home() {
-                            self.home_pending_until = Some(Instant::now() + Duration::from_secs(3));
+                            self.homing = true;
+                            self.saw_home = false;
+                            let timeout = if self.protocol() == Protocol::Marlin {
+                                Duration::from_secs(120)
+                            } else {
+                                Duration::from_secs(3)
+                            };
+                            self.home_pending_until = Some(Instant::now() + timeout);
                             self.set_status("homing…", false);
                         } else {
                             self.set_status("machine thread stopped", true);
@@ -5017,6 +5108,35 @@ impl OrleansApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
+                if self.protocol() == Protocol::Marlin {
+                    ui.label(
+                        RichText::new(tr!("Marlin configuration is defined in the firmware."))
+                            .small()
+                            .weak(),
+                    );
+                    if let Some(firmware) = self
+                        .settings
+                        .as_ref()
+                        .and_then(|settings| settings.firmware.as_deref())
+                    {
+                        ui.monospace(firmware);
+                    }
+                    if let Some(max_s) = self.settings.as_ref().and_then(|settings| settings.max_s)
+                    {
+                        ui.label(format!(
+                            "{} {max_s} · {}",
+                            tr!("Max S"),
+                            tr!("Pause is not available on Marlin; use Stop.")
+                        ));
+                    } else {
+                        ui.label(tr!("Pause is not available on Marlin; use Stop."));
+                    }
+                    ui.add_space(4.0);
+                    if ui.button(tr!("Close")).clicked() {
+                        close = true;
+                    }
+                    return;
+                }
                 ui.label(
                     RichText::new(
                         "GRBL stores these settings in EEPROM. \
@@ -5214,7 +5334,7 @@ impl OrleansApp {
             return;
         };
 
-        let program = gcode::write(&self.job, &self.gcode_opts);
+        let program = gcode::write(&self.job, &self.machine_gcode_options());
         match std::fs::write(&path, program) {
             Ok(()) => {
                 self.status = Status::ok(format!(
@@ -7944,10 +8064,14 @@ fn is_project_path(path: &std::path::Path) -> bool {
 const FRAME_FEED: f64 = 3000.0;
 
 /// A short absolute program that traces the job bounds with the laser off.
-fn frame_program(bounds: kurbo::Rect, feed: f64) -> String {
+fn frame_program(bounds: kurbo::Rect, feed: f64, dialect: GcodeDialect) -> String {
     let (x0, y0, x1, y1) = (bounds.x0, bounds.y0, bounds.x1, bounds.y1);
+    let preamble = match dialect {
+        GcodeDialect::Grbl => "G21\nG90\nG54\nM5\n",
+        GcodeDialect::Marlin => "G21\nG90\nM5\n",
+    };
     format!(
-        "; frame (laser off)\nG21\nG90\nG54\nM5\n\
+        "; frame (laser off)\n{preamble}\
          G0 X{x0:.3} Y{y0:.3}\n\
          G1 X{x1:.3} Y{y0:.3} F{feed:.0}\n\
          G1 X{x1:.3} Y{y1:.3}\n\
@@ -8516,8 +8640,23 @@ mod tests {
     }
 
     #[test]
+    fn marlin_frame_program_omits_workspace_words() {
+        let program = frame_program(
+            kurbo::Rect::new(1.0, 2.0, 30.0, 40.0),
+            3000.0,
+            GcodeDialect::Marlin,
+        );
+        assert!(program.starts_with("; frame (laser off)\nG21\nG90\nM5\n"));
+        assert!(!program.contains("G54"));
+    }
+
+    #[test]
     fn frame_program_traces_bounds_without_firing() {
-        let program = frame_program(kurbo::Rect::new(1.0, 2.0, 30.0, 40.0), 3000.0);
+        let program = frame_program(
+            kurbo::Rect::new(1.0, 2.0, 30.0, 40.0),
+            3000.0,
+            GcodeDialect::Grbl,
+        );
         assert!(program.starts_with("; frame (laser off)\nG21\nG90\nG54\nM5\n"));
         assert!(program.contains("G0 X1.000 Y2.000"));
         assert!(program.contains("G1 X30.000 Y2.000 F3000"));

@@ -220,9 +220,15 @@ redoes it.
 
 ## Machine panel
 
-The **Machine** panel connects over Telnet and shows the live GRBL state,
-position, feed and `S` value. It offers **Home ($H)**, **Unlock ($X)** and
-**Stop** (feed hold + soft reset).
+The **Machine** panel connects over Telnet and auto-detects the firmware. It
+first asks for a GRBL status report; if none arrives it sends Marlin's `M115`
+identity query. The panel then shows the live state, position, feed and `S`
+value, with protocol-specific control labels.
+
+For GRBL it offers **Home ($H)**, **Unlock ($X)** and **Stop** (feed hold + soft
+reset). For Marlin it offers **Home (G28)**, **Unlock (M999)** and **Stop**
+(`M5` followed by `M112` emergency stop). A Marlin stop leaves the controller
+halted; press **Unlock (M999)** before another job, then re-home or re-zero.
 
 Homing asks for confirmation and is enabled only when the controller is idle or
 in alarm, with the laser off.
@@ -231,7 +237,7 @@ Long status silences (for example while a controller homes) do not drop the
 link. If the WiFi bridge closes the socket, the GUI retries and reports
 **Reconnecting…** instead of going offline.
 
-On connect, the GUI reads `$$` and shows:
+On a GRBL connection, the GUI reads `$$` and shows:
 
 - `$32` (laser mode)
 - `$30` (max S)
@@ -249,16 +255,24 @@ when the controller reports it, and included in **Fit**. Toggle it with **Bed**.
 If GRBL does not report `WCO`, the bed rectangle assumes work zero coincides
 with machine zero.
 
+Marlin does not expose GRBL `$` settings. The GUI uses a conservative Marlin
+profile instead: `Max S` defaults to `255`, homing is enabled, pause is
+disabled, and the settings dialog reports that configuration comes from the
+firmware. The bed rectangle is only available from GRBL `$130`/`$131`.
+
 ## Jog and work zero
 
 Jog the head with the X/Y pad, an adjustable step and feed. A separate control
 cancels an active jog. The centre button moves to work zero with an absolute
-`$J=G90` command.
+move: `$J=G90` on GRBL, `G90 G0` on Marlin.
 
 **Set zero (G92)** is a temporary work origin: a soft reset, Stop or a controller
 reconnect after a reset clears it. **Save zero (G54)** stores it with
 `G10 L20 P1 X0 Y0`; whether that offset survives a reset depends on the
-controller. Jogging needs GRBL 1.1 (`$J=`); generated jobs select G54.
+controller. Marlin only supports the temporary `G92` form, so **Save zero** is
+disabled for Marlin. GRBL jogging needs GRBL 1.1 (`$J=`); Marlin jogging uses
+relative `G91`/`G0` moves. Generated GRBL jobs select G54; the Marlin dialect
+omits it.
 
 The position readout shows `WPos` when the controller reports it, otherwise
 `MPos`.
@@ -276,7 +290,7 @@ enabled only when the controller is connected, idle and the laser is off.
 GUI jobs default to **M4 dynamic power**. Pause is offered only when the
 controller reports `$32=1`, because a feed hold at zero velocity then switches
 the laser off. If a job uses M3, Pause is disabled and Stop must be used.
-Framing can always be paused because it holds `M5`.
+For GRBL, framing can always be paused because it holds `M5`.
 
 The canvas shows design geometry. Kerf compensation is applied to the toolpath,
 so it affects exported G-code and statistics rather than the outline drawing.

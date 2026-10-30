@@ -2,6 +2,43 @@
 
 All notable changes to orleans are recorded here.
 
+## [1.1.0] - 2026-10-30
+
+### Machine
+
+- Added a Marlin laser driver with `M115` identity probing, `M114` position
+  and `M105` temperature status, `M3`/`M5` laser streaming, `M400` planner
+  drain, `G28` homing, `G92` work origin and `G91`/`G90` jogging.
+- Added automatic GRBL/Marlin detection for the GUI and the CLI, plus an
+  explicit `--driver auto|grbl|marlin` override for `run`, `stop`, `unlock`
+  and `status`.
+- Added Marlin-specific safety and recovery: Stop sends `M5` followed by
+  `M112`; Unlock sends `M999`; saved `G54` work zero is disabled because Marlin
+  only supports the temporary `G92` form; pause is disabled for Marlin jobs.
+- Added a Marlin G-code dialect that omits `G17`/`G54` and defaults **Max S**
+  to `255`, with an automatic clamp when a GRBL project is sent to Marlin.
+- Added `SimulatedMarlin` and simulator/CLI/TCP tests covering identity,
+  status, streaming, `M400` drain, stop and protocol detection.
+
+### Documentation
+
+- Documented Marlin connection, settings, stop/unlock recovery and limitations
+  in the README, GUI, CLI, troubleshooting and roadmap documents.
+
+### Validation
+
+- 185 automated tests, Clippy with warnings denied and formatting checks pass.
+- Marlin has been validated against the simulator and a local TCP test server,
+  but not yet on physical hardware.
+
+### Upgrade notes
+
+- The `.orleans` project format is unchanged (format 2).
+- GRBL streaming and controls are unchanged; auto-detection now falls through
+  from a GRBL status probe to Marlin `M115` when no status arrives.
+- Marlin defaults to a `0..255` PWM range. Set **Max S** or `--max-s` when the
+  firmware uses a different range.
+
 ## [1.0.0] - 2026-10-29
 
 First stable release.

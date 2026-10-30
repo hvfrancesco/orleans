@@ -4,12 +4,13 @@
 
 An independent, clean-room CAM stack for laser cutters, written in Rust. It reads
 vector designs and raster images, plans toolpaths and streams G-code to
-GRBL-compatible controllers over USB or WiFi. Everything is implemented from
-public specifications: SVG, PDF, DXF, G-code and the GRBL protocol.
+GRBL-compatible and Marlin laser controllers over USB or WiFi. Everything is
+implemented from public specifications: SVG, PDF, DXF, G-code, GRBL and Marlin.
 
-> **Status:** `1.0.0`. The core editor and GRBL workflow have been validated
-> end to end on hardware. See [CHANGELOG.md](CHANGELOG.md) for release notes and
-> [docs/roadmap.md](docs/roadmap.md) for future milestones.
+> **Status:** `1.1.0`. The editor and GRBL workflow are hardware-validated.
+> Marlin laser support is covered by simulator and TCP integration tests but
+> awaits validation on a physical Marlin machine. See [CHANGELOG.md](CHANGELOG.md)
+> and [docs/roadmap.md](docs/roadmap.md).
 
 ## Highlights
 
@@ -17,15 +18,15 @@ public specifications: SVG, PDF, DXF, G-code and the GRBL protocol.
 |---|---|
 | Input | SVG, PDF and PDF-compatible AI, DXF, PNG/JPEG/BMP |
 | Design | Layers, fills, kerf, offsets, booleans, tabs, groups, arrays, node editing |
-| Machine | GRBL, GrblHAL and FluidNC over USB serial or WiFi TCP/Telnet |
-| Control | Status, homing, unlock, jog, work zero, framing, pause/resume, stop |
+| Machine | GRBL, GrblHAL, FluidNC and Marlin lasers over USB serial or WiFi TCP/Telnet |
+| Control | Status, homing, unlock, jog, work zero, framing and stop; pause/resume on GRBL |
 | Output | G-code export, live estimates, persistent job history |
 | Interface | Dark/light themes and six languages: English, Italian, French, Spanish, German, Chinese |
 | Projects | Native `.orleans` snapshots with full geometry and raster data |
 
 The codebase is split into small crates with a strict dependency direction, and
 the full pipeline — SVG → toolpath → G-code → TCP controller — is covered by
-integration tests against a local GRBL server.
+integration tests against local GRBL and Marlin servers.
 
 ## Quick start
 
@@ -43,6 +44,9 @@ cargo build --release
 
 # Dry-run the whole pipeline against the built-in simulator
 ./target/release/orleans run examples/coaster.svg --mock
+
+# Dry-run the Marlin dialect against the Marlin simulator
+./target/release/orleans run examples/coaster.svg --mock --driver marlin
 
 # Cut over WiFi (Telnet on port 23 is the default)
 ./target/release/orleans run examples/coaster.svg \
@@ -62,7 +66,7 @@ machine for the first time.
 | [GUI guide](docs/gui.md) | Editor, layers, transforms, fills, raster import, machine panel |
 | [CLI reference](docs/cli.md) | Commands, options and examples |
 | [Project format](docs/project-format.md) | Native `.orleans` JSON structure |
-| [Troubleshooting](docs/troubleshooting.md) | WiFi, GRBL status and recovery |
+| [Troubleshooting](docs/troubleshooting.md) | WiFi, protocol detection and recovery |
 | [Development](docs/development.md) | Architecture, design decisions and known limitations |
 | [Releasing](docs/releasing.md) | Versioning, packaging, checksums and tagging |
 | [Roadmap](docs/roadmap.md) | Release checklist and planned milestones |
@@ -75,7 +79,7 @@ crates/
   orleans-geom/      flattening, area, containment, Clipper2 offsets/booleans
   orleans-import/    SVG/PDF/DXF → Document, system-font text, raster images
   orleans-toolpath/  Document → Job: nesting, ordering, passes, time estimate
-  orleans-driver/    Job → G-code, Transport trait, serial/TCP, GRBL client, simulator
+  orleans-driver/    Job → G-code, Transport trait, serial/TCP, GRBL and Marlin clients, simulators
   orleans-cli/       the `orleans` binary
 ```
 
@@ -108,8 +112,8 @@ Release packaging is reproducible:
 ./scripts/package-appimage.sh  # Linux AppImage + SHA-256
 ```
 
-The suite currently contains **167 tests**, including the full SVG → toolpath →
-G-code → TCP controller integration run.
+The suite currently contains **185 tests**, including the full SVG → toolpath →
+G-code → TCP controller integration run and a Marlin TCP worker test.
 
 The GUI is behind the default `gui` feature. Build with `--no-default-features`
 for a headless binary without the windowing stack.

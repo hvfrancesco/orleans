@@ -18,12 +18,15 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use kurbo::Point;
 use orleans_core::Document;
-use orleans_driver::gcode::{self, GcodeOptions, LaserMode};
+use orleans_driver::gcode::{self, GcodeDialect, GcodeOptions, LaserMode};
 use orleans_driver::net::{parse_endpoint, TcpTransport};
-use orleans_driver::{GrblClient, GrblConfig, SimulatedGrbl, Transport};
+use orleans_driver::{
+    Controller, GrblClient, GrblConfig, MarlinClient, MarlinConfig, Protocol, SimulatedGrbl,
+    SimulatedMarlin, Transport,
+};
 use orleans_import::{import_dxf, import_pdf, import_svg, ImportOptions};
 use orleans_toolpath::{plan, PlanOptions};
 
@@ -31,11 +34,31 @@ use orleans_toolpath::{plan, PlanOptions};
 #[command(
     name = "orleans",
     version,
-    about = "Open CAM for laser cutters: SVG in, G-code out, GRBL over USB or WiFi"
+    about = "Open CAM for laser cutters: SVG in, G-code out, GRBL or Marlin over USB or WiFi"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum DriverChoice {
+    /// Detect GRBL or Marlin from the controller's status/identity response.
+    #[default]
+    Auto,
+    /// Force the GRBL / GrblHAL / FluidNC driver.
+    Grbl,
+    /// Force the Marlin laser driver.
+    Marlin,
+}
+
+impl DriverChoice {
+    fn export_protocol(self) -> Protocol {
+        match self {
+            DriverChoice::Marlin => Protocol::Marlin,
+            DriverChoice::Auto | DriverChoice::Grbl => Protocol::Grbl,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -61,6 +84,9 @@ enum Command {
         /// Print the program to stdout instead of writing a file.
         #[arg(long)]
         stdout: bool,
+        /// G-code dialect. Auto means GRBL for an offline export.
+        #[arg(long, value_enum, default_value_t)]
+        driver: DriverChoice,
     },
     /// Stream a design to a controller.
     Run {
@@ -75,6 +101,9 @@ enum Command {
         /// Baud rate for serial connections.
         #[arg(long, default_value_t = 115200)]
         baud: u32,
+        /// Controller firmware. Auto probes first for GRBL, then Marlin.
+        #[arg(long, value_enum, default_value_t)]
+        driver: DriverChoice,
         /// Run against the built-in simulator instead of hardware.
         #[arg(long)]
         mock: bool,
@@ -87,7 +116,7 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
-    /// Stop the machine now and turn the laser off (feed hold + reset).
+    /// Stop the machine now and turn the laser off.
     Stop {
         /// Serial port, e.g. /dev/ttyUSB0 or COM3.
         #[arg(long)]
@@ -97,8 +126,11 @@ enum Command {
         url: Option<String>,
         #[arg(long, default_value_t = 115200)]
         baud: u32,
+        /// Controller firmware. Auto probes first for GRBL, then Marlin.
+        #[arg(long, value_enum, default_value_t)]
+        driver: DriverChoice,
     },
-    /// Clear a GRBL alarm with `$X`.
+    /// Clear a GRBL alarm (`$X`) or restart a halted Marlin (`M999`).
     Unlock {
         /// Serial port, e.g. /dev/ttyUSB0 or COM3.
         #[arg(long)]
@@ -108,6 +140,9 @@ enum Command {
         url: Option<String>,
         #[arg(long, default_value_t = 115200)]
         baud: u32,
+        /// Controller firmware. Auto probes first for GRBL, then Marlin.
+        #[arg(long, value_enum, default_value_t)]
+        driver: DriverChoice,
     },
     /// Ask a connected controller for its status.
     Status {
@@ -119,6 +154,9 @@ enum Command {
         url: Option<String>,
         #[arg(long, default_value_t = 115200)]
         baud: u32,
+        /// Controller firmware. Auto probes first for GRBL, then Marlin.
+        #[arg(long, value_enum, default_value_t)]
+        driver: DriverChoice,
     },
 }
 
@@ -138,9 +176,9 @@ struct Common {
     /// Kerf width in mm (compensation is half of it per side).
     #[arg(long, default_value_t = 0.0)]
     kerf: f64,
-    /// `S` value for 100 % power.
-    #[arg(long, default_value_t = 1000)]
-    max_s: u32,
+    /// `S` value for 100 % power (default: 1000 GRBL, 255 Marlin).
+    #[arg(long)]
+    max_s: Option<u32>,
     /// Use M4 (dynamic power) instead of M3.
     #[arg(long)]
     dynamic_power: bool,
@@ -210,14 +248,18 @@ impl Common {
         plan(doc, &opt)
     }
 
-    fn gcode_options(&self) -> GcodeOptions {
+    fn gcode_options(&self, protocol: Protocol) -> GcodeOptions {
         GcodeOptions {
             laser_mode: if self.dynamic_power {
                 LaserMode::M4
             } else {
                 LaserMode::M3
             },
-            max_s: self.max_s,
+            max_s: self.max_s.unwrap_or_else(|| protocol.default_max_s()),
+            dialect: match protocol {
+                Protocol::Grbl => GcodeDialect::Grbl,
+                Protocol::Marlin => GcodeDialect::Marlin,
+            },
             ..Default::default()
         }
     }
@@ -233,19 +275,36 @@ fn main() -> Result<()> {
             common,
             output,
             stdout,
-        } => gcode_cmd(&common, output, stdout),
+            driver,
+        } => gcode_cmd(&common, output, stdout, driver),
         Command::Run {
             common,
             port,
             url,
             baud,
+            driver,
             mock,
             force,
             timeout,
-        } => run(&common, port, url, baud, mock, force, timeout),
-        Command::Stop { port, url, baud } => stop_machine(port, url, baud),
-        Command::Unlock { port, url, baud } => unlock(port, url, baud),
-        Command::Status { port, url, baud } => status(port, url, baud),
+        } => run(&common, port, url, baud, driver, mock, force, timeout),
+        Command::Stop {
+            port,
+            url,
+            baud,
+            driver,
+        } => stop_machine(port, url, baud, driver),
+        Command::Unlock {
+            port,
+            url,
+            baud,
+            driver,
+        } => unlock(port, url, baud, driver),
+        Command::Status {
+            port,
+            url,
+            baud,
+            driver,
+        } => status(port, url, baud, driver),
     }
 }
 
@@ -290,10 +349,15 @@ fn info(cmd: &Common) -> Result<()> {
     Ok(())
 }
 
-fn gcode_cmd(cmd: &Common, output: Option<PathBuf>, stdout: bool) -> Result<()> {
+fn gcode_cmd(
+    cmd: &Common,
+    output: Option<PathBuf>,
+    stdout: bool,
+    driver: DriverChoice,
+) -> Result<()> {
     let doc = cmd.import()?;
     let job = cmd.plan(&doc);
-    let program = gcode::write(&job, &cmd.gcode_options());
+    let program = gcode::write(&job, &cmd.gcode_options(driver.export_protocol()));
 
     if stdout {
         print!("{program}");
@@ -312,18 +376,19 @@ fn gcode_cmd(cmd: &Common, output: Option<PathBuf>, stdout: bool) -> Result<()> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     cmd: &Common,
     port: Option<String>,
     url: Option<String>,
     baud: u32,
+    driver: DriverChoice,
     mock: bool,
     force: bool,
     timeout: u64,
 ) -> Result<()> {
     let doc = cmd.import()?;
     let job = cmd.plan(&doc);
-    let program = gcode::write(&job, &cmd.gcode_options());
 
     eprintln!(
         "job: {} cuts, {:.1} mm, est {}",
@@ -332,149 +397,188 @@ fn run(
         format_duration(job.stats.seconds)
     );
 
+    let protocol = if mock {
+        driver.export_protocol()
+    } else {
+        Protocol::Grbl
+    };
+
     if mock {
-        let mut sim = SimulatedGrbl::new();
-        {
-            let config = GrblConfig {
-                window: 120,
-                timeout: Duration::from_secs(5),
-            };
-            let mut client = GrblClient::with_config(&mut sim, config);
-            client.wake()?;
-            client.request_status()?;
-            if let Some(status) = client.read_status()? {
-                eprintln!("status before: {status}");
-            }
-            let acks = client.run(&program)?;
-            client.request_status()?;
-            if let Some(status) = client.read_status()? {
-                eprintln!("status after:  {status}");
-            }
-            eprintln!(
-                "simulated: {acks} lines acknowledged, {} received",
-                sim.received.len()
-            );
-        }
-        eprintln!("final position: X{:.1} Y{:.1}", sim.pos[0], sim.pos[1]);
-        return Ok(());
+        let program = gcode::write(&job, &cmd.gcode_options(protocol));
+        return run_mock(protocol, &program);
     }
 
     let (transport, kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
-    let config = GrblConfig {
-        window: 120,
-        timeout: Duration::from_secs(timeout.max(1)),
-    };
-    let mut client = GrblClient::with_config(transport, config);
-    if kind == LinkKind::Serial {
-        // Only USB serial needs the newline wake-up.
-        client.wake()?;
-    }
+    let (mut controller, protocol, status) = connect_controller(transport, kind, driver, 2)?;
+    controller.set_timeout(Duration::from_secs(timeout.max(1)));
+    let program = gcode::write(&job, &cmd.gcode_options(protocol));
 
     if !force {
-        match client.probe_status(Duration::from_secs(2))?.status {
-            Some(status) => eprintln!("controller: {status}"),
+        match status {
+            Some(status) => eprintln!("controller: {} ({status})", protocol.label()),
             None => bail!(
-                "no GRBL status from the controller, so the job was not sent.\n\
-                 Run `orleans status` against the same endpoint for a diagnosis, \
-                 or pass --force to stream anyway."
+                "no {} status from the controller, so the job was not sent.\n\
+                 Run `orleans status --driver {driver:?}` against the same endpoint \
+                 for a diagnosis, or pass --force to stream anyway.",
+                protocol.label()
             ),
         }
     }
 
     let mut last_report = Instant::now();
-    let acks = client
-        .run_with_progress(&program, |done, total| {
-            if done == total || last_report.elapsed() >= Duration::from_secs(2) {
-                eprintln!("  {done}/{total} lines acknowledged");
-                last_report = Instant::now();
-            }
-        })
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let pause = std::sync::atomic::AtomicBool::new(false);
+    let acks = controller
+        .run_pausable(
+            &program,
+            |done, total| {
+                if done == total || last_report.elapsed() >= Duration::from_secs(2) {
+                    eprintln!("  {done}/{total} lines acknowledged");
+                    last_report = Instant::now();
+                }
+            },
+            &stop,
+            &pause,
+        )
         .map_err(|err| {
+            let recovery = match protocol {
+                Protocol::Grbl => "orleans attempted feed hold and a soft reset (laser off).",
+                Protocol::Marlin => {
+                    "orleans attempted an M112 emergency stop (laser off). \
+                     Press Unlock (M999) before continuing."
+                }
+            };
             anyhow::anyhow!(
                 "streaming G-code failed: {err}\n\
-                 orleans attempted feed hold and a soft reset (laser off). If the \n\
-                 link was already gone, stop the machine at the panel. Check the \n\
-                 position and re-home or re-zero before retrying. A slow controller \n\
-                 can be given a longer --timeout."
+                 {recovery} If the link was already gone, stop the machine at the \
+                 panel. Check the position and re-home or re-zero before retrying. \
+                 A slow controller can be given a longer --timeout."
             )
         })?;
     eprintln!("done: {acks} lines acknowledged");
     Ok(())
 }
 
-fn stop_machine(port: Option<String>, url: Option<String>, baud: u32) -> Result<()> {
-    let (transport, _kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
-    let mut client = GrblClient::new(transport);
-    client.stop().context("stopping the controller")?;
-    println!("controller stopped and reset; laser off");
+fn run_mock(protocol: Protocol, program: &str) -> Result<()> {
+    match protocol {
+        Protocol::Grbl => {
+            let mut sim = SimulatedGrbl::new();
+            {
+                let config = GrblConfig {
+                    window: 120,
+                    timeout: Duration::from_secs(5),
+                };
+                let mut client = GrblClient::with_config(&mut sim, config);
+                client.wake()?;
+                client.request_status()?;
+                if let Some(status) = client.read_status()? {
+                    eprintln!("status before: {status}");
+                }
+                let acks = client.run(program)?;
+                client.request_status()?;
+                if let Some(status) = client.read_status()? {
+                    eprintln!("status after:  {status}");
+                }
+                eprintln!(
+                    "simulated GRBL: {acks} lines acknowledged, {} received",
+                    sim.received.len()
+                );
+            }
+            eprintln!("final position: X{:.1} Y{:.1}", sim.pos[0], sim.pos[1]);
+        }
+        Protocol::Marlin => {
+            let mut sim = SimulatedMarlin::new();
+            {
+                let config = MarlinConfig {
+                    window: 120,
+                    timeout: Duration::from_secs(5),
+                    drain_timeout: Duration::from_secs(30),
+                };
+                let mut client = MarlinClient::with_config(&mut sim, config);
+                if let Some(status) = client.status_line()? {
+                    eprintln!("status before: {status}");
+                }
+                let acks = client.run(program)?;
+                if let Some(status) = client.status_line()? {
+                    eprintln!("status after:  {status}");
+                }
+                eprintln!(
+                    "simulated Marlin: {acks} lines acknowledged, {} received",
+                    sim.received().len()
+                );
+            }
+            let [x, y, _] = sim.position();
+            eprintln!("final position: X{x:.1} Y{y:.1}");
+        }
+    }
     Ok(())
 }
 
-fn unlock(port: Option<String>, url: Option<String>, baud: u32) -> Result<()> {
+fn stop_machine(
+    port: Option<String>,
+    url: Option<String>,
+    baud: u32,
+    driver: DriverChoice,
+) -> Result<()> {
     let (transport, kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
-    let mut client = GrblClient::new(transport);
-    if kind == LinkKind::Serial {
-        client.wake()?;
+    let (mut controller, protocol, _) = connect_controller(transport, kind, driver, 2)?;
+    controller.stop().context("stopping the controller")?;
+    match protocol {
+        Protocol::Grbl => println!("controller stopped and reset; laser off"),
+        Protocol::Marlin => {
+            println!("emergency stop sent (M112); laser off. Send `orleans unlock` to restart")
+        }
     }
-    client.send("$X").context("clearing the alarm")?;
-    println!("alarm cleared ($X)");
     Ok(())
 }
 
-fn status(port: Option<String>, url: Option<String>, baud: u32) -> Result<()> {
+fn unlock(
+    port: Option<String>,
+    url: Option<String>,
+    baud: u32,
+    driver: DriverChoice,
+) -> Result<()> {
     let (transport, kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
-    let mut client = GrblClient::new(transport);
-    if kind == LinkKind::Serial {
-        client.wake()?;
+    let (mut controller, protocol, _) = connect_controller(transport, kind, driver, 2)?;
+    controller
+        .unlock()
+        .context("clearing the controller alarm")?;
+    match protocol {
+        Protocol::Grbl => println!("alarm cleared ($X)"),
+        Protocol::Marlin => println!("controller restarted (M999)"),
     }
-    std::thread::sleep(Duration::from_millis(150));
+    Ok(())
+}
 
-    let probe = client.probe_status(Duration::from_secs(3))?;
-    if let Some(status) = probe.status {
-        println!("{status}");
-        return Ok(());
-    }
+fn status(
+    port: Option<String>,
+    url: Option<String>,
+    baud: u32,
+    driver: DriverChoice,
+) -> Result<()> {
+    let (transport, kind) = open_transport(url.as_deref(), port.as_deref(), baud)?;
+    let (mut controller, protocol, status) = connect_controller(transport, kind, driver, 2)?;
+    println!("protocol: {}", protocol.label());
 
-    eprintln!("connected, but no GRBL status report within 3 s.");
-    if probe.seen.is_empty() {
-        eprintln!("  received: nothing");
-    } else {
-        for line in probe.seen.iter().take(12) {
-            eprintln!("  received: {line}");
+    match protocol {
+        Protocol::Grbl => match status {
+            Some(status) => println!("{status}"),
+            None => bail!("connected, but no GRBL status report arrived"),
+        },
+        Protocol::Marlin => {
+            let poll = controller.poll_status(Duration::from_secs(2))?;
+            for line in &poll.lines {
+                if !line.trim().eq_ignore_ascii_case("ok") {
+                    println!("  {line}");
+                }
+            }
+            match poll.status {
+                Some(status) => println!("{status}"),
+                None => bail!("connected to Marlin, but M114 did not report a position"),
+            }
         }
     }
-
-    eprintln!("probing for firmware identity ($I, M115)…");
-    let mut identity = Vec::new();
-    for cmd in ["$I", "M115"] {
-        client.transport_mut().write_line(cmd)?;
-        for line in client.collect_for(Duration::from_millis(900))? {
-            eprintln!("  {cmd} -> {line}");
-            identity.push(line);
-        }
-    }
-
-    let joined = identity.join("\n").to_ascii_uppercase();
-    if joined.contains("GRBL") || joined.contains("[VER:") {
-        bail!(
-            "the controller looks like GRBL but does not answer `?`. \
-             Check that Telnet/status reporting is enabled in the bridge \
-             (some ESP3D builds expose the laser on a different port, e.g. 81/WebSocket)."
-        );
-    }
-    if joined.contains("MARLIN") || joined.contains("FIRMWARE_NAME") {
-        bail!(
-            "this is Marlin firmware, not GRBL. Orleans only speaks GRBL today; \
-             a Marlin driver (M105/M114 status, M3/M5 laser) is still on the roadmap."
-        );
-    }
-    bail!(
-        "the TCP endpoint accepted the connection but did not speak GRBL.\n\
-         Check that the laser controller itself is powered on (the WiFi bridge \
-         can stay up while the laser is off), that port 23 is the GRBL Telnet \
-         service and not another device on the network, and that the bridge has \
-         Telnet enabled. `nc -vz <ip> 23` confirms reachability."
-    );
+    Ok(())
 }
 
 fn format_duration(seconds: f64) -> String {
@@ -486,6 +590,58 @@ fn format_duration(seconds: f64) -> String {
         format!("{m}m {s:02}s")
     } else {
         format!("{s}s")
+    }
+}
+
+type ConnectedController = (Controller<Box<dyn Transport>>, Protocol, Option<String>);
+
+fn connect_controller(
+    transport: Box<dyn Transport>,
+    kind: LinkKind,
+    driver: DriverChoice,
+    probe_secs: u64,
+) -> Result<ConnectedController> {
+    let probe = Duration::from_secs(probe_secs.max(1));
+    match driver {
+        DriverChoice::Auto => {
+            let detection =
+                Controller::detect(transport, probe, probe).map_err(anyhow::Error::msg)?;
+            let protocol = detection.controller.protocol();
+            if let Some(firmware) = &detection.firmware {
+                eprintln!("identified: {firmware}");
+            }
+            Ok((detection.controller, protocol, detection.status))
+        }
+        DriverChoice::Grbl => {
+            let mut client = GrblClient::new(transport);
+            if kind == LinkKind::Serial {
+                client.wake()?;
+            }
+            let probe = client.probe_status(probe)?;
+            Ok((Controller::Grbl(client), Protocol::Grbl, probe.status))
+        }
+        DriverChoice::Marlin => {
+            let mut client = MarlinClient::new(transport);
+            if kind == LinkKind::Serial {
+                client.wake()?;
+            }
+            let identity = client.probe_identity(probe)?;
+            if !identity.is_marlin {
+                bail!(
+                    "no Marlin identity (M115); received: {}",
+                    if identity.lines.is_empty() {
+                        "nothing".to_owned()
+                    } else {
+                        identity.lines.join(" | ")
+                    }
+                );
+            }
+            if let Some(firmware) = &identity.firmware {
+                eprintln!("identified: {firmware}");
+            }
+            let status = client.status_line()?;
+            Ok((Controller::Marlin(client), Protocol::Marlin, status))
+        }
     }
 }
 

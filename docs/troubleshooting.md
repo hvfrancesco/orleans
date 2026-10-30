@@ -33,16 +33,16 @@ X11/Wayland stack, OpenGL drivers and installed fonts.
 orleans status --url tcp://IP
 ```
 
-A healthy controller prints a status line such as:
+A healthy GRBL controller prints a status line such as:
 
 ```text
 <Idle|MPos:0.000,0.000,0.000|FS:0,0>
 ```
 
-If the TCP connection opens but the controller stays silent, orleans retries the
-request, also sends a newline-terminated query (some bridges are line-buffered),
-then probes `$I` and `M115` to identify the firmware and prints everything it
-received.
+`orleans status` and the GUI auto-detect the firmware: first they request GRBL
+status with `?`, then they send Marlin's `M115` identity query. When a protocol
+is recognised, orleans prints `protocol: GRBL` or `protocol: Marlin`; Marlin
+also prints the `M114` position and `M105` temperature replies.
 
 Common causes:
 
@@ -50,8 +50,9 @@ Common causes:
   powered. The bridge accepts TCP; the GRBL board behind it is not listening.
 - **Something else is using port 23.** Check `nc -vz <ip> 23` and the router's
   client list.
-- **The firmware is not GRBL.** The probe reports the firmware family; orleans
-  currently streams GRBL only.
+- **The firmware is not GRBL or Marlin.** Auto-detection accepts GRBL status
+  reports and Marlin `M115` identities; Ruida, TopWisdom and galvo controllers
+  are not implemented yet.
 - **The bridge is WebSocket-only on port 81.** This transport is not implemented
   yet.
 
@@ -60,16 +61,19 @@ Common causes:
 `orleans run` refuses to stream when no status comes back; `--force` overrides
 that check.
 
-If a job aborts while the link is still alive, `orleans` sends feed hold followed
-by a soft reset. This stops the planner and switches the laser off. If the link
-itself died, stop the machine at the panel.
+If a GRBL job aborts while the link is still alive, `orleans` sends feed hold
+followed by a soft reset. This stops the planner and switches the laser off. A
+Marlin abort sends `M5` and then `M112` (emergency stop). If the link itself
+died, stop the machine at the panel.
 
-After any reset:
+After a GRBL reset, or after a Marlin stop:
 
 1. Check the machine and workpiece.
-2. Re-home or re-zero as appropriate; a soft reset returns GRBL to its startup
-   state.
-3. Run a framing pass before retrying the job.
+2. On Marlin, press **Unlock (M999)** or run `orleans unlock` to restart the
+   halted controller.
+3. Re-home or re-zero as appropriate; a reset returns GRBL to its startup state
+   and clears Marlin's temporary `G92` origin.
+4. Run a framing pass before retrying the job.
 
 ## Timeouts
 
@@ -79,6 +83,20 @@ total job duration: a long cut with steady acknowledgements is fine.
 
 Raise the timeout for a controller that can stay silent for longer while
 executing one very slow move.
+
+## Marlin-specific checks
+
+- Marlin has no GRBL `$` settings. The GUI assumes a `0..255` PWM range; set
+  **Max S** to match the firmware if it uses a different range.
+- Pause is not available on Marlin. Use Stop (`M5` + `M112`) and then Unlock
+  (`M999`).
+- **Save zero (G54)** is disabled because Marlin only supports the temporary
+  `G92` work origin.
+- For the fastest emergency stop, enable Marlin's `EMERGENCY_PARSER` so `M112`
+  is handled without waiting for queued moves. Even without it, orleans sends
+  `M5` before `M112`.
+- Marlin `ok` acknowledges a command entering the planner. Orleans sends
+  `M400` after a job to wait for the planner to finish before reporting it done.
 
 ## G-code looks wrong
 

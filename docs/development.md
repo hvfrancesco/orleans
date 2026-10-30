@@ -8,14 +8,15 @@ crates/
   orleans-geom/      flattening, area, containment, Clipper2 offsets/booleans
   orleans-import/    SVG/PDF/DXF → Document, system-font text, raster images
   orleans-toolpath/  Document → Job: nesting, ordering, passes, time estimate
-  orleans-driver/    Job → G-code, Transport trait, serial/TCP, GRBL client, simulator
+  orleans-driver/    Job → G-code, Transport trait, serial/TCP, GRBL/Marlin clients, simulators
   orleans-cli/       the `orleans` binary
 ```
 
 The layers depend only downwards. The only crate that knows about a specific
 machine is `orleans-driver`. Adding a G-code dialect means adding a
-`GcodeOptions` variant; adding a different controller protocol means implementing
-`Transport` plus a streamer, with nothing above it changing.
+`GcodeDialect` variant; a different line-oriented controller means implementing
+a client behind the `Controller` enum and a `Transport`, with nothing above it
+changing. The GUI and CLI use the same auto-detection path.
 
 ## Testing
 
@@ -29,8 +30,9 @@ cargo build --release
 ```
 
 The suite contains unit and integration coverage for import, geometry,
-toolpaths, G-code, transport and the GUI model. One integration test runs the
-full SVG → toolpath → G-code → TCP controller path against a local GRBL server.
+toolpaths, G-code, transport and the GUI model. Integration tests run the full
+SVG → toolpath → G-code → TCP controller path against a local GRBL server and a
+local Marlin server, and the driver tests cover both simulators.
 
 ## Design decisions
 
@@ -58,6 +60,15 @@ streaming reliable at 115200 baud instead of dropping commands.
 its buffer is full. `feed_hold`, `resume` and `soft_reset` therefore do not go
 through the line queue.
 
+### Marlin is line-acknowledged
+
+Marlin has no realtime `?` status report. `MarlinClient` streams with the same
+byte window as GRBL, treats `ok` as planner acceptance, and sends `M400` after
+the last line so a job is not reported as finished while moves are still queued.
+Status is assembled from `M114` position and `M105` temperature replies and
+converted to the GRBL `<...>` shape for the editor. `M112` is the emergency stop;
+`M999` restarts a halted controller.
+
 ### WiFi is Telnet, not HTTP
 
 Grbl_ESP32, FluidNC and ESP3D expose the raw GRBL stream on TCP port 23.
@@ -78,16 +89,19 @@ re-importing or matching source indices. See
 
 - WiFi support is Telnet only: no WebSocket/HTTP transport, TLS or mDNS
   discovery yet.
-- Additional controller families are not implemented. See
+- Ruida, TopWisdom and galvo controllers are not implemented. Marlin support is
+  laser-only and has not yet been validated on physical hardware. See
   [roadmap.md](roadmap.md).
-- Pause is restricted to M4 jobs with `$32=1`; M3 jobs can only be stopped.
+- Pause is restricted to GRBL M4 jobs with `$32=1`; M3 jobs and all Marlin jobs
+  can only be stopped.
 - Framing uses a fixed 3000 mm/min and the design bounds, with no margin setting.
 - The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, orleans
   assumes work zero coincides with machine zero.
 - **Set zero (G92)** is temporary: a soft reset, Stop or controller reconnect
   after a reset clears it. **Save zero (G54)** writes `G10 L20 P1`; whether the
-  offset survives a reset depends on the controller.
-- The simulator is protocol-level, not a motion model.
+  offset survives a reset depends on the controller. Marlin supports only the
+  temporary `G92` form, so saved work zero is disabled.
+- The GRBL and Marlin simulators are protocol-level, not motion models.
 
 ### Geometry and toolpaths
 

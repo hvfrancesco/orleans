@@ -1,19 +1,23 @@
 //! Controller drivers for laser cutters.
 //!
-//! Currently: GRBL (and GrblHAL/FluidNC/Marlin-laser) over USB serial or raw
-//! TCP (Telnet), with a simulator for development. Ruida/TopWisdom and galvo
-//! heads are future work; they only need to implement [`Transport`] and a
-//! matching streamer.
+//! Currently: GRBL/GrblHAL/FluidNC and Marlin lasers over USB serial or raw TCP
+//! (Telnet), with simulators for development. Ruida/TopWisdom and galvo heads
+//! are future work; they only need to implement [`Transport`] and a matching
+//! streamer.
 
+pub mod controller;
 pub mod gcode;
 pub mod grbl;
+pub mod marlin;
 pub mod mock;
 pub mod net;
 pub mod transport;
 
-pub use gcode::{GcodeOptions, LaserMode};
+pub use controller::{Controller, Detection, Protocol, StatusPoll};
+pub use gcode::{GcodeDialect, GcodeOptions, LaserMode};
 pub use grbl::{DriverError, GrblClient, GrblConfig};
-pub use mock::{RunState, SimulatedGrbl};
+pub use marlin::{MarlinClient, MarlinConfig, MarlinStatus};
+pub use mock::{RunState, SimulatedGrbl, SimulatedMarlin};
 pub use net::{TcpTransport, TELNET_PORT};
 pub use transport::Transport;
 

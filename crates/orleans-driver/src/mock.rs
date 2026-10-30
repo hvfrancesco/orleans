@@ -1,9 +1,10 @@
-//! A simulated GRBL controller.
+//! Simulated GRBL and Marlin controllers.
 //!
-//! It speaks just enough of the protocol to exercise the streaming client, the
-//! G-code writer and the planner without hardware: `ok` for every line, `error`
-//! for garbage, `?` status reports, and realtime feed hold / resume / reset.
-//! The `orleans run --mock` command uses it, and so do the driver tests.
+//! They speak just enough of each protocol to exercise the streaming clients,
+//! the G-code writer and the planner without hardware: `ok` for every line,
+//! `error` for garbage, GRBL `?` status reports and realtime controls, and
+//! Marlin `M114`/`M105`/`M400`/`M112` behaviour. The `orleans run --mock`
+//! command uses them, and so do the driver tests.
 
 use std::collections::VecDeque;
 use std::io;
@@ -208,6 +209,118 @@ fn word_value(words: &[(char, f64)], letter: char) -> Option<f64> {
         .iter()
         .find(|(c, v)| *c == letter && v.is_finite())
         .map(|(_, v)| *v)
+}
+
+/// In-memory Marlin lookalike.
+///
+/// It reuses the GRBL motion model but answers the commands a Marlin laser
+/// actually uses: `M115` identity, `M114` position, `M105` temperatures,
+/// `M400` planner drain and `M112`/`M999` emergency stop/restart.
+#[derive(Debug)]
+pub struct SimulatedMarlin {
+    inner: SimulatedGrbl,
+    killed: bool,
+}
+
+impl Default for SimulatedMarlin {
+    fn default() -> Self {
+        Self {
+            inner: SimulatedGrbl::new(),
+            killed: false,
+        }
+    }
+}
+
+impl SimulatedMarlin {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn position(&self) -> [f64; 3] {
+        self.inner.pos
+    }
+
+    pub fn set_position(&mut self, position: [f64; 3]) {
+        self.inner.pos = position;
+    }
+
+    pub fn laser_on(&self) -> bool {
+        self.inner.laser_on
+    }
+
+    pub fn killed(&self) -> bool {
+        self.killed
+    }
+
+    pub fn received(&self) -> &[String] {
+        &self.inner.received
+    }
+
+    fn command(&mut self, upper: &str) {
+        if self.killed && upper != "M999" && upper != "M115" {
+            self.inner.reply("Error:Printer halted. kill() called!");
+            return;
+        }
+        match upper {
+            "M115" => {
+                self.inner.reply(
+                    "FIRMWARE_NAME:Marlin 2.1.2.1 (simulator) SOURCE_CODE_URL:https://marlinfw.org PROTOCOL_VERSION:1.0 MACHINE_TYPE:Laser EXTRUDER_COUNT:1 UUID:simulated",
+                );
+                self.inner.reply("Cap:SERIAL_XON_XOFF:0");
+                self.inner.reply("ok");
+            }
+            "M114" => {
+                self.inner.reply(format!(
+                    "X:{:.3} Y:{:.3} Z:{:.3} E:0.000 Count X:0 Y:0 Z:0",
+                    self.inner.pos[0], self.inner.pos[1], self.inner.pos[2]
+                ));
+                self.inner.reply("ok");
+            }
+            "M105" => {
+                self.inner.reply("T:0.00 /0.00 B:0.00 /0.00 @:0 B@:0");
+                self.inner.reply("ok");
+            }
+            "M400" => self.inner.reply("ok"),
+            "M112" => {
+                self.killed = true;
+                self.inner.laser_on = false;
+                self.inner.power = 0;
+                self.inner.reply("Error:Printer halted. kill() called!");
+            }
+            "M999" => {
+                self.killed = false;
+                self.inner.state = RunState::Idle;
+                self.inner.reply("ok");
+            }
+            "G28" => {
+                self.inner.pos = [0.0; 3];
+                self.inner.state = RunState::Idle;
+                self.inner.reply("ok");
+            }
+            _ => self.inner.execute(upper),
+        }
+    }
+}
+
+impl Transport for SimulatedMarlin {
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') {
+            return Ok(());
+        }
+        self.inner.received.push(line.to_owned());
+        let upper = line.to_ascii_uppercase();
+        self.command(&upper);
+        Ok(())
+    }
+
+    fn write_raw(&mut self, _bytes: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn read_line(&mut self) -> io::Result<Option<String>> {
+        self.inner.read_line()
+    }
 }
 
 #[cfg(test)]

@@ -359,5 +359,14 @@
   "offset produced no geometry": "le décalage n'a produit aucune géométrie",
   "offset complete": "décalage terminé",
   "Move to work zero (0, 0)": "Aller au zéro de travail (0, 0)",
-  "Cancel jog": "Annuler le jog"
+  "Cancel jog": "Annuler le jog",
+  "Home (G28)": "Origine (G28)",
+  "Unlock (M999)": "Déverrouiller (M999)",
+  "Move the head to the limit switches.": "Déplacez la tête jusqu’aux fins de course.",
+  "Restart a halted Marlin controller.": "Redémarrez un contrôleur Marlin arrêté.",
+  "Stop the current jog (M410)": "Arrêter le jog en cours (M410)",
+  "Emergency stop (M112); switches the laser off. Unlock (M999) restarts.": "Arrêt d’urgence (M112) ; éteint le laser. Déverrouiller (M999) redémarre.",
+  "Marlin configuration is defined in the firmware.": "La configuration Marlin est définie dans le firmware.",
+  "Marlin does not persist a work zero; use Set zero (G92).": "Marlin ne conserve pas un zéro de travail ; utilisez Définir zéro (G92).",
+  "Pause is not available on Marlin; use Stop.": "La pause n’est pas disponible sur Marlin ; utilisez Arrêter."
 }

@@ -46,6 +46,8 @@ pub enum DriverError {
     Timeout(Duration),
     #[error("job stopped")]
     Stopped,
+    #[error("not supported by this controller: {0}")]
+    Unsupported(&'static str),
 }
 
 /// What a status probe found.
@@ -88,8 +90,17 @@ impl<T: Transport> GrblClient<T> {
         &mut self.transport
     }
 
+    pub fn into_transport(self) -> T {
+        self.transport
+    }
+
     pub fn config(&self) -> &GrblConfig {
         &self.config
+    }
+
+    /// Adjust the no-response timeout for an existing connection.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.config.timeout = timeout;
     }
 
     /// GRBL prints its banner when it sees a newline; two are the usual wake-up.

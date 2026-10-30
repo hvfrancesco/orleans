@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use orleans_driver::net::{parse_endpoint, TcpTransport};
-use orleans_driver::{DriverError, GrblClient, GrblConfig, Transport};
+use orleans_driver::{Controller, DriverError, GrblClient, Protocol, Transport};
 
 /// Requests from the UI to the worker.
 pub enum Command {
@@ -179,11 +179,12 @@ fn worker(
 ) {
     const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
-    let mut client: Option<GrblClient<Box<dyn Transport>>> = None;
+    let mut client: Option<Controller<Box<dyn Transport>>> = None;
     let mut endpoint: Option<String> = None;
     let mut last_poll = Instant::now();
     let mut misses = 0u32;
     let mut warned = false;
+    let mut last_controller_error: Option<String> = None;
     let mut reconnect_at: Option<Instant> = None;
     let mut reconnect_attempt = 0u32;
 
@@ -209,9 +210,12 @@ fn worker(
                                 last_poll = Instant::now();
                                 misses = 0;
                                 warned = false;
+                                last_controller_error = None;
                                 reconnect_attempt = 0;
                                 let _ = events.send(Event::Connected(target));
-                                let _ = events.send(Event::Status(status));
+                                if let Some(status) = status {
+                                    let _ = events.send(Event::Status(status));
+                                }
                                 let _ = events.send(Event::Settings(settings));
                                 message(&events, "connection restored", false);
                             }
@@ -240,6 +244,7 @@ fn worker(
                 client = None;
                 misses = 0;
                 warned = false;
+                last_controller_error = None;
                 reconnect_at = None;
                 reconnect_attempt = 0;
                 endpoint = Some(target.clone());
@@ -255,7 +260,9 @@ fn worker(
                         client = Some(connected);
                         last_poll = Instant::now();
                         let _ = events.send(Event::Connected(target));
-                        let _ = events.send(Event::Status(status));
+                        if let Some(status) = status {
+                            let _ = events.send(Event::Status(status));
+                        }
                         let _ = events.send(Event::Settings(settings));
                     }
                     Err(err) => {
@@ -271,47 +278,74 @@ fn worker(
                 reconnect_attempt = 0;
                 misses = 0;
                 warned = false;
+                last_controller_error = None;
                 let _ = events.send(Event::Disconnected(None));
             }
             Ok(Command::Home) => match client.as_mut() {
-                Some(connected) => match connected.write_command("$H") {
-                    Ok(()) => message(&events, "homing started ($H)", false),
-                    Err(err) => message(&events, format!("homing failed: {err}"), true),
-                },
+                Some(connected) => {
+                    let protocol = connected.protocol();
+                    match connected.home() {
+                        Ok(()) => message(
+                            &events,
+                            match protocol {
+                                Protocol::Grbl => "homing started ($H)",
+                                Protocol::Marlin => "homing started (G28)",
+                            },
+                            false,
+                        ),
+                        Err(err) => message(&events, format!("homing failed: {err}"), true),
+                    }
+                }
                 None => message(&events, "not connected", true),
             },
             Ok(Command::Unlock) => match client.as_mut() {
-                Some(connected) => match connected.write_command("$X") {
-                    Ok(()) => message(&events, "alarm unlock requested ($X)", false),
-                    Err(err) => message(&events, format!("unlock failed: {err}"), true),
-                },
+                Some(connected) => {
+                    let protocol = connected.protocol();
+                    match connected.unlock() {
+                        Ok(()) => message(
+                            &events,
+                            match protocol {
+                                Protocol::Grbl => "alarm unlock requested ($X)",
+                                Protocol::Marlin => "controller restart requested (M999)",
+                            },
+                            false,
+                        ),
+                        Err(err) => message(&events, format!("unlock failed: {err}"), true),
+                    }
+                }
                 None => message(&events, "not connected", true),
             },
             Ok(Command::Stop) => match client.as_mut() {
-                Some(connected) => match connected.stop() {
-                    Ok(()) => message(&events, "feed hold + soft reset sent; laser off", false),
-                    Err(err) => message(&events, format!("stop failed: {err}"), true),
-                },
+                Some(connected) => {
+                    let protocol = connected.protocol();
+                    match connected.stop() {
+                        Ok(()) => message(
+                            &events,
+                            match protocol {
+                                Protocol::Grbl => "feed hold + soft reset sent; laser off",
+                                Protocol::Marlin => {
+                                    "emergency stop sent (M112); laser off; send Unlock (M999) to restart"
+                                }
+                            },
+                            false,
+                        ),
+                        Err(err) => message(&events, format!("stop failed: {err}"), true),
+                    }
+                }
                 None => message(&events, "not connected", true),
             },
             Ok(Command::Jog { dx, dy, feed }) => match client.as_mut() {
-                Some(connected) => {
-                    let line = jog_line(dx, dy, feed);
-                    match connected.write_command(&line) {
-                        Ok(()) => message(&events, format!("jog X{dx:+.2} Y{dy:+.2} mm"), false),
-                        Err(err) => message(&events, format!("jog failed: {err}"), true),
-                    }
-                }
+                Some(connected) => match connected.jog(dx, dy, feed) {
+                    Ok(()) => message(&events, format!("jog X{dx:+.2} Y{dy:+.2} mm"), false),
+                    Err(err) => message(&events, format!("jog failed: {err}"), true),
+                },
                 None => message(&events, "not connected", true),
             },
             Ok(Command::JogTo { x, y, feed }) => match client.as_mut() {
-                Some(connected) => {
-                    let line = jog_absolute_line(x, y, feed);
-                    match connected.write_command(&line) {
-                        Ok(()) => message(&events, format!("jog to X{x:.2} Y{y:.2} mm"), false),
-                        Err(err) => message(&events, format!("jog failed: {err}"), true),
-                    }
-                }
+                Some(connected) => match connected.jog_to(x, y, feed) {
+                    Ok(()) => message(&events, format!("jog to X{x:.2} Y{y:.2} mm"), false),
+                    Err(err) => message(&events, format!("jog failed: {err}"), true),
+                },
                 None => message(&events, "not connected", true),
             },
             Ok(Command::JogCancel) => match client.as_mut() {
@@ -322,14 +356,14 @@ fn worker(
                 None => message(&events, "not connected", true),
             },
             Ok(Command::SetOrigin) => match client.as_mut() {
-                Some(connected) => match connected.write_command("G92 X0 Y0") {
+                Some(connected) => match connected.set_origin() {
                     Ok(()) => message(&events, "work origin set (G92 X0 Y0)", false),
                     Err(err) => message(&events, format!("setting origin failed: {err}"), true),
                 },
                 None => message(&events, "not connected", true),
             },
             Ok(Command::SaveOrigin) => match client.as_mut() {
-                Some(connected) => match connected.write_command("G10 L20 P1 X0 Y0") {
+                Some(connected) => match connected.save_origin() {
                     Ok(()) => message(
                         &events,
                         "stored work origin saved (G10 L20 P1 X0 Y0)",
@@ -340,7 +374,7 @@ fn worker(
                 None => message(&events, "not connected", true),
             },
             Ok(Command::SetSetting { key, value }) => match client.as_mut() {
-                Some(connected) => {
+                Some(Controller::Grbl(connected)) => {
                     let line = format!("${key}={value}");
                     match connected.send(&line) {
                         Ok(()) => {
@@ -353,13 +387,25 @@ fn worker(
                         }
                     }
                 }
+                Some(Controller::Marlin(_)) => {
+                    message(&events, "Marlin settings are defined in the firmware", true)
+                }
                 None => message(&events, "not connected", true),
             },
             Ok(Command::RefreshSettings) => match client.as_mut() {
-                Some(connected) => {
+                Some(Controller::Grbl(connected)) => {
                     let settings = read_settings(connected);
                     let _ = events.send(Event::Settings(settings));
                     message(&events, "settings refreshed", false);
+                }
+                Some(Controller::Marlin(_)) => {
+                    let settings = marlin_settings(None);
+                    let _ = events.send(Event::Settings(settings));
+                    message(
+                        &events,
+                        "Marlin settings are defined in the firmware",
+                        false,
+                    );
                 }
                 None => message(&events, "not connected", true),
             },
@@ -409,25 +455,31 @@ fn worker(
         if let Some(connected) = client.as_mut() {
             if last_poll.elapsed() >= Duration::from_millis(500) {
                 last_poll = Instant::now();
-                let _ = connected.request_status();
-                match connected.collect_for(Duration::from_millis(250)) {
-                    Ok(lines) => {
-                        for line in &lines {
-                            if line.starts_with("error") || line.starts_with("ALARM") {
+                let timeout = if connected.protocol() == Protocol::Marlin {
+                    Duration::from_millis(250)
+                } else {
+                    Duration::from_millis(750)
+                };
+                match connected.poll_status(timeout) {
+                    Ok(poll) => {
+                        for line in &poll.lines {
+                            if controller_error(line)
+                                && last_controller_error.as_deref() != Some(line.as_str())
+                            {
+                                last_controller_error = Some(line.clone());
                                 let _ = events.send(Event::Message {
                                     text: format!("controller: {line}"),
                                     error: true,
                                 });
                             }
                         }
-                        if let Some(status) = lines.iter().rev().find(|line| line.starts_with('<'))
-                        {
+                        if let Some(status) = poll.status {
                             misses = 0;
                             if warned {
                                 warned = false;
                                 message(&events, "status resumed", false);
                             }
-                            let _ = events.send(Event::Status(status.clone()));
+                            let _ = events.send(Event::Status(status));
                         } else {
                             // Silence is not a disconnect: homing and very slow
                             // moves can delay status replies over WiFi.
@@ -462,15 +514,17 @@ fn worker(
     }
 }
 
+#[cfg(test)]
 fn jog_line(dx: f64, dy: f64, feed: f64) -> String {
     format!("$J=G91 G21 X{dx:.3} Y{dy:.3} F{feed:.0}")
 }
 
+#[cfg(test)]
 fn jog_absolute_line(x: f64, y: f64, feed: f64) -> String {
     format!("$J=G90 G21 X{x:.3} Y{y:.3} F{feed:.0}")
 }
 
-type Connected = (GrblClient<Box<dyn Transport>>, String, Settings);
+type Connected = (Controller<Box<dyn Transport>>, Option<String>, Settings);
 
 fn connect(
     endpoint: &str,
@@ -480,61 +534,52 @@ fn connect(
     let (host, port) = parse_endpoint(endpoint)?;
     let transport = TcpTransport::connect(&host, port, tcp_timeout)
         .map_err(|err| format!("connecting to {host}:{port}: {err}"))?;
-    let mut client = GrblClient::with_config(
+    let detection = Controller::detect(
         Box::new(transport) as Box<dyn Transport>,
-        GrblConfig {
-            window: 120,
-            timeout: Duration::from_secs(30),
-        },
-    );
-    let probe = client
-        .probe_status(probe_timeout)
-        .map_err(|err| format!("probing {host}:{port}: {err}"))?;
-    match probe.status {
-        Some(status) => {
-            let settings = read_settings(&mut client);
-            Ok((client, status, settings))
-        }
-        None => {
-            let detail = if probe.seen.is_empty() {
-                "nothing received".to_owned()
-            } else {
-                format!("received: {}", probe.seen.join(" | "))
-            };
-            Err(format!(
-                "connected to {host}:{port}, but no GRBL status report ({detail}). \
-                 Check that the controller is powered and that this is its Telnet port."
-            ))
-        }
-    }
+        probe_timeout,
+        probe_timeout,
+    )
+    .map_err(|err| format!("probing {host}:{port}: {err}"))?;
+    let status = detection.status;
+    let firmware = detection.firmware;
+    let mut controller = detection.controller;
+    let settings = match &mut controller {
+        Controller::Grbl(client) => read_settings(client),
+        Controller::Marlin(_) => marlin_settings(firmware),
+    };
+    Ok((controller, status, settings))
 }
 
 /// GRBL acknowledges lines when they enter the planner, which can be ahead of
 /// the actual motion. Wait for an `Idle` status before declaring a job done.
 /// Returns false if the user asked to stop while the last moves finish.
 fn wait_until_idle(
-    connected: &mut GrblClient<Box<dyn Transport>>,
+    connected: &mut Controller<Box<dyn Transport>>,
     events: &Sender<Event>,
     stop: &AtomicBool,
     pause: &AtomicBool,
 ) -> bool {
+    let Controller::Grbl(client) = connected else {
+        // Marlin's client waits for M400 before returning from the stream.
+        return true;
+    };
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if stop.load(Ordering::Relaxed) {
             return false;
         }
         if pause.load(Ordering::Relaxed) {
-            let _ = connected.feed_hold();
+            let _ = client.feed_hold();
             while pause.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(50));
             }
             if stop.load(Ordering::Relaxed) {
                 return false;
             }
-            let _ = connected.resume();
+            let _ = client.resume();
         }
-        let _ = connected.request_status();
-        if let Ok(lines) = connected.collect_for(Duration::from_millis(200)) {
+        let _ = client.request_status();
+        if let Ok(lines) = client.collect_for(Duration::from_millis(200)) {
             for line in lines.iter().filter(|line| line.starts_with('<')) {
                 let _ = events.send(Event::Status(line.clone()));
                 if let Some(status) = Status::parse(line) {
@@ -549,8 +594,12 @@ fn wait_until_idle(
 }
 
 /// Controller settings that affect GUI safety.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
+    /// Firmware family detected during connection.
+    pub protocol: Protocol,
+    /// `M115` firmware banner for Marlin; `None` for GRBL.
+    pub firmware: Option<String>,
     /// `$32=1`: laser mode. Required for a safe M4 pause.
     pub laser_mode: Option<bool>,
     /// `$30`: the S value for 100 % power.
@@ -561,6 +610,20 @@ pub struct Settings {
     pub bed: Option<[f64; 2]>,
     /// Every `$n=value` returned by `$$`, for the raw list.
     pub all: BTreeMap<u32, String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            protocol: Protocol::Grbl,
+            firmware: None,
+            laser_mode: None,
+            max_s: None,
+            homing: None,
+            bed: None,
+            all: BTreeMap::new(),
+        }
+    }
 }
 
 fn read_settings(client: &mut GrblClient<Box<dyn Transport>>) -> Settings {
@@ -582,6 +645,18 @@ fn read_settings(client: &mut GrblClient<Box<dyn Transport>>) -> Settings {
         }
     }
     settings
+}
+
+fn marlin_settings(firmware: Option<String>) -> Settings {
+    Settings {
+        protocol: Protocol::Marlin,
+        firmware,
+        laser_mode: Some(true),
+        max_s: Some(Protocol::Marlin.default_max_s()),
+        homing: Some(true),
+        bed: None,
+        all: BTreeMap::new(),
+    }
 }
 
 fn parse_setting(line: &str, settings: &mut Settings) {
@@ -615,6 +690,11 @@ fn parse_setting(line: &str, settings: &mut Settings) {
     };
 }
 
+fn controller_error(line: &str) -> bool {
+    let upper = line.trim().to_ascii_uppercase();
+    upper.starts_with("ERROR") || upper.starts_with("!!") || upper.starts_with("ALARM")
+}
+
 fn message(events: &Sender<Event>, text: impl Into<String>, error: bool) {
     let _ = events.send(Event::Message {
         text: text.into(),
@@ -635,7 +715,7 @@ pub struct Status {
 }
 
 impl Status {
-    /// Parse `<Idle|MPos:1.000,2.000,0.000|FS:1000,0>`.
+    /// Parse `<Idle|WPos:1.000,2.000,0.000|FS:1000,0>`.
     pub fn parse(line: &str) -> Option<Self> {
         let raw = line.trim();
         let body = raw.strip_prefix('<')?.strip_suffix('>')?;
@@ -802,6 +882,61 @@ mod tests {
         (port, rx, handle)
     }
 
+    /// A tiny Marlin-over-TCP controller. It ignores GRBL `?` queries and
+    /// answers the commands used by the Marlin driver.
+    fn spawn_marlin_controller() -> (u16, Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("timeout");
+            let mut buffer = [0u8; 256];
+            let mut line = String::new();
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        for byte in &buffer[..n] {
+                            match *byte {
+                                b'?' => {}
+                                b'\n' => {
+                                    let command = std::mem::take(&mut line);
+                                    let command = command.trim().to_owned();
+                                    if command.is_empty() {
+                                        continue;
+                                    }
+                                    let _ = tx.send(command.clone());
+                                    let response = match command.as_str() {
+                                        "M115" => "FIRMWARE_NAME:Marlin 2.1.2 (test) PROTOCOL_VERSION:1.0 EXTRUDER_COUNT:1\nCap:SERIAL_XON_XOFF:0\nok\n",
+                                        "M114" => "X:1.000 Y:2.000 Z:0.000 E:0.000 Count X:0 Y:0 Z:0\nok\n",
+                                        "M105" => "T:0.00 /0.00 B:0.00 /0.00\nok\n",
+                                        "M112" => "Error:Printer halted. kill() called!\n",
+                                        _ => "ok\n",
+                                    };
+                                    let _ = stream.write_all(response.as_bytes());
+                                    let _ = stream.flush();
+                                }
+                                b'\r' => {}
+                                other => line.push(other as char),
+                            }
+                        }
+                    }
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        continue
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, rx, handle)
+    }
+
     #[test]
     fn absolute_jog_uses_current_work_coordinates() {
         assert_eq!(
@@ -860,6 +995,66 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("stored origin command");
         assert_eq!(command, "G10 L20 P1 X0 Y0");
+
+        drop(machine);
+        let _ = server.join();
+    }
+
+    #[test]
+    fn worker_detects_marlin_and_uses_marlin_commands() {
+        let (port, commands, server) = spawn_marlin_controller();
+        let machine = Machine::spawn();
+        assert!(machine.connect(&format!("tcp://127.0.0.1:{port}")));
+
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut connected = false;
+        let mut settings = None;
+        let mut status = None;
+        while Instant::now() < deadline && (settings.is_none() || status.is_none()) {
+            while let Some(event) = machine.try_recv() {
+                match event {
+                    Event::Connected(_) => connected = true,
+                    Event::Status(line) => status = Some(line),
+                    Event::Settings(value) => settings = Some(value),
+                    Event::Disconnected(reason) => panic!("disconnected: {reason:?}"),
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(connected, "did not connect");
+        let settings = settings.expect("settings");
+        assert_eq!(settings.protocol, Protocol::Marlin);
+        assert_eq!(settings.max_s, Some(255));
+        assert!(status
+            .as_deref()
+            .is_some_and(|line| line.contains("WPos:1.000,2.000,0.000")));
+
+        assert!(machine.home());
+        let mut saw_g28 = false;
+        let mut saw_m400 = false;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && !(saw_g28 && saw_m400) {
+            match commands.recv_timeout(Duration::from_millis(200)) {
+                Ok(command) if command == "G28" => saw_g28 = true,
+                Ok(command) if command == "M400" => saw_m400 = true,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(saw_g28 && saw_m400, "home commands missing");
+
+        assert!(machine.jog(1.0, 0.0, 500.0));
+        let mut jog = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && jog.len() < 3 {
+            if let Ok(command) = commands.recv_timeout(Duration::from_millis(200)) {
+                if command.starts_with("G9") || command.starts_with("G0 ") {
+                    jog.push(command);
+                }
+            }
+        }
+        assert_eq!(jog, vec!["G91", "G0 X1.000 Y0.000 F500", "G90"]);
 
         drop(machine);
         let _ = server.join();

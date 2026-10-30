@@ -31,8 +31,12 @@ It is a living plan, not a compatibility promise.
 
 ### 1. Machine coverage
 
-- Add a Marlin laser driver.
-- Add Ruida over UDP.
+- [x] Add a Marlin laser driver (shipped in `1.1.0`): auto-detection, `M114`/`M105` status,
+      `M3`/`M5` streaming, `M400` drain, `G28` homing, `G92` origin,
+      `M999` unlock and `M112` stop, with a Marlin simulator and TCP test.
+- [ ] Validate the Marlin driver on physical hardware (stop/recovery,
+      PWM range, homing and long-job behaviour).
+- [ ] Add Ruida over UDP.
 - Evaluate TopWisdom and galvo/fiber controllers.
 - Add rotary-axis setup and job planning.
 - Expand machine profiles beyond GRBL `$` settings.
