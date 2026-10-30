@@ -7,11 +7,10 @@ vector designs and raster images, plans toolpaths and streams G-code to
 GRBL-compatible and Marlin laser controllers over USB or WiFi. Everything is
 implemented from public specifications: SVG, PDF, DXF, G-code, GRBL and Marlin.
 
-> **Status:** `1.2.0` is the current published release. Machine-profile v2,
-> send/frame preflight and GUI connection prefill are on `main` for the next
-> release. Marlin laser support is covered by simulator and TCP integration
-> tests but awaits validation on a physical Marlin machine. See
-> [CHANGELOG.md](CHANGELOG.md) and [docs/roadmap.md](docs/roadmap.md).
+> **Status:** `1.3.0`. The editor and GRBL workflow are hardware-validated.
+> Marlin laser support is covered by simulator and TCP integration tests but
+> awaits validation on a physical Marlin machine. See [CHANGELOG.md](CHANGELOG.md)
+> and [docs/roadmap.md](docs/roadmap.md).
 
 ## Highlights
 

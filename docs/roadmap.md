@@ -38,8 +38,8 @@ It is a living plan, not a compatibility promise.
       fallback (`1.1.1`).
 - [x] Add GUI USB serial connections and saved machine profiles (`1.2.0`).
 - [x] Expand machine profiles with work area, job defaults, framing setup and
-      safety expectations, and add send/frame preflight checks.
-- [x] Allow `orleans gui` to prefill TCP or serial connections.
+      safety expectations, and add send/frame preflight checks (`1.3.0`).
+- [x] Allow `orleans gui` to prefill TCP or serial connections (`1.3.0`).
 - [ ] Validate the Marlin driver on physical hardware (stop/recovery,
       PWM range, homing and long-job behaviour).
 - [ ] Add Ruida over UDP.

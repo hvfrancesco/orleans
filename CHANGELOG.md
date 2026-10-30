@@ -2,7 +2,7 @@
 
 All notable changes to orleans are recorded here.
 
-## [Unreleased]
+## [1.3.0] - 2026-10-30
 
 ### Interface
 
@@ -21,7 +21,17 @@ All notable changes to orleans are recorded here.
   settings. Profile/controller homing and soft-limit mismatches are warnings.
 - `orleans gui` now accepts `--port`, `--baud` and `--driver` to prefill a TCP
   or serial connection.
+
+### Validation
+
 - 198 automated tests, Clippy and formatting checks pass.
+
+### Upgrade notes
+
+- The `.orleans` project format is unchanged (format 2).
+- Existing machine profiles are upgraded in place; new setup fields use
+  conservative defaults.
+- The AppImage relies on the host `libudev` for USB serial access.
 
 ## [1.2.0] - 2026-10-30
 
