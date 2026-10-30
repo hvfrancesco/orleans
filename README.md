@@ -112,7 +112,7 @@ Release packaging is reproducible:
 ./scripts/package-appimage.sh  # Linux AppImage + SHA-256
 ```
 
-The suite currently contains **190 tests**, including the full SVG → toolpath →
+The suite currently contains **191 tests**, including the full SVG → toolpath →
 G-code → TCP controller integration run and a Marlin TCP worker test.
 
 The GUI is behind the default `gui` feature. Build with `--no-default-features`

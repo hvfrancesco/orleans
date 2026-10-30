@@ -2,6 +2,13 @@
 
 All notable changes to orleans are recorded here.
 
+## [Unreleased]
+
+### Interface
+
+- Use the Phosphor `unite-square`, `subtract-square` and `intersect-square`
+  icons for the boolean operation buttons.
+
 ## [1.2.0] - 2026-10-30
 
 ### Machine connections

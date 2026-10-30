@@ -50,9 +50,9 @@ fn glyph(icon: Icon) -> &'static str {
         Icon::Delete => ph::TRASH,
         Icon::Up => ph::ARROW_UP,
         Icon::Down => ph::ARROW_DOWN,
-        Icon::Union => ph::UNION,
-        Icon::Subtract => ph::SUBTRACT,
-        Icon::Intersect => ph::INTERSECT,
+        Icon::Union => ph::UNITE_SQUARE,
+        Icon::Subtract => ph::SUBTRACT_SQUARE,
+        Icon::Intersect => ph::INTERSECT_SQUARE,
     }
 }
 
@@ -61,4 +61,16 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, tooltip: &str, enabled: 
     let text = RichText::new(glyph(icon)).size((size * 0.64).max(12.0));
     ui.add_enabled(enabled, egui::Button::new(text).min_size(Vec2::splat(size)))
         .on_hover_text(tooltip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boolean_icons_use_the_square_variants() {
+        assert_eq!(glyph(Icon::Union), "\u{E878}");
+        assert_eq!(glyph(Icon::Subtract), "\u{EBD4}");
+        assert_eq!(glyph(Icon::Intersect), "\u{E87A}");
+    }
 }
