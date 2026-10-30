@@ -25,6 +25,7 @@ Machine commands accept USB serial or TCP connections.
 --url tcp://host[:port]    WiFi TCP/Telnet, port 23 by default
 --url telnet://host[:port]
 --url host[:port]
+--url ws://host:port/ws    ESP3D / WebSocket terminal bridge
 ```
 
 ## Controller selection
@@ -53,6 +54,9 @@ Examples:
 # Status over USB or WiFi; the protocol is detected automatically
 orleans status --port /dev/ttyUSB0
 orleans status --url tcp://192.168.1.50
+
+# ESP3D terminal WebSocket
+orleans status --url ws://192.168.1.50:81/ws
 
 # Emergency stop: GRBL feed hold + soft reset, laser off
 orleans stop --url tcp://192.168.1.50

@@ -7,10 +7,11 @@ vector designs and raster images, plans toolpaths and streams G-code to
 GRBL-compatible and Marlin laser controllers over USB or WiFi. Everything is
 implemented from public specifications: SVG, PDF, DXF, G-code, GRBL and Marlin.
 
-> **Status:** `1.3.0`. The editor and GRBL workflow are hardware-validated.
-> Marlin laser support is covered by simulator and TCP integration tests but
-> awaits validation on a physical Marlin machine. See [CHANGELOG.md](CHANGELOG.md)
-> and [docs/roadmap.md](docs/roadmap.md).
+> **Status:** `1.3.0` is the current published release. ESP3D WebSocket support,
+> mDNS discovery and machine-profile import/export are on `main` for the next
+> release. Marlin laser support is covered by simulator and TCP integration
+> tests but awaits validation on a physical Marlin machine. See
+> [CHANGELOG.md](CHANGELOG.md) and [docs/roadmap.md](docs/roadmap.md).
 
 ## Highlights
 
@@ -18,7 +19,7 @@ implemented from public specifications: SVG, PDF, DXF, G-code, GRBL and Marlin.
 |---|---|
 | Input | SVG, PDF and PDF-compatible AI, DXF, PNG/JPEG/BMP |
 | Design | Layers, fills, kerf, offsets, booleans, tabs, groups, arrays, node editing |
-| Machine | GRBL, GrblHAL, FluidNC and Marlin lasers over USB serial or WiFi TCP/Telnet |
+| Machine | GRBL, GrblHAL, FluidNC, Marlin and ESP3D bridges over USB, TCP/Telnet or WebSocket |
 | Control | Status, homing, unlock, jog, work zero, framing and stop; pause/resume on GRBL |
 | Output | G-code export, live estimates, persistent job history |
 | Interface | Dark/light themes and six languages: English, Italian, French, Spanish, German, Chinese |
@@ -116,7 +117,7 @@ Release packaging is reproducible:
 ./scripts/package-appimage.sh  # Linux AppImage + SHA-256
 ```
 
-The suite currently contains **198 tests**, including the full SVG → toolpath →
+The suite currently contains **201 tests**, including the full SVG → toolpath →
 G-code → TCP controller integration run and a Marlin TCP worker test.
 
 The GUI is behind the default `gui` feature. Build with `--no-default-features`

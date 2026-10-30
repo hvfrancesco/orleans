@@ -405,5 +405,10 @@
   "the profile expects homing, but the controller reports $22=0": "el perfil requiere el origen, pero el controlador informa $22=0",
   "the profile expects soft limits, but the controller reports $20=0": "el perfil requiere límites software, pero el controlador informa $20=0",
   "a layer has an invalid speed or power setting": "un nivel tiene una velocidad o potencia no válida",
-  "Work area": "Área de trabajo"
+  "Work area": "Área de trabajo",
+  "Import profiles…": "Importar perfiles…",
+  "Export profiles…": "Exportar perfiles…",
+  "Discover…": "Descubrir…",
+  "Discovering…": "Buscando…",
+  "Discovered machines": "Máquinas detectadas"
 }

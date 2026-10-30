@@ -17,8 +17,9 @@ machine is `orleans-driver`. Adding a G-code dialect means adding a
 `GcodeDialect` variant; a different line-oriented controller means implementing
 a client behind the `Controller` enum and a `Transport`, with nothing above it
 changing. The GUI and CLI use the same auto-detection path. The GUI worker can
-open both `TcpTransport` and `SerialTransport`, and works only with the
-boxed `Transport` trait.
+open `TcpTransport`, `SerialTransport` and `WebSocketTransport`, and works only
+with the boxed `Transport` trait. ESP3D terminal frames are split back into
+lines so the GRBL/Marlin clients remain unchanged.
 
 ## Testing
 

@@ -68,7 +68,7 @@ enum Command {
     Gui {
         /// SVG, raster image or .orleans project to open at startup.
         input: Option<PathBuf>,
-        /// Machine endpoint to prefill, e.g. tcp://192.168.1.10.
+        /// Machine endpoint to prefill, e.g. tcp://192.168.1.10 or ws://host:81/ws.
         #[arg(long)]
         url: Option<String>,
         /// Serial port to prefill, e.g. /dev/ttyUSB0 or COM3.
@@ -104,7 +104,7 @@ enum Command {
         /// Serial port, e.g. /dev/ttyUSB0 or COM3.
         #[arg(long)]
         port: Option<String>,
-        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet, port 23).
+        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet) or ws://host:81/ws.
         #[arg(long)]
         url: Option<String>,
         /// Baud rate for serial connections.
@@ -130,7 +130,7 @@ enum Command {
         /// Serial port, e.g. /dev/ttyUSB0 or COM3.
         #[arg(long)]
         port: Option<String>,
-        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet, port 23).
+        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet) or ws://host:81/ws.
         #[arg(long)]
         url: Option<String>,
         #[arg(long, default_value_t = 115200)]
@@ -144,7 +144,7 @@ enum Command {
         /// Serial port, e.g. /dev/ttyUSB0 or COM3.
         #[arg(long)]
         port: Option<String>,
-        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet, port 23).
+        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet) or ws://host:81/ws.
         #[arg(long)]
         url: Option<String>,
         #[arg(long, default_value_t = 115200)]
@@ -158,7 +158,7 @@ enum Command {
         /// Serial port, e.g. /dev/ttyUSB0 or COM3.
         #[arg(long)]
         port: Option<String>,
-        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet, port 23).
+        /// Network endpoint, e.g. tcp://192.168.1.50 (Telnet) or ws://host:81/ws.
         #[arg(long)]
         url: Option<String>,
         #[arg(long, default_value_t = 115200)]
@@ -338,6 +338,9 @@ fn gui_connection(
     };
     match (url, port) {
         (Some(_), Some(_)) => bail!("use either --url or --port, not both"),
+        (Some(url), None) if url.starts_with("ws://") || url.starts_with("wss://") => {
+            Ok(Some(Connection::websocket(url, driver)))
+        }
         (Some(url), None) => Ok(Some(Connection::tcp(url, driver))),
         (None, Some(port)) => Ok(Some(Connection::serial(port, baud, driver))),
         (None, None) => Ok(None),
@@ -687,6 +690,7 @@ fn connect_controller(
 enum LinkKind {
     Serial,
     Tcp,
+    WebSocket,
 }
 
 fn open_transport(
@@ -696,6 +700,15 @@ fn open_transport(
 ) -> Result<(Box<dyn Transport>, LinkKind)> {
     match (url, port) {
         (Some(_), Some(_)) => bail!("use either --url or --port, not both"),
+        (Some(url), None) if url.starts_with("http://") || url.starts_with("https://") => {
+            bail!("HTTP command forwarding is not supported; use ws://host:81/ws or tcp://host:23")
+        }
+        (Some(url), None) if url.starts_with("ws://") || url.starts_with("wss://") => {
+            eprintln!("link: {url}");
+            let link = orleans_driver::WebSocketTransport::open(url)
+                .with_context(|| format!("opening WebSocket {url}"))?;
+            Ok((Box::new(link), LinkKind::WebSocket))
+        }
         (Some(url), None) => {
             let (host, port) = parse_endpoint(url).map_err(anyhow::Error::msg)?;
             eprintln!("link: tcp://{host}:{port}");

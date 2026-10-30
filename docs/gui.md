@@ -220,16 +220,26 @@ redoes it.
 
 ## Machine panel
 
-The **Machine** panel connects over TCP/Telnet or USB serial and auto-detects
-the firmware. It first asks for a GRBL status report; if none arrives it sends
-Marlin's `M115` identity query. The panel then shows the live state, position,
+The **Machine** panel connects over TCP/Telnet, USB serial or an ESP3D-style
+WebSocket and auto-detects the firmware. It first asks for a GRBL status report;
+if none arrives it sends Marlin's `M115` identity query. The panel then shows the live state, position,
 feed and `S` value, with protocol-specific control labels.
 
 Choose **TCP/Telnet** and enter an endpoint such as
-`tcp://192.168.1.50`, or choose **Serial**, enter or select a port such as
-`/dev/ttyUSB0`, and set the baud rate. **Refresh** lists the serial ports
+`tcp://192.168.1.50`, choose **WebSocket** and enter an ESP3D terminal URL such
+as `ws://192.168.1.50:81/ws`, or choose **Serial**, enter or select a port such
+as `/dev/ttyUSB0`, and set the baud rate. **Refresh** lists the serial ports
 detected by the operating system. Serial access follows the same
 `dialout`/`uucp` permission rules as the CLI.
+
+The WebSocket transport uses text frames with the `webui-v3` subprotocol and
+the `/ws` terminal endpoint. A pathless URL defaults to `/ws`. TLS (`wss://`)
+is not enabled in this build. ESP3D devices can also be used through their
+ordinary Telnet port on 23.
+
+When disconnected, **Discover…** browses local mDNS HTTP services. Selecting a
+result fills the TCP endpoint with the advertised address and raw Telnet port
+`23`; verify the port if the controller uses a non-standard Telnet port.
 
 The **Driver** selector offers **Auto**, **GRBL** and **Marlin**. It can only
 be changed while disconnected. **Auto** is the normal setting; a forced protocol
@@ -253,7 +263,9 @@ The profile editor stores:
 - free-form notes
 
 Profiles are stored in `~/.config/orleans/machines.json` (or
-`$XDG_CONFIG_HOME/orleans/machines.json`).
+`$XDG_CONFIG_HOME/orleans/machines.json`). **Import profiles…** merges a
+previously exported profile file, **Export profiles…** writes all profiles to
+JSON, and **Duplicate** copies a profile with a unique name.
 
 For GRBL it offers **Home ($H)**, **Unlock ($X)** and **Stop** (feed hold + soft
 reset). For Marlin it offers **Home (G28)**, **Unlock (M999)** and **Stop**

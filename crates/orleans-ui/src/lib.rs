@@ -6,6 +6,7 @@
 
 mod app;
 mod cjk;
+mod discovery;
 mod history;
 mod i18n;
 mod icons;

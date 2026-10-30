@@ -405,5 +405,10 @@
   "the profile expects homing, but the controller reports $22=0": "le profil exige l'origine, mais le contrôleur indique $22=0",
   "the profile expects soft limits, but the controller reports $20=0": "le profil exige les limites logicielles, mais le contrôleur indique $20=0",
   "a layer has an invalid speed or power setting": "un calque a un réglage de vitesse ou de puissance invalide",
-  "Work area": "Zone de travail"
+  "Work area": "Zone de travail",
+  "Import profiles…": "Importer des profils…",
+  "Export profiles…": "Exporter des profils…",
+  "Discover…": "Découvrir…",
+  "Discovering…": "Découverte…",
+  "Discovered machines": "Machines détectées"
 }

@@ -20,6 +20,7 @@ orleans-driver = { path = "../orleans-driver" }
 orleans-geom = { path = "../orleans-geom" }
 orleans-import = { path = "../orleans-import" }
 orleans-toolpath = { path = "../orleans-toolpath" }
+mdns-sd = "0.21"
 
 [dev-dependencies]
 nix = { version = "0.26", features = ["term"] }

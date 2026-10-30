@@ -12,6 +12,7 @@ pub mod marlin;
 pub mod mock;
 pub mod net;
 pub mod transport;
+pub mod websocket;
 
 pub use controller::{Controller, Detection, Protocol, StatusPoll};
 pub use gcode::{GcodeDialect, GcodeOptions, LaserMode};
@@ -20,6 +21,7 @@ pub use marlin::{MarlinClient, MarlinConfig, MarlinStatus};
 pub use mock::{RunState, SimulatedGrbl, SimulatedMarlin};
 pub use net::{TcpTransport, TELNET_PORT};
 pub use transport::Transport;
+pub use websocket::WebSocketTransport;
 
 #[cfg(feature = "serial")]
 pub use transport::SerialTransport;

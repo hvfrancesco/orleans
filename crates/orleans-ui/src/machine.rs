@@ -33,6 +33,7 @@ pub enum DriverChoice {
 pub enum LinkKind {
     #[default]
     Tcp,
+    WebSocket,
     Serial,
 }
 
@@ -71,6 +72,15 @@ impl Connection {
         }
     }
 
+    pub fn websocket(url: impl Into<String>, driver: DriverChoice) -> Self {
+        Self {
+            kind: LinkKind::WebSocket,
+            endpoint: url.into(),
+            baud: default_baud(),
+            driver,
+        }
+    }
+
     pub fn serial(port: impl Into<String>, baud: u32, driver: DriverChoice) -> Self {
         Self {
             kind: LinkKind::Serial,
@@ -82,7 +92,7 @@ impl Connection {
 
     pub fn label(&self) -> String {
         match self.kind {
-            LinkKind::Tcp => self.endpoint.clone(),
+            LinkKind::Tcp | LinkKind::WebSocket => self.endpoint.clone(),
             LinkKind::Serial => format!("{} @ {} baud", self.endpoint, self.baud),
         }
     }
@@ -612,6 +622,11 @@ fn connect(
             let (host, port) = parse_endpoint(&connection.endpoint)?;
             let link = TcpTransport::connect(&host, port, tcp_timeout)
                 .map_err(|err| format!("connecting to {host}:{port}: {err}"))?;
+            Box::new(link)
+        }
+        LinkKind::WebSocket => {
+            let link = orleans_driver::WebSocketTransport::open(&connection.endpoint)
+                .map_err(|err| format!("opening WebSocket {}: {err}", connection.endpoint))?;
             Box::new(link)
         }
         LinkKind::Serial => {

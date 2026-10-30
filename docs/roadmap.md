@@ -40,6 +40,7 @@ It is a living plan, not a compatibility promise.
 - [x] Expand machine profiles with work area, job defaults, framing setup and
       safety expectations, and add send/frame preflight checks (`1.3.0`).
 - [x] Allow `orleans gui` to prefill TCP or serial connections (`1.3.0`).
+- [x] Add machine profile import, export and duplicate.
 - [ ] Validate the Marlin driver on physical hardware (stop/recovery,
       PWM range, homing and long-job behaviour).
 - [ ] Add Ruida over UDP.
@@ -48,10 +49,10 @@ It is a living plan, not a compatibility promise.
 
 ### 2. Transport and connectivity
 
-- WebSocket/HTTP bridge support.
-- TLS where the bridge supports it.
-- mDNS discovery for Grbl_ESP32, FluidNC and ESP3D.
-- Reconnect and job-resume hardening for unreliable WiFi links.
+- [x] ESP3D WebSocket terminal bridge and mDNS HTTP-service discovery.
+- [ ] TLS (`wss://`) where the bridge supports it.
+- [ ] Raw HTTP command bridge with explicit status limitations.
+- [ ] Reconnect and job-resume hardening for unreliable WiFi links.
 
 ### 3. Import coverage
 

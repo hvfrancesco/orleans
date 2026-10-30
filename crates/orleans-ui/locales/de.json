@@ -405,5 +405,10 @@
   "the profile expects homing, but the controller reports $22=0": "das Profil erwartet Home, aber der Controller meldet $22=0",
   "the profile expects soft limits, but the controller reports $20=0": "das Profil erwartet Soft-Limits, aber der Controller meldet $20=0",
   "a layer has an invalid speed or power setting": "eine Ebene hat eine ungültige Geschwindigkeits- oder Leistungseinstellung",
-  "Work area": "Arbeitsbereich"
+  "Work area": "Arbeitsbereich",
+  "Import profiles…": "Profile importieren…",
+  "Export profiles…": "Profile exportieren…",
+  "Discover…": "Entdecken…",
+  "Discovering…": "Suche läuft…",
+  "Discovered machines": "Gefundene Maschinen"
 }

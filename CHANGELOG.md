@@ -2,6 +2,21 @@
 
 All notable changes to orleans are recorded here.
 
+## [Unreleased]
+
+### Machine discovery and bridges
+
+- Added ESP3D / FluidNC WebSocket transport on `/ws` with the `webui-v3`
+  subprotocol. Pathless `ws://` URLs default to `/ws`.
+- Added mDNS discovery of local HTTP services in the GUI for FluidNC and
+  Grbl_ESP32/ESP3D controllers; selecting a result fills the raw Telnet endpoint.
+- Added machine profile import/export and duplicate actions.
+
+### Validation
+
+- 201 automated tests, including a local WebSocket transport test and profile
+  import/export/duplicate coverage. Clippy and formatting checks pass.
+
 ## [1.3.0] - 2026-10-30
 
 ### Interface

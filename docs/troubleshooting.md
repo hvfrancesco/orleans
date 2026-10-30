@@ -61,8 +61,8 @@ Common causes:
 - **The firmware is not GRBL or Marlin.** Auto-detection accepts GRBL status
   reports and Marlin `M115` identities; Ruida, TopWisdom and galvo controllers
   are not implemented yet.
-- **The bridge is WebSocket-only on port 81.** This transport is not implemented
-  yet.
+- **The bridge is WebSocket-only on port 81.** Use `ws://IP:81/ws` or enable
+  Telnet on the bridge.
 
 ## A job stops unexpectedly
 
@@ -91,6 +91,29 @@ total job duration: a long cut with steady acknowledgements is fine.
 
 Raise the timeout for a controller that can stay silent for longer while
 executing one very slow move.
+
+## ESP3D, WebSocket and mDNS
+
+ESP3D controllers can be used through their ordinary Telnet port (`tcp://IP:23`)
+or through the terminal WebSocket:
+
+```bash
+orleans status --url ws://IP:81/ws
+```
+
+The WebSocket transport uses the `/ws` endpoint and the `webui-v3`
+subprotocol. A pathless `ws://` URL defaults to `/ws`. TLS (`wss://`) is not
+enabled in this build. On Arduino-based ESP3D the terminal WebSocket is usually
+on port `81`; ESP-IDF builds often keep it on the HTTP port.
+
+The GUI **Discover…** button browses local mDNS HTTP services. Discovery
+requires mDNS to be enabled on the controller and not blocked by the network.
+Selecting a result fills the TCP endpoint with port `23`; change the port if the
+Telnet service is configured differently.
+
+HTTP `/command` forwarding is not used for streaming because it does not expose
+G-code acknowledgements or status. Use Telnet or the WebSocket terminal for
+flow-controlled jobs.
 
 ## Marlin-specific checks
 

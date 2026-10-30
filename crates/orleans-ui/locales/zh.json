@@ -405,5 +405,10 @@
   "the profile expects homing, but the controller reports $22=0": "配置要求回零，但控制器报告 $22=0",
   "the profile expects soft limits, but the controller reports $20=0": "配置要求软限位，但控制器报告 $20=0",
   "a layer has an invalid speed or power setting": "图层速度或功率设置无效",
-  "Work area": "工作区域"
+  "Work area": "工作区域",
+  "Import profiles…": "导入配置…",
+  "Export profiles…": "导出配置…",
+  "Discover…": "发现…",
+  "Discovering…": "正在发现…",
+  "Discovered machines": "发现的机器"
 }

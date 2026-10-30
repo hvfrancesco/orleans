@@ -183,6 +183,39 @@ impl MachineProfiles {
         Some(removed)
     }
 
+    pub fn export_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Merge profiles from an exported file. The active profile is unchanged.
+    pub fn import_json(&mut self, text: &str) -> Result<usize, String> {
+        let imported = serde_json::from_str::<Self>(text).map_err(|err| err.to_string())?;
+        if imported.format != FORMAT {
+            return Err("unsupported machine profile format".to_owned());
+        }
+        let count = imported.profiles.len();
+        for profile in imported.profiles {
+            self.upsert(profile);
+        }
+        Ok(count)
+    }
+
+    /// Duplicate a profile with a unique "copy" name.
+    pub fn duplicate(&mut self, index: usize) -> Option<String> {
+        let profile = self.profiles.get(index)?.clone();
+        let base = format!("{} copy", profile.name);
+        let mut name = base.clone();
+        let mut counter = 2;
+        while self.find(&name).is_some() {
+            name = format!("{base} {counter}");
+            counter += 1;
+        }
+        let mut copy = profile;
+        copy.name = name.clone();
+        self.upsert(copy);
+        Some(name)
+    }
+
     pub fn find(&self, name: &str) -> Option<&MachineProfile> {
         self.profiles
             .iter()
@@ -285,6 +318,35 @@ mod tests {
         assert_eq!(profiles.profiles.len(), 1);
         assert_eq!(profiles.profiles[0].name, "laser");
         assert_eq!(profiles.profiles[0].connection.kind, LinkKind::Serial);
+    }
+
+    #[test]
+    fn exports_and_imports_profiles() {
+        let mut profiles = MachineProfiles::default();
+        profiles.upsert(MachineProfile::new(
+            "Laser",
+            sample_tcp(),
+            1000,
+            MachineSetup::default(),
+        ));
+        let json = profiles.export_json().expect("export");
+        let mut imported = MachineProfiles::default();
+        assert_eq!(imported.import_json(&json).expect("import"), 1);
+        assert_eq!(imported.profiles[0].name, "Laser");
+    }
+
+    #[test]
+    fn duplicate_uses_a_unique_name() {
+        let mut profiles = MachineProfiles::default();
+        profiles.upsert(MachineProfile::new(
+            "Laser",
+            sample_tcp(),
+            1000,
+            MachineSetup::default(),
+        ));
+        assert_eq!(profiles.duplicate(0).as_deref(), Some("Laser copy"));
+        assert_eq!(profiles.duplicate(0).as_deref(), Some("Laser copy 2"));
+        assert_eq!(profiles.profiles.len(), 3);
     }
 
     #[test]

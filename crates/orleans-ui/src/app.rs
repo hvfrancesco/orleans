@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
@@ -23,6 +25,7 @@ use orleans_import::{
 };
 use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 
+use crate::discovery::{self, DiscoveredMachine};
 use crate::history::{self, JobHistory, JobKind, JobOutcome, JobRecord};
 use crate::i18n::{self, Language};
 use crate::icons::{self, Icon};
@@ -712,6 +715,9 @@ pub struct OrleansApp {
 
     connection: Connection,
     serial_ports: Vec<String>,
+    discovering: bool,
+    discovery_rx: Option<Receiver<Result<Vec<DiscoveredMachine>, String>>>,
+    discovered: Vec<DiscoveredMachine>,
     profiles: MachineProfiles,
     profiles_path: PathBuf,
     active_profile: Option<String>,
@@ -847,6 +853,9 @@ impl OrleansApp {
             show_bed: true,
             connection,
             serial_ports: Vec::new(),
+            discovering: false,
+            discovery_rx: None,
+            discovered: Vec::new(),
             profiles,
             profiles_path,
             active_profile,
@@ -1891,6 +1900,7 @@ impl OrleansApp {
         if connection.endpoint.is_empty() {
             let message = match connection.kind {
                 LinkKind::Tcp => "enter an endpoint, e.g. tcp://192.168.1.10",
+                LinkKind::WebSocket => "enter a WebSocket URL, e.g. ws://192.168.1.10:81/ws",
                 LinkKind::Serial => "enter a serial port, e.g. /dev/ttyUSB0",
             };
             self.set_status(message, true);
@@ -4604,6 +4614,102 @@ impl OrleansApp {
                 == Some(true)
     }
 
+    fn start_discovery(&mut self) {
+        if self.discovering {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.discovery_rx = Some(rx);
+        self.discovering = true;
+        self.discovered.clear();
+        self.set_status("discovering mDNS machines…", false);
+        thread::spawn(move || {
+            let result = discovery::discover(Duration::from_secs(3));
+            let _ = tx.send(result);
+        });
+    }
+
+    fn pump_discovery(&mut self) {
+        let result = match self.discovery_rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(TryRecvError::Disconnected)) => {
+                Some(Err("mDNS discovery thread stopped".to_owned()))
+            }
+            Some(Err(TryRecvError::Empty)) | None => None,
+        };
+        let Some(result) = result else {
+            return;
+        };
+        self.discovery_rx = None;
+        self.discovering = false;
+        match result {
+            Ok(machines) => {
+                let count = machines.len();
+                self.discovered = machines;
+                if count == 0 {
+                    self.set_status("no mDNS machines found", true);
+                } else {
+                    self.set_status(format!("found {count} mDNS machine(s)"), false);
+                }
+            }
+            Err(err) => self.set_status(format!("mDNS discovery: {err}"), true),
+        }
+    }
+
+    fn import_profiles(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Orleans machine profiles", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                self.set_status(format!("reading {}: {err}", path.display()), true);
+                return;
+            }
+        };
+        match self.profiles.import_json(&text) {
+            Ok(count) => {
+                if self.save_profiles() {
+                    self.set_status(
+                        format!(
+                            "imported {count} machine profile(s) from {}",
+                            path.display()
+                        ),
+                        false,
+                    );
+                }
+            }
+            Err(err) => self.set_status(format!("importing machine profiles: {err}"), true),
+        }
+    }
+
+    fn export_profiles(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Orleans machine profiles", &["json"])
+            .set_file_name("orleans-machines.json")
+            .save_file()
+        else {
+            return;
+        };
+        let json = match self.profiles.export_json() {
+            Ok(json) => json,
+            Err(err) => {
+                self.set_status(format!("serialising machine profiles: {err}"), true);
+                return;
+            }
+        };
+        match std::fs::write(&path, json) {
+            Ok(()) => self.set_status(
+                format!("exported machine profiles to {}", path.display()),
+                false,
+            ),
+            Err(err) => self.set_status(format!("writing {}: {err}", path.display()), true),
+        }
+    }
+
     fn save_profiles(&mut self) -> bool {
         match self.profiles.save(&self.profiles_path) {
             Ok(()) => true,
@@ -4968,11 +5074,13 @@ impl OrleansApp {
                     egui::ComboBox::from_id_salt("machine-link-kind")
                         .selected_text(match kind {
                             LinkKind::Tcp => "TCP/Telnet",
+                            LinkKind::WebSocket => "WebSocket",
                             LinkKind::Serial => tr!("Serial"),
                         })
                         .width(ui.available_width())
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut kind, LinkKind::Tcp, "TCP/Telnet");
+                            ui.selectable_value(&mut kind, LinkKind::WebSocket, "WebSocket");
                             ui.selectable_value(&mut kind, LinkKind::Serial, tr!("Serial"));
                         });
                 });
@@ -4984,12 +5092,17 @@ impl OrleansApp {
                 }
 
                 match self.connection.kind {
-                    LinkKind::Tcp => {
+                    LinkKind::Tcp | LinkKind::WebSocket => {
                         ui.label(tr!("Endpoint"));
+                        let hint = if self.connection.kind == LinkKind::WebSocket {
+                            "ws://192.168.1.10:81/ws"
+                        } else {
+                            "tcp://192.168.1.10"
+                        };
                         let field = ui.add_enabled(
                             disconnected,
                             egui::TextEdit::singleline(&mut self.connection.endpoint)
-                                .hint_text("tcp://192.168.1.10")
+                                .hint_text(hint)
                                 .desired_width(f32::INFINITY),
                         );
                         enter |= field.lost_focus()
@@ -5101,10 +5214,51 @@ impl OrleansApp {
                     }
                 });
 
+                if disconnected && self.connection.kind == LinkKind::Tcp {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!self.discovering, egui::Button::new(tr!("Discover…")))
+                            .clicked()
+                        {
+                            self.start_discovery();
+                        }
+                        if self.discovering {
+                            ui.spinner();
+                            ui.label(tr!("Discovering…"));
+                        }
+                    });
+                    if !self.discovered.is_empty() {
+                        ui.label(
+                            RichText::new(tr!("Discovered machines")).small().weak(),
+                        );
+                        for machine in self.discovered.clone() {
+                            let label = format!("{} ({})", machine.name, machine.address);
+                            if ui
+                                .button(label)
+                                .on_hover_text(format!(
+                                    "{}:{}",
+                                    machine.hostname, machine.http_port
+                                ))
+                                .clicked()
+                            {
+                                self.connection.endpoint =
+                                    format!("tcp://{}:23", machine.address);
+                                self.set_status(
+                                    format!("selected {}", machine.name),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                }
+
                 let mut load_profile = None;
                 let mut edit_profile = None;
+                let mut duplicate_profile = None;
                 let mut delete_profile = None;
                 let mut new_profile = false;
+                let mut import_profiles = false;
+                let mut export_profiles = false;
                 egui::CollapsingHeader::new(format!(
                     "{} ({})",
                     tr!("Machine profiles"),
@@ -5139,18 +5293,6 @@ impl OrleansApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.small_button(tr!("Delete")).clicked() {
-                                        delete_profile = Some(index);
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            disconnected,
-                                            egui::Button::new(tr!("Edit")).small(),
-                                        )
-                                        .clicked()
-                                    {
-                                        edit_profile = Some(index);
-                                    }
                                     if ui
                                         .add_enabled(
                                             disconnected,
@@ -5160,20 +5302,45 @@ impl OrleansApp {
                                     {
                                         load_profile = Some(index);
                                     }
+                                    ui.menu_button("⋯", |ui| {
+                                        if ui
+                                            .add_enabled(
+                                                disconnected,
+                                                egui::Button::new(tr!("Edit")),
+                                            )
+                                            .clicked()
+                                        {
+                                            edit_profile = Some(index);
+                                        }
+                                        if ui.button(tr!("Duplicate")).clicked() {
+                                            duplicate_profile = Some(index);
+                                        }
+                                        if ui.button(tr!("Delete")).clicked() {
+                                            delete_profile = Some(index);
+                                        }
+                                    });
                                 },
                             );
                         });
                     }
                     ui.separator();
-                    if ui
-                        .add_enabled(
-                            disconnected,
-                            egui::Button::new(tr!("New profile…")),
-                        )
-                        .clicked()
-                    {
-                        new_profile = true;
-                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(
+                                disconnected,
+                                egui::Button::new(tr!("New profile…")),
+                            )
+                            .clicked()
+                        {
+                            new_profile = true;
+                        }
+                        if ui.button(tr!("Import profiles…")).clicked() {
+                            import_profiles = true;
+                        }
+                        if ui.button(tr!("Export profiles…")).clicked() {
+                            export_profiles = true;
+                        }
+                    });
                 });
 
                 if let Some(index) = load_profile {
@@ -5185,6 +5352,12 @@ impl OrleansApp {
                     if let Some(profile) = self.profiles.profiles.get(index).cloned() {
                         self.apply_profile(&profile);
                         self.open_profile_editor(Some(profile));
+                    }
+                }
+                if let Some(index) = duplicate_profile {
+                    if let Some(name) = self.profiles.duplicate(index) {
+                        self.save_profiles();
+                        self.set_status(format!("duplicated profile as {name}"), false);
                     }
                 }
                 if let Some(index) = delete_profile {
@@ -5202,6 +5375,12 @@ impl OrleansApp {
                 }
                 if new_profile {
                     self.open_profile_editor(None);
+                }
+                if import_profiles {
+                    self.import_profiles();
+                }
+                if export_profiles {
+                    self.export_profiles();
                 }
                 if let Some([width, height]) = self.effective_bed() {
                     ui.label(
@@ -9095,6 +9274,7 @@ impl eframe::App for OrleansApp {
             self.open_path(path);
         }
 
+        self.pump_discovery();
         self.home_dialog(&ctx);
         self.profile_dialog(&ctx);
         self.send_dialog(&ctx);
