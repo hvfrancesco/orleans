@@ -2,6 +2,21 @@
 
 All notable changes to orleans are recorded here.
 
+## [1.1.1] - 2026-10-30
+
+### Interface
+
+- Added a **Driver: Auto / GRBL / Marlin** selector to the GUI Machine panel.
+  Auto-detection remains the default; the override is a recovery path when a
+  controller does not reveal its firmware identity. Reconnects reuse the
+  selected protocol.
+
+### Validation
+
+- 186 automated tests, Clippy with warnings denied and formatting checks pass.
+- Forced Marlin connection is covered by a TCP test where `M115` returns no
+  identity; status and settings still come from `M114`/`M105`.
+
 ## [1.1.0] - 2026-10-30
 
 ### Machine

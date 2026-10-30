@@ -44,6 +44,12 @@ status with `?`, then they send Marlin's `M115` identity query. When a protocol
 is recognised, orleans prints `protocol: GRBL` or `protocol: Marlin`; Marlin
 also prints the `M114` position and `M105` temperature replies.
 
+If auto-detection fails but the controller is known to be GRBL or Marlin, force
+it with the CLI's `--driver grbl|marlin`. In the GUI, disconnect and choose the
+same protocol in the **Driver** selector below **Endpoint**, then connect again.
+Forced mode is only a protocol override: normal status, jogging and streaming
+still require the controller to answer its usual status commands.
+
 Common causes:
 
 - **The laser controller is off or asleep** while its WiFi bridge is still

@@ -225,6 +225,13 @@ first asks for a GRBL status report; if none arrives it sends Marlin's `M115`
 identity query. The panel then shows the live state, position, feed and `S`
 value, with protocol-specific control labels.
 
+The **Driver** selector below **Endpoint** offers **Auto**, **GRBL** and
+**Marlin**. It can only be changed while disconnected. **Auto** is the normal
+setting; a forced protocol skips detection and is a recovery path when a
+controller hides its status or identity reply. Reconnects reuse the same choice.
+A forced connection can still be used for Stop and Unlock even when status is
+missing, but normal jogging and sending need a readable status.
+
 For GRBL it offers **Home ($H)**, **Unlock ($X)** and **Stop** (feed hold + soft
 reset). For Marlin it offers **Home (G28)**, **Unlock (M999)** and **Stop**
 (`M5` followed by `M112` emergency stop). A Marlin stop leaves the controller

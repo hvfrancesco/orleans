@@ -219,6 +219,11 @@ fn italian(text: &str) -> Option<&'static str> {
         "Control" => "Controllo",
         "Home ($H)" => "Home ($H)",
         "Home (G28)" => "Home (G28)",
+        "Driver" => "Driver",
+        "Auto" => "Auto",
+        "Auto-detect the firmware, or force GRBL/Marlin if detection fails." => {
+            "Rileva automaticamente il firmware o forza GRBL/Marlin se il rilevamento fallisce."
+        }
         "Unlock ($X)" => "Sblocca ($X)",
         "Unlock (M999)" => "Sblocca (M999)",
         "Stop" => "Arresta",

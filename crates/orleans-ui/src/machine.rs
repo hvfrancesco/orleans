@@ -12,22 +12,48 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use orleans_driver::net::{parse_endpoint, TcpTransport};
-use orleans_driver::{Controller, DriverError, GrblClient, Protocol, Transport};
+use orleans_driver::{Controller, DriverError, GrblClient, MarlinClient, Protocol, Transport};
+
+/// How the GUI should choose the controller protocol.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DriverChoice {
+    /// Probe GRBL first, then Marlin.
+    #[default]
+    Auto,
+    /// Force the GRBL / GrblHAL / FluidNC client.
+    Grbl,
+    /// Force the Marlin client.
+    Marlin,
+}
 
 /// Requests from the UI to the worker.
 pub enum Command {
-    Connect(String),
+    Connect {
+        endpoint: String,
+        driver: DriverChoice,
+    },
     Disconnect,
     Home,
     Unlock,
     Stop,
     Run(String),
-    Jog { dx: f64, dy: f64, feed: f64 },
-    JogTo { x: f64, y: f64, feed: f64 },
+    Jog {
+        dx: f64,
+        dy: f64,
+        feed: f64,
+    },
+    JogTo {
+        x: f64,
+        y: f64,
+        feed: f64,
+    },
     JogCancel,
     SetOrigin,
     SaveOrigin,
-    SetSetting { key: u32, value: String },
+    SetSetting {
+        key: u32,
+        value: String,
+    },
     RefreshSettings,
 }
 
@@ -90,9 +116,20 @@ impl Machine {
         }
     }
 
+    #[cfg(test)]
     pub fn connect(&self, endpoint: &str) -> bool {
+        self.connect_with_driver(endpoint, DriverChoice::Auto)
+    }
+
+    /// Connect with an optional manual protocol override.
+    pub fn connect_with_driver(&self, endpoint: &str, driver: DriverChoice) -> bool {
         self.cancel.store(false, Ordering::Relaxed);
-        self.tx.send(Command::Connect(endpoint.to_owned())).is_ok()
+        self.tx
+            .send(Command::Connect {
+                endpoint: endpoint.to_owned(),
+                driver,
+            })
+            .is_ok()
     }
 
     pub fn disconnect(&self) -> bool {
@@ -181,6 +218,7 @@ fn worker(
 
     let mut client: Option<Controller<Box<dyn Transport>>> = None;
     let mut endpoint: Option<String> = None;
+    let mut driver = DriverChoice::Auto;
     let mut last_poll = Instant::now();
     let mut misses = 0u32;
     let mut warned = false;
@@ -196,8 +234,12 @@ fn worker(
                 if Instant::now() >= at {
                     reconnect_at = None;
                     if let Some(target) = endpoint.clone() {
-                        let result =
-                            connect(&target, Duration::from_secs(2), Duration::from_secs(1));
+                        let result = connect(
+                            &target,
+                            Duration::from_secs(2),
+                            Duration::from_secs(1),
+                            driver,
+                        );
                         if cancel.load(Ordering::Relaxed) {
                             endpoint = None;
                             reconnect_attempt = 0;
@@ -240,7 +282,10 @@ fn worker(
         }
 
         match commands.recv_timeout(Duration::from_millis(150)) {
-            Ok(Command::Connect(target)) => {
+            Ok(Command::Connect {
+                endpoint: target,
+                driver: requested_driver,
+            }) => {
                 client = None;
                 misses = 0;
                 warned = false;
@@ -248,8 +293,14 @@ fn worker(
                 reconnect_at = None;
                 reconnect_attempt = 0;
                 endpoint = Some(target.clone());
+                driver = requested_driver;
                 let _ = events.send(Event::Connecting(target.clone()));
-                let result = connect(&target, Duration::from_secs(5), Duration::from_secs(2));
+                let result = connect(
+                    &target,
+                    Duration::from_secs(5),
+                    Duration::from_secs(2),
+                    driver,
+                );
                 if cancel.load(Ordering::Relaxed) {
                     endpoint = None;
                     let _ = events.send(Event::Disconnected(None));
@@ -530,19 +581,45 @@ fn connect(
     endpoint: &str,
     tcp_timeout: Duration,
     probe_timeout: Duration,
+    driver: DriverChoice,
 ) -> Result<Connected, String> {
     let (host, port) = parse_endpoint(endpoint)?;
     let transport = TcpTransport::connect(&host, port, tcp_timeout)
         .map_err(|err| format!("connecting to {host}:{port}: {err}"))?;
-    let detection = Controller::detect(
-        Box::new(transport) as Box<dyn Transport>,
-        probe_timeout,
-        probe_timeout,
-    )
-    .map_err(|err| format!("probing {host}:{port}: {err}"))?;
-    let status = detection.status;
-    let firmware = detection.firmware;
-    let mut controller = detection.controller;
+
+    let (mut controller, status, firmware) = match driver {
+        DriverChoice::Auto => {
+            let detection = Controller::detect(
+                Box::new(transport) as Box<dyn Transport>,
+                probe_timeout,
+                probe_timeout,
+            )
+            .map_err(|err| format!("probing {host}:{port}: {err}"))?;
+            (detection.controller, detection.status, detection.firmware)
+        }
+        DriverChoice::Grbl => {
+            let mut client = GrblClient::new(Box::new(transport) as Box<dyn Transport>);
+            let _ = client.wake();
+            // A forced driver is a recovery path: keep the connection even if
+            // the controller does not answer the status probe.
+            let status = client
+                .probe_status(probe_timeout)
+                .ok()
+                .and_then(|probe| probe.status);
+            (Controller::Grbl(client), status, None::<String>)
+        }
+        DriverChoice::Marlin => {
+            let mut client = MarlinClient::new(Box::new(transport) as Box<dyn Transport>);
+            let _ = client.wake();
+            let firmware = client
+                .probe_identity(probe_timeout)
+                .ok()
+                .and_then(|probe| probe.firmware);
+            let status = client.status_line().ok().flatten();
+            (Controller::Marlin(client), status, firmware)
+        }
+    };
+
     let settings = match &mut controller {
         Controller::Grbl(client) => read_settings(client),
         Controller::Marlin(_) => marlin_settings(firmware),
@@ -884,7 +961,7 @@ mod tests {
 
     /// A tiny Marlin-over-TCP controller. It ignores GRBL `?` queries and
     /// answers the commands used by the Marlin driver.
-    fn spawn_marlin_controller() -> (u16, Receiver<String>, thread::JoinHandle<()>) {
+    fn spawn_marlin_controller(identity: bool) -> (u16, Receiver<String>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let (tx, rx) = mpsc::channel();
@@ -910,7 +987,8 @@ mod tests {
                                     }
                                     let _ = tx.send(command.clone());
                                     let response = match command.as_str() {
-                                        "M115" => "FIRMWARE_NAME:Marlin 2.1.2 (test) PROTOCOL_VERSION:1.0 EXTRUDER_COUNT:1\nCap:SERIAL_XON_XOFF:0\nok\n",
+                                        "M115" if identity => "FIRMWARE_NAME:Marlin 2.1.2 (test) PROTOCOL_VERSION:1.0 EXTRUDER_COUNT:1\nCap:SERIAL_XON_XOFF:0\nok\n",
+                                        "M115" => "ok\n",
                                         "M114" => "X:1.000 Y:2.000 Z:0.000 E:0.000 Count X:0 Y:0 Z:0\nok\n",
                                         "M105" => "T:0.00 /0.00 B:0.00 /0.00\nok\n",
                                         "M112" => "Error:Printer halted. kill() called!\n",
@@ -1002,7 +1080,7 @@ mod tests {
 
     #[test]
     fn worker_detects_marlin_and_uses_marlin_commands() {
-        let (port, commands, server) = spawn_marlin_controller();
+        let (port, commands, server) = spawn_marlin_controller(true);
         let machine = Machine::spawn();
         assert!(machine.connect(&format!("tcp://127.0.0.1:{port}")));
 
@@ -1055,6 +1133,40 @@ mod tests {
             }
         }
         assert_eq!(jog, vec!["G91", "G0 X1.000 Y0.000 F500", "G90"]);
+
+        drop(machine);
+        let _ = server.join();
+    }
+
+    #[test]
+    fn worker_forced_marlin_connects_without_m115_identity() {
+        let (port, _commands, server) = spawn_marlin_controller(false);
+        let machine = Machine::spawn();
+        assert!(
+            machine.connect_with_driver(&format!("tcp://127.0.0.1:{port}"), DriverChoice::Marlin)
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut settings = None;
+        let mut status = None;
+        while Instant::now() < deadline && (settings.is_none() || status.is_none()) {
+            while let Some(event) = machine.try_recv() {
+                match event {
+                    Event::Settings(value) => settings = Some(value),
+                    Event::Status(line) => status = Some(line),
+                    Event::Disconnected(reason) => panic!("disconnected: {reason:?}"),
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let settings = settings.expect("settings");
+        assert_eq!(settings.protocol, Protocol::Marlin);
+        assert!(settings.firmware.is_none());
+        assert_eq!(settings.max_s, Some(255));
+        assert!(status
+            .as_deref()
+            .is_some_and(|line| line.contains("WPos:1.000,2.000,0.000")));
 
         drop(machine);
         let _ = server.join();

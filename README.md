@@ -7,7 +7,7 @@ vector designs and raster images, plans toolpaths and streams G-code to
 GRBL-compatible and Marlin laser controllers over USB or WiFi. Everything is
 implemented from public specifications: SVG, PDF, DXF, G-code, GRBL and Marlin.
 
-> **Status:** `1.1.0`. The editor and GRBL workflow are hardware-validated.
+> **Status:** `1.1.1`. The editor and GRBL workflow are hardware-validated.
 > Marlin laser support is covered by simulator and TCP integration tests but
 > awaits validation on a physical Marlin machine. See [CHANGELOG.md](CHANGELOG.md)
 > and [docs/roadmap.md](docs/roadmap.md).
@@ -112,7 +112,7 @@ Release packaging is reproducible:
 ./scripts/package-appimage.sh  # Linux AppImage + SHA-256
 ```
 
-The suite currently contains **185 tests**, including the full SVG → toolpath →
+The suite currently contains **186 tests**, including the full SVG → toolpath →
 G-code → TCP controller integration run and a Marlin TCP worker test.
 
 The GUI is behind the default `gui` feature. Build with `--no-default-features`

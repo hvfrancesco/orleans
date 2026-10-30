@@ -25,7 +25,9 @@ use orleans_toolpath::{nesting_depths, plan, PlanOptions};
 use crate::history::{self, JobHistory, JobKind, JobOutcome, JobRecord};
 use crate::i18n::{self, Language};
 use crate::icons::{self, Icon};
-use crate::machine::{Event as MachineEvent, Machine, Settings, Status as MachineStatus};
+use crate::machine::{
+    DriverChoice, Event as MachineEvent, Machine, Settings, Status as MachineStatus,
+};
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
 use crate::project::{GroupMember, GroupSettings, ProjectFile, FORMAT};
@@ -697,6 +699,7 @@ pub struct OrleansApp {
     show_bed: bool,
 
     endpoint: String,
+    driver: DriverChoice,
     machine: Machine,
     link: LinkState,
     machine_status: Option<MachineStatus>,
@@ -797,6 +800,7 @@ impl OrleansApp {
             show_travel: false,
             show_bed: true,
             endpoint: endpoint.unwrap_or_default(),
+            driver: DriverChoice::Auto,
             machine: Machine::spawn(),
             link: LinkState::Disconnected,
             machine_status: None,
@@ -1666,6 +1670,7 @@ impl OrleansApp {
                     self.reconnect_attempt = 0;
                     self.machine_status = None;
                     self.settings = None;
+                    self.settings = None;
                     self.set_status(format!("connecting to {endpoint}…"), false);
                 }
                 MachineEvent::Connected(endpoint) => {
@@ -1826,7 +1831,7 @@ impl OrleansApp {
             return;
         }
         self.endpoint = endpoint.clone();
-        if self.machine.connect(&endpoint) {
+        if self.machine.connect_with_driver(&endpoint, self.driver) {
             self.link = LinkState::Connecting;
             self.reconnect_attempt = 0;
             self.machine_status = None;
@@ -4596,6 +4601,28 @@ impl OrleansApp {
                         .desired_width(f32::INFINITY),
                 );
                 let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                ui.label(tr!("Driver"));
+                ui.add_enabled_ui(self.link == LinkState::Disconnected, |ui| {
+                    let selected = match self.driver {
+                        DriverChoice::Auto => tr!("Auto"),
+                        DriverChoice::Grbl => "GRBL",
+                        DriverChoice::Marlin => "Marlin",
+                    };
+                    egui::ComboBox::from_id_salt("machine-driver")
+                        .selected_text(selected)
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.driver, DriverChoice::Auto, tr!("Auto"));
+                            ui.selectable_value(&mut self.driver, DriverChoice::Grbl, "GRBL");
+                            ui.selectable_value(&mut self.driver, DriverChoice::Marlin, "Marlin");
+                        });
+                })
+                .response
+                .on_hover_text(tr!(
+                    "Auto-detect the firmware, or force GRBL/Marlin if detection fails."
+                ));
+                ui.add_space(4.0);
 
                 ui.horizontal(|ui| match self.link {
                     LinkState::Disconnected => {

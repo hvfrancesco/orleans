@@ -368,5 +368,8 @@
   "Emergency stop (M112); switches the laser off. Unlock (M999) restarts.": "急停 (M112)；关闭激光。解锁 (M999) 可重启。",
   "Marlin configuration is defined in the firmware.": "Marlin 配置由固件定义。",
   "Marlin does not persist a work zero; use Set zero (G92).": "Marlin 不会保存工件零点；请使用设置零点 (G92)。",
-  "Pause is not available on Marlin; use Stop.": "Marlin 不支持暂停；请使用停止。"
+  "Pause is not available on Marlin; use Stop.": "Marlin 不支持暂停；请使用停止。",
+  "Driver": "驱动",
+  "Auto": "自动",
+  "Auto-detect the firmware, or force GRBL/Marlin if detection fails.": "自动检测固件，或在检测失败时强制使用 GRBL/Marlin。"
 }

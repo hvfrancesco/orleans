@@ -368,5 +368,8 @@
   "Emergency stop (M112); switches the laser off. Unlock (M999) restarts.": "Arrêt d’urgence (M112) ; éteint le laser. Déverrouiller (M999) redémarre.",
   "Marlin configuration is defined in the firmware.": "La configuration Marlin est définie dans le firmware.",
   "Marlin does not persist a work zero; use Set zero (G92).": "Marlin ne conserve pas un zéro de travail ; utilisez Définir zéro (G92).",
-  "Pause is not available on Marlin; use Stop.": "La pause n’est pas disponible sur Marlin ; utilisez Arrêter."
+  "Pause is not available on Marlin; use Stop.": "La pause n’est pas disponible sur Marlin ; utilisez Arrêter.",
+  "Driver": "Pilote",
+  "Auto": "Auto",
+  "Auto-detect the firmware, or force GRBL/Marlin if detection fails.": "Détecter automatiquement le firmware ou forcer GRBL/Marlin si la détection échoue."
 }

@@ -34,6 +34,8 @@ It is a living plan, not a compatibility promise.
 - [x] Add a Marlin laser driver (shipped in `1.1.0`): auto-detection, `M114`/`M105` status,
       `M3`/`M5` streaming, `M400` drain, `G28` homing, `G92` origin,
       `M999` unlock and `M112` stop, with a Marlin simulator and TCP test.
+- [x] Add a GUI **Auto / GRBL / Marlin** driver override as a detection
+      fallback (`1.1.1`).
 - [ ] Validate the Marlin driver on physical hardware (stop/recovery,
       PWM range, homing and long-job behaviour).
 - [ ] Add Ruida over UDP.
