@@ -11,20 +11,21 @@ mod i18n;
 mod icons;
 mod machine;
 mod nodes;
+mod preflight;
 mod preview;
 mod profiles;
 mod project;
 mod viewport;
 
 pub use app::OrleansApp;
-pub use machine::Status as MachineStatus;
+pub use machine::{Connection, DriverChoice, LinkKind, Status as MachineStatus};
 pub use preview::{LayerPreview, Preview, PreviewContour, ShapePreview};
 pub use viewport::Viewport;
 
 use std::path::PathBuf;
 
 /// Open the editor, optionally loading `initial` at startup.
-pub fn run(initial: Option<PathBuf>, endpoint: Option<String>) -> anyhow::Result<()> {
+pub fn run(initial: Option<PathBuf>, connection: Option<Connection>) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
@@ -36,7 +37,7 @@ pub fn run(initial: Option<PathBuf>, endpoint: Option<String>) -> anyhow::Result
     eframe::run_native(
         "orleans",
         options,
-        Box::new(move |cc| Ok(Box::new(OrleansApp::new(cc, initial, endpoint)))),
+        Box::new(move |cc| Ok(Box::new(OrleansApp::new(cc, initial, connection)))),
     )
     .map_err(|err| anyhow::anyhow!("could not start the GUI: {err}"))
 }

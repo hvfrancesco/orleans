@@ -37,12 +37,14 @@ It is a living plan, not a compatibility promise.
 - [x] Add a GUI **Auto / GRBL / Marlin** driver override as a detection
       fallback (`1.1.1`).
 - [x] Add GUI USB serial connections and saved machine profiles (`1.2.0`).
+- [x] Expand machine profiles with work area, job defaults, framing setup and
+      safety expectations, and add send/frame preflight checks.
+- [x] Allow `orleans gui` to prefill TCP or serial connections.
 - [ ] Validate the Marlin driver on physical hardware (stop/recovery,
       PWM range, homing and long-job behaviour).
 - [ ] Add Ruida over UDP.
 - Evaluate TopWisdom and galvo/fiber controllers.
 - Add rotary-axis setup and job planning.
-- Expand machine profiles beyond GRBL `$` settings.
 
 ### 2. Transport and connectivity
 
@@ -81,7 +83,6 @@ It is a living plan, not a compatibility promise.
 - Feed and power overrides during a job.
 - Per-job notes and richer history filters.
 - Job queueing and repeat-last-job workflow.
-- Configurable framing speed and margin.
 - Machine-specific safety checks and preflight warnings.
 
 ### 7. Interface and diagnostics

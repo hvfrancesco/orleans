@@ -239,9 +239,21 @@ be used for Stop and Unlock even when status is missing, but normal jogging and
 sending need a readable status.
 
 **Machine profiles** save the connection type, address, baud rate, driver
-preference and max S together. Name a profile, press **Save**, and use
-**Apply** while disconnected to restore it. Profiles are stored in
-`~/.config/orleans/machines.json` (or `$XDG_CONFIG_HOME/orleans/machines.json`).
+preference and machine setup together. Use **New profile…** or **Edit** to
+open the profile editor, and **Apply** while disconnected to restore a profile.
+The active profile is marked with `*` and is restored on the next start.
+
+The profile editor stores:
+
+- work area width and height
+- max S and dynamic-power preference
+- default speed and power for imported geometry and new layers
+- framing speed and margin
+- whether homing and soft limits are expected
+- free-form notes
+
+Profiles are stored in `~/.config/orleans/machines.json` (or
+`$XDG_CONFIG_HOME/orleans/machines.json`).
 
 For GRBL it offers **Home ($H)**, **Unlock ($X)** and **Stop** (feed hold + soft
 reset). For Marlin it offers **Home (G28)**, **Unlock (M999)** and **Stop**
@@ -267,8 +279,9 @@ The **Settings…** dialog edits laser mode `$32`, max S `$30`, homing `$22` and
 the raw `$$` list. **Apply** writes changed settings to EEPROM. Editing is
 blocked while cutting or homing.
 
-The bed/travel area from `$130`/`$131` is drawn on the canvas, offset by `WCO`
-when the controller reports it, and included in **Fit**. Toggle it with **Bed**.
+The bed/travel area is drawn on the canvas and included in **Fit**. A profile
+work area takes precedence; otherwise GRBL `$130`/`$131` is used and offset by
+`WCO` when reported. Toggle the overlay with **Bed**.
 
 If GRBL does not report `WCO`, the bed rectangle assumes work zero coincides
 with machine zero.
@@ -276,7 +289,24 @@ with machine zero.
 Marlin does not expose GRBL `$` settings. The GUI uses a conservative Marlin
 profile instead: `Max S` defaults to `255`, homing is enabled, pause is
 disabled, and the settings dialog reports that configuration comes from the
-firmware. The bed rectangle is only available from GRBL `$130`/`$131`.
+firmware. Marlin's work area and framing defaults come from the machine profile;
+GRBL-style `$130`/`$131` travel values are not available.
+
+## Preflight
+
+Before **Send**, the confirmation dialog lists preflight errors and warnings.
+Errors block sending; warnings are informational. Checks include:
+
+- controller idle and laser off
+- laser mode enabled
+- design bounds inside the profile or GRBL work area
+- serial port selected for a serial connection
+- valid layer speed and power values
+- profile homing/soft-limit expectations versus the controller settings
+
+**Frame** runs the same bounds and safety checks using the expanded framing
+bounds, including the profile margin. An unknown work area is a warning rather
+than an error, so a machine can still be used before its profile is configured.
 
 ## Jog and work zero
 
@@ -297,8 +327,9 @@ The position readout shows `WPos` when the controller reports it, otherwise
 
 ## Framing, sending and history
 
-**Frame** traces the job bounds at 3000 mm/min with the laser off so placement
-can be checked before cutting. It uses the design bounds with no margin setting.
+**Frame** traces the job bounds with the laser off so placement can be checked
+before cutting. The profile sets the framing speed and margin; the preflight
+checks the expanded bounds against the work area.
 
 **Send to laser** streams the current job with a progress bar, Pause/Resume and a
 per-job Stop button. Pause uses feed hold and Resume uses cycle start. Sending is

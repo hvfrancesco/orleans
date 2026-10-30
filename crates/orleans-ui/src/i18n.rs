@@ -232,6 +232,46 @@ fn italian(text: &str) -> Option<&'static str> {
         "No saved profiles." => "Nessun profilo salvato.",
         "Profile name" => "Nome profilo",
         "Save" => "Salva",
+        "Edit" => "Modifica",
+        "Height" => "Altezza",
+        "Machine profile" => "Profilo macchina",
+        "Machine setup" => "Configurazione macchina",
+        "New profile…" => "Nuovo profilo…",
+        "Set work area" => "Imposta area di lavoro",
+        "Work area" => "Area di lavoro",
+        "Default speed" => "Velocità predefinita",
+        "Default power" => "Potenza predefinita",
+        "Framing speed" => "Velocità inquadratura",
+        "Framing margin" => "Margine inquadratura",
+        "Expect homing" => "Richiedi home",
+        "Expect soft limits" => "Richiedi limiti software",
+        "Notes" => "Note",
+        "Fix the errors above before sending." => "Correggi gli errori sopra prima di inviare.",
+        "no layers are set to Cut" => "nessun livello è impostato su Taglia",
+        "the job has no cuts" => "il lavoro non ha tagli",
+        "the controller is not idle or the laser is on" => {
+            "il controller non è inattivo o il laser è acceso"
+        }
+        "the laser is on; stop before sending" => "il laser è acceso; arresta prima di inviare",
+        "laser mode is off ($32=0)" => "la modalità laser è disattivata ($32=0)",
+        "machine work area is unknown; bounds were not checked" => {
+            "l'area di lavoro della macchina è sconosciuta; i limiti non sono stati verificati"
+        }
+        "the design extends outside the machine work area" => {
+            "il disegno esce dall'area di lavoro della macchina"
+        }
+        "select a serial port before connecting" => {
+            "seleziona una porta seriale prima di connetterti"
+        }
+        "a layer has an invalid speed or power setting" => {
+            "un livello ha una velocità o potenza non valida"
+        }
+        "the profile expects homing, but the controller reports $22=0" => {
+            "il profilo richiede l'home, ma il controller riporta $22=0"
+        }
+        "the profile expects soft limits, but the controller reports $20=0" => {
+            "il profilo richiede i limiti software, ma il controller riporta $20=0"
+        }
         "Unlock ($X)" => "Sblocca ($X)",
         "Unlock (M999)" => "Sblocca (M999)",
         "Stop" => "Arresta",

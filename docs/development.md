@@ -96,9 +96,9 @@ re-importing or matching source indices. See
   [roadmap.md](roadmap.md).
 - Pause is restricted to GRBL M4 jobs with `$32=1`; M3 jobs and all Marlin jobs
   can only be stopped.
-- Framing uses a fixed 3000 mm/min and the design bounds, with no margin setting.
-- The bed rectangle uses `$130`/`$131`; when GRBL does not report `WCO`, orleans
-  assumes work zero coincides with machine zero.
+- The bed rectangle comes from the active machine profile when set, otherwise
+  from GRBL `$130`/`$131`. When GRBL does not report `WCO`, orleans assumes work
+  zero coincides with machine zero.
 - **Set zero (G92)** is temporary: a soft reset, Stop or controller reconnect
   after a reset clears it. **Save zero (G54)** writes `G10 L20 P1`; whether the
   offset survives a reset depends on the controller. Marlin supports only the

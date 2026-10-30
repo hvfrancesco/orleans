@@ -9,6 +9,18 @@ All notable changes to orleans are recorded here.
 - Use the Phosphor `unite-square`, `subtract-square` and `intersect-square`
   icons for the boolean operation buttons.
 
+### Machine profiles and safety
+
+- Expanded machine profiles with work area, dynamic-power preference, default
+  speed/power, framing speed/margin, homing/soft-limit expectations and notes.
+- Restore the last active profile at startup.
+- Added a send/frame preflight with errors for unsafe controller state, laser
+  mode off, outside-work-area bounds, missing serial ports and invalid layer
+  settings. Profile/controller homing and soft-limit mismatches are warnings.
+- `orleans gui` now accepts `--port`, `--baud` and `--driver` to prefill a TCP
+  or serial connection.
+- 198 automated tests, Clippy and formatting checks pass.
+
 ## [1.2.0] - 2026-10-30
 
 ### Machine connections

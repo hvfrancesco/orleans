@@ -71,7 +71,6 @@ impl Connection {
         }
     }
 
-    #[cfg(test)]
     pub fn serial(port: impl Into<String>, baud: u32, driver: DriverChoice) -> Self {
         Self {
             kind: LinkKind::Serial,
@@ -726,6 +725,8 @@ pub struct Settings {
     pub max_s: Option<u32>,
     /// `$22=1`: homing enabled.
     pub homing: Option<bool>,
+    /// `$20=1`: soft limits enabled.
+    pub soft_limits: Option<bool>,
     /// `$130`/`$131`: X/Y maximum travel, used as the machine bed size.
     pub bed: Option<[f64; 2]>,
     /// Every `$n=value` returned by `$$`, for the raw list.
@@ -740,6 +741,7 @@ impl Default for Settings {
             laser_mode: None,
             max_s: None,
             homing: None,
+            soft_limits: None,
             bed: None,
             all: BTreeMap::new(),
         }
@@ -774,6 +776,7 @@ fn marlin_settings(firmware: Option<String>) -> Settings {
         laser_mode: Some(true),
         max_s: Some(Protocol::Marlin.default_max_s()),
         homing: Some(true),
+        soft_limits: None,
         bed: None,
         all: BTreeMap::new(),
     }
@@ -794,6 +797,8 @@ fn parse_setting(line: &str, settings: &mut Settings) {
         settings.max_s = value.parse().ok();
     } else if let Some(value) = line.strip_prefix("$22=") {
         settings.homing = value.parse::<u8>().ok().map(|value| value != 0);
+    } else if let Some(value) = line.strip_prefix("$20=") {
+        settings.soft_limits = value.parse::<u8>().ok().map(|value| value != 0);
     }
     settings.bed = match (
         settings

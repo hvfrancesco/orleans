@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 use kurbo::{Affine, Point};
 use orleans_core::{
-    Document, Job, Layer, LayerMode, ManualTabs, Op, RasterCrop, RasterImage, RasterMode, Shape,
+    CutParams, Document, Job, Layer, LayerMode, ManualTabs, Op, RasterCrop, RasterImage,
+    RasterMode, Shape,
 };
 use orleans_driver::gcode::{self, GcodeDialect, GcodeOptions, LaserMode};
 use orleans_driver::Protocol;
@@ -30,8 +31,9 @@ use crate::machine::{
     Status as MachineStatus,
 };
 use crate::nodes::{self, NodeKind, NodeRef};
+use crate::preflight::{self, Issue, Severity};
 use crate::preview::Preview;
-use crate::profiles::{self, MachineProfiles};
+use crate::profiles::{self, MachineProfile, MachineProfiles, MachineSetup};
 use crate::project::{GroupMember, GroupSettings, ProjectFile, FORMAT};
 use crate::viewport::Viewport;
 
@@ -640,6 +642,14 @@ enum Action {
     DeleteObjects,
 }
 
+#[derive(Clone)]
+struct ProfileEditor {
+    original_name: Option<String>,
+    name: String,
+    max_s: u32,
+    setup: MachineSetup,
+}
+
 pub struct OrleansApp {
     doc: Document,
     preview: Preview,
@@ -704,7 +714,9 @@ pub struct OrleansApp {
     serial_ports: Vec<String>,
     profiles: MachineProfiles,
     profiles_path: PathBuf,
-    profile_name: String,
+    active_profile: Option<String>,
+    machine_setup: MachineSetup,
+    profile_editor: Option<ProfileEditor>,
     machine: Machine,
     link: LinkState,
     machine_status: Option<MachineStatus>,
@@ -741,12 +753,38 @@ impl OrleansApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         initial: Option<PathBuf>,
-        endpoint: Option<String>,
+        startup: Option<Connection>,
     ) -> Self {
         let history_path = history::default_path();
         let job_history = JobHistory::load(&history_path);
         let profiles_path = profiles::default_path();
         let profiles = MachineProfiles::load(&profiles_path);
+        let loaded_profile = if startup.is_none() {
+            profiles.active().cloned()
+        } else {
+            None
+        };
+        let (connection, machine_setup, initial_max_s, active_profile) =
+            match (startup, loaded_profile) {
+                (Some(connection), _) => (connection, MachineSetup::default(), 1000, None),
+                (None, Some(profile)) => (
+                    profile.connection,
+                    profile.setup,
+                    profile.max_s,
+                    Some(profile.name),
+                ),
+                (None, None) => (
+                    Connection::tcp("", DriverChoice::Auto),
+                    MachineSetup::default(),
+                    1000,
+                    None,
+                ),
+            };
+        let initial_laser_mode = if machine_setup.dynamic_power {
+            LaserMode::M4
+        } else {
+            LaserMode::M3
+        };
         let language = i18n::load_language().unwrap_or_else(Language::from_environment);
         i18n::set_language(language);
         let mut app = Self {
@@ -795,7 +833,8 @@ impl OrleansApp {
             // The GUI defaults to velocity-scaled power: it is the safer
             // choice for pausing and is what most diode controllers expect.
             gcode_opts: GcodeOptions {
-                laser_mode: LaserMode::M4,
+                laser_mode: initial_laser_mode,
+                max_s: initial_max_s,
                 ..GcodeOptions::default()
             },
             status: Status::ok("Open an SVG, or drop one onto the window."),
@@ -806,11 +845,13 @@ impl OrleansApp {
             show_grid: true,
             show_travel: false,
             show_bed: true,
-            connection: Connection::tcp(endpoint.unwrap_or_default(), DriverChoice::Auto),
+            connection,
             serial_ports: Vec::new(),
             profiles,
             profiles_path,
-            profile_name: String::new(),
+            active_profile,
+            machine_setup,
+            profile_editor: None,
             machine: Machine::spawn(),
             link: LinkState::Disconnected,
             machine_status: None,
@@ -834,7 +875,7 @@ impl OrleansApp {
             project_path: None,
             settings_open: false,
             setting_laser: true,
-            setting_max_s: 1000,
+            setting_max_s: initial_max_s,
             setting_homing: false,
             job_history,
             history_path,
@@ -850,6 +891,17 @@ impl OrleansApp {
             app.open_path(path);
         }
         app
+    }
+
+    fn import_options(&self) -> ImportOptions {
+        ImportOptions {
+            default_cut: CutParams::new(
+                self.machine_setup.default_speed.max(1.0),
+                self.machine_setup.default_power.clamp(0.0, 100.0),
+                1,
+            ),
+            ..ImportOptions::default()
+        }
     }
 
     fn apply_theme(&self, ctx: &egui::Context) {
@@ -876,7 +928,7 @@ impl OrleansApp {
                 return;
             }
         };
-        match import_svg(&bytes, &ImportOptions::default()) {
+        match import_svg(&bytes, &self.import_options()) {
             Ok(doc) if doc.is_empty() => {
                 self.status = Status::error(format!("{} contains no paths", path.display()));
             }
@@ -928,7 +980,7 @@ impl OrleansApp {
                 return;
             }
         };
-        match import_dxf(&bytes, &ImportOptions::default()) {
+        match import_dxf(&bytes, &self.import_options()) {
             Ok(doc) if doc.is_empty() => {
                 self.status =
                     Status::error(format!("{} contains no supported entities", path.display()));
@@ -995,7 +1047,7 @@ impl OrleansApp {
     fn load_pdf_bytes(&mut self, path: PathBuf, bytes: &[u8], page: usize) {
         let opt = ImportOptions {
             pdf_page: page,
-            ..ImportOptions::default()
+            ..self.import_options()
         };
         match import_pdf(bytes, &opt) {
             Ok(doc) if doc.is_empty() => {
@@ -1043,7 +1095,7 @@ impl OrleansApp {
     fn import_pdf_bytes(&mut self, path: &Path, bytes: &[u8], page: usize) {
         let opt = ImportOptions {
             pdf_page: page,
-            ..ImportOptions::default()
+            ..self.import_options()
         };
         match import_pdf(bytes, &opt) {
             Ok(doc) if doc.is_empty() => {
@@ -1131,7 +1183,7 @@ impl OrleansApp {
             self.set_status("clipboard does not contain SVG objects", true);
             return;
         }
-        let mut imported = match import_svg(text.as_bytes(), &ImportOptions::default()) {
+        let mut imported = match import_svg(text.as_bytes(), &self.import_options()) {
             Ok(doc) if doc.is_empty() => {
                 self.set_status("clipboard SVG contains no paths; outline text first", true);
                 return;
@@ -1206,11 +1258,11 @@ impl OrleansApp {
         let result = if is_image_path(&path) {
             import_image(&bytes, DEFAULT_RASTER_DPI)
         } else if is_dxf_path(&path) {
-            import_dxf(&bytes, &ImportOptions::default())
+            import_dxf(&bytes, &self.import_options())
         } else if is_pdf_path(&path) {
-            import_pdf(&bytes, &ImportOptions::default())
+            import_pdf(&bytes, &self.import_options())
         } else {
-            import_svg(&bytes, &ImportOptions::default())
+            import_svg(&bytes, &self.import_options())
         };
         let doc = match result {
             Ok(doc) if doc.is_empty() => {
@@ -1889,6 +1941,15 @@ impl OrleansApp {
             self.set_status("nothing to send: the job has no cuts", true);
             return;
         }
+        let issues = self.preflight_issues(self.doc.output_bounds());
+        if let Some(error) = issues
+            .iter()
+            .copied()
+            .find(|issue| issue.severity() == Severity::Error)
+        {
+            self.set_status(error.text(), true);
+            return;
+        }
         self.job_uses_m4 = self.gcode_opts.laser_mode == LaserMode::M4;
         let program = gcode::write(&self.job, &self.machine_gcode_options());
         if self.machine.run(&program) {
@@ -1916,7 +1977,21 @@ impl OrleansApp {
             self.set_status("nothing to frame: no layers are set to Cut", true);
             return;
         };
-        let program = frame_program(bounds, FRAME_FEED, self.gcode_dialect());
+        let bounds = self.frame_bounds(bounds);
+        let issues = self.preflight_issues(Some(bounds));
+        if let Some(error) = issues
+            .iter()
+            .copied()
+            .find(|issue| issue.severity() == Severity::Error)
+        {
+            self.set_status(error.text(), true);
+            return;
+        }
+        let program = frame_program(
+            bounds,
+            self.machine_setup.framing_feed.max(1.0),
+            self.gcode_dialect(),
+        );
         if self.machine.run(&program) {
             self.begin_pending_job(JobKind::Frame);
             self.job_running = true;
@@ -1982,7 +2057,16 @@ impl OrleansApp {
         }
     }
 
+    fn effective_bed(&self) -> Option<[f64; 2]> {
+        self.machine_setup
+            .bed
+            .or_else(|| self.settings.as_ref().and_then(|settings| settings.bed))
+    }
+
     fn bed_rect(&self) -> Option<kurbo::Rect> {
+        if let Some([width, height]) = self.machine_setup.bed {
+            return Some(kurbo::Rect::new(0.0, 0.0, width, height));
+        }
         let [width, height] = self.settings.as_ref()?.bed?;
         let [ox, oy, _] = self
             .machine_status
@@ -1990,6 +2074,53 @@ impl OrleansApp {
             .and_then(|status| status.work_offset())
             .unwrap_or([0.0, 0.0, 0.0]);
         Some(kurbo::Rect::new(-ox, -oy, width - ox, height - oy))
+    }
+
+    fn frame_bounds(&self, bounds: kurbo::Rect) -> kurbo::Rect {
+        let margin = self.machine_setup.framing_margin.max(0.0);
+        kurbo::Rect::new(
+            bounds.x0 - margin,
+            bounds.y0 - margin,
+            bounds.x1 + margin,
+            bounds.y1 + margin,
+        )
+    }
+
+    fn preflight_issues(&self, bounds: Option<kurbo::Rect>) -> Vec<Issue> {
+        let settings = self.settings.as_ref();
+        let status = self.machine_status.as_ref();
+        let laser_off = status
+            .map(|status| status.spindle.unwrap_or(0) == 0)
+            .unwrap_or(false);
+        let controller_ready = status.map(|status| status.state == "Idle").unwrap_or(false);
+        preflight::check(&preflight::Input {
+            bounds,
+            bed: self.effective_bed(),
+            connection: self.connection.kind,
+            endpoint_empty: self.connection.endpoint.trim().is_empty(),
+            controller_ready,
+            laser_off,
+            laser_mode_off: settings.and_then(|settings| settings.laser_mode) == Some(false),
+            cut_layers: self
+                .doc
+                .layers
+                .iter()
+                .filter(|layer| layer.output && !layer.is_empty())
+                .count(),
+            cuts: self.job.cuts().count(),
+            invalid_layer_settings: self.doc.layers.iter().filter(|layer| layer.output).any(
+                |layer| {
+                    !layer.cut.speed.is_finite()
+                        || layer.cut.speed <= 0.0
+                        || !layer.cut.power.is_finite()
+                        || !(0.0..=100.0).contains(&layer.cut.power)
+                },
+            ),
+            profile_homing: self.machine_setup.homing,
+            profile_soft_limits: self.machine_setup.soft_limits,
+            controller_homing: settings.and_then(|settings| settings.homing),
+            controller_soft_limits: settings.and_then(|settings| settings.soft_limits),
+        })
     }
 
     fn hit_test(&self, p: Point) -> Option<ShapeRef> {
@@ -2261,7 +2392,16 @@ impl OrleansApp {
             .map_or(0, |index| index + 1);
         let name = format!("Layer {}", self.doc.layers.len() + 1);
         let color = NEW_LAYER_COLORS[self.doc.layers.len() % NEW_LAYER_COLORS.len()];
-        let layer = Layer::new(index, name, color, orleans_core::CutParams::default());
+        let layer = Layer::new(
+            index,
+            name,
+            color,
+            CutParams::new(
+                self.machine_setup.default_speed.max(1.0),
+                self.machine_setup.default_power.clamp(0.0, 100.0),
+                1,
+            ),
+        );
         self.doc.layers.push(layer);
         self.selected_layer = Some(index);
         self.tab_edit_layer = None;
@@ -4464,6 +4604,215 @@ impl OrleansApp {
                 == Some(true)
     }
 
+    fn save_profiles(&mut self) -> bool {
+        match self.profiles.save(&self.profiles_path) {
+            Ok(()) => true,
+            Err(err) => {
+                self.set_status(format!("saving machine profiles: {err}"), true);
+                false
+            }
+        }
+    }
+
+    fn apply_profile(&mut self, profile: &MachineProfile) {
+        self.connection = profile.connection.clone();
+        self.machine_setup = profile.setup.clone();
+        self.gcode_opts.max_s = profile.max_s;
+        self.gcode_opts.laser_mode = if profile.setup.dynamic_power {
+            LaserMode::M4
+        } else {
+            LaserMode::M3
+        };
+        self.active_profile = Some(profile.name.clone());
+        self.profiles.set_last(&profile.name);
+        self.clamp_max_s_for_protocol();
+        if profile.setup.bed.is_some() && self.show_bed {
+            self.fit_pending = true;
+        }
+        if self.save_profiles() {
+            self.set_status(format!("profile: {}", profile.name), false);
+        }
+    }
+
+    fn open_profile_editor(&mut self, profile: Option<MachineProfile>) {
+        let editor = match profile {
+            Some(profile) => ProfileEditor {
+                original_name: Some(profile.name.clone()),
+                name: profile.name,
+                max_s: profile.max_s,
+                setup: profile.setup,
+            },
+            None => ProfileEditor {
+                original_name: None,
+                name: String::new(),
+                max_s: self.gcode_opts.max_s,
+                setup: self.machine_setup.clone(),
+            },
+        };
+        self.profile_editor = Some(editor);
+    }
+
+    fn save_profile_editor(&mut self, editor: ProfileEditor) {
+        let name = editor.name.trim().to_owned();
+        if name.is_empty() {
+            self.set_status("enter a profile name", true);
+            self.profile_editor = Some(editor);
+            return;
+        }
+        if let Some(original) = editor.original_name.as_deref() {
+            if !original.eq_ignore_ascii_case(&name) {
+                if let Some(index) = self
+                    .profiles
+                    .profiles
+                    .iter()
+                    .position(|profile| profile.name.eq_ignore_ascii_case(original))
+                {
+                    self.profiles.remove(index);
+                }
+            }
+        }
+        let profile =
+            MachineProfile::new(name, self.connection.clone(), editor.max_s, editor.setup);
+        self.profiles.upsert(profile.clone());
+        self.profiles.set_last(&profile.name);
+        self.active_profile = Some(profile.name.clone());
+        self.machine_setup = profile.setup;
+        self.gcode_opts.max_s = profile.max_s;
+        self.gcode_opts.laser_mode = if self.machine_setup.dynamic_power {
+            LaserMode::M4
+        } else {
+            LaserMode::M3
+        };
+        self.clamp_max_s_for_protocol();
+        if self.machine_setup.bed.is_some() && self.show_bed {
+            self.fit_pending = true;
+        }
+        self.profile_editor = None;
+        if self.save_profiles() {
+            self.set_status(format!("saved profile {}", profile.name), false);
+        }
+    }
+
+    fn profile_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut editor) = self.profile_editor.take() else {
+            return;
+        };
+        let mut close = false;
+        let mut save = false;
+        egui::Window::new(tr!("Machine profile"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(tr!("Profile name"));
+                ui.add(egui::TextEdit::singleline(&mut editor.name).desired_width(f32::INFINITY));
+                ui.add_space(4.0);
+                ui.separator();
+                ui.heading(tr!("Machine setup"));
+                ui.horizontal(|ui| {
+                    ui.label(tr!("Max S"));
+                    ui.add(
+                        egui::DragValue::new(&mut editor.max_s)
+                            .speed(10.0)
+                            .range(1..=100_000),
+                    );
+                });
+                let mut has_bed = editor.setup.bed.is_some();
+                ui.checkbox(&mut has_bed, tr!("Set work area"));
+                if has_bed {
+                    if editor.setup.bed.is_none() {
+                        editor.setup.bed = Some([300.0, 300.0]);
+                    }
+                    let [width, height] = editor.setup.bed.unwrap_or([300.0, 300.0]);
+                    let mut new_width = width;
+                    let mut new_height = height;
+                    ui.horizontal(|ui| {
+                        ui.label(tr!("Width"));
+                        ui.add(
+                            egui::DragValue::new(&mut new_width)
+                                .speed(1.0)
+                                .range(1.0..=10_000.0)
+                                .suffix(" mm"),
+                        );
+                        ui.label(tr!("Height"));
+                        ui.add(
+                            egui::DragValue::new(&mut new_height)
+                                .speed(1.0)
+                                .range(1.0..=10_000.0)
+                                .suffix(" mm"),
+                        );
+                    });
+                    editor.setup.bed = Some([new_width, new_height]);
+                } else {
+                    editor.setup.bed = None;
+                }
+                ui.checkbox(&mut editor.setup.dynamic_power, tr!("Dynamic power (M4)"));
+                ui.horizontal(|ui| {
+                    ui.label(tr!("Default speed"));
+                    ui.add(
+                        egui::DragValue::new(&mut editor.setup.default_speed)
+                            .speed(10.0)
+                            .range(1.0..=100_000.0)
+                            .suffix(" mm/min"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(tr!("Default power"));
+                    ui.add(
+                        egui::DragValue::new(&mut editor.setup.default_power)
+                            .speed(1.0)
+                            .range(0.0..=100.0)
+                            .suffix(" %"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(tr!("Framing speed"));
+                    ui.add(
+                        egui::DragValue::new(&mut editor.setup.framing_feed)
+                            .speed(10.0)
+                            .range(1.0..=100_000.0)
+                            .suffix(" mm/min"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(tr!("Framing margin"));
+                    ui.add(
+                        egui::DragValue::new(&mut editor.setup.framing_margin)
+                            .speed(0.5)
+                            .range(0.0..=100.0)
+                            .suffix(" mm"),
+                    );
+                });
+                let mut expect_homing = editor.setup.homing == Some(true);
+                let mut expect_soft_limits = editor.setup.soft_limits == Some(true);
+                ui.checkbox(&mut expect_homing, tr!("Expect homing"));
+                ui.checkbox(&mut expect_soft_limits, tr!("Expect soft limits"));
+                editor.setup.homing = expect_homing.then_some(true);
+                editor.setup.soft_limits = expect_soft_limits.then_some(true);
+                ui.label(tr!("Notes"));
+                ui.add(
+                    egui::TextEdit::multiline(&mut editor.setup.notes)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr!("Save")).clicked() {
+                        save = true;
+                    }
+                    if ui.button(tr!("Cancel")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if save {
+            self.save_profile_editor(editor);
+        } else if !close {
+            self.profile_editor = Some(editor);
+        }
+    }
+
     fn disconnect_machine(&mut self) {
         let _ = self.machine.disconnect();
         self.link = LinkState::Disconnected;
@@ -4753,7 +5102,9 @@ impl OrleansApp {
                 });
 
                 let mut load_profile = None;
+                let mut edit_profile = None;
                 let mut delete_profile = None;
+                let mut new_profile = false;
                 egui::CollapsingHeader::new(format!(
                     "{} ({})",
                     tr!("Machine profiles"),
@@ -4763,19 +5114,42 @@ impl OrleansApp {
                 .default_open(false)
                 .show(ui, |ui| {
                     if self.profiles.profiles.is_empty() {
-                        ui.label(
-                            RichText::new(tr!("No saved profiles.")).small().weak(),
-                        );
+                        ui.label(RichText::new(tr!("No saved profiles.")).small().weak());
                     }
                     for (index, profile) in self.profiles.profiles.iter().enumerate() {
+                        let active = self
+                            .active_profile
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(&profile.name));
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&profile.name).strong())
-                                .on_hover_text(profile.connection.label());
+                            ui.vertical(|ui| {
+                                let name = if active {
+                                    format!("{} *", profile.name)
+                                } else {
+                                    profile.name.clone()
+                                };
+                                let label = ui.label(RichText::new(name).strong());
+                                if !profile.setup.notes.is_empty() {
+                                    label.on_hover_text(&profile.setup.notes);
+                                }
+                                ui.label(
+                                    RichText::new(profile.connection.label()).small().weak(),
+                                );
+                            });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui.small_button(tr!("Delete")).clicked() {
                                         delete_profile = Some(index);
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            disconnected,
+                                            egui::Button::new(tr!("Edit")).small(),
+                                        )
+                                        .clicked()
+                                    {
+                                        edit_profile = Some(index);
                                     }
                                     if ui
                                         .add_enabled(
@@ -4791,62 +5165,53 @@ impl OrleansApp {
                         });
                     }
                     ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.profile_name)
-                                .hint_text(tr!("Profile name"))
-                                .desired_width(150.0),
-                        );
-                        if ui.button(tr!("Save")).clicked() {
-                            let name = self.profile_name.trim().to_owned();
-                            if name.is_empty() {
-                                self.set_status("enter a profile name", true);
-                            } else {
-                                self.profiles.upsert(
-                                    &name,
-                                    self.connection.clone(),
-                                    self.gcode_opts.max_s,
-                                );
-                                match self.profiles.save(&self.profiles_path) {
-                                    Ok(()) => {
-                                        self.profile_name = name.clone();
-                                        self.set_status(format!("saved profile {name}"), false);
-                                    }
-                                    Err(err) => {
-                                        self.set_status(
-                                            format!("saving machine profiles: {err}"),
-                                            true,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    if ui
+                        .add_enabled(
+                            disconnected,
+                            egui::Button::new(tr!("New profile…")),
+                        )
+                        .clicked()
+                    {
+                        new_profile = true;
+                    }
                 });
 
                 if let Some(index) = load_profile {
                     if let Some(profile) = self.profiles.profiles.get(index).cloned() {
-                        self.connection = profile.connection;
-                        self.gcode_opts.max_s = profile.max_s;
-                        self.clamp_max_s_for_protocol();
-                        self.profile_name = profile.name.clone();
-                        self.set_status(format!("profile: {}", profile.name), false);
+                        self.apply_profile(&profile);
+                    }
+                }
+                if let Some(index) = edit_profile {
+                    if let Some(profile) = self.profiles.profiles.get(index).cloned() {
+                        self.apply_profile(&profile);
+                        self.open_profile_editor(Some(profile));
                     }
                 }
                 if let Some(index) = delete_profile {
                     if let Some(profile) = self.profiles.remove(index) {
-                        match self.profiles.save(&self.profiles_path) {
-                            Ok(()) => {
-                                self.set_status(format!("deleted profile {}", profile.name), false);
-                            }
-                            Err(err) => {
-                                self.set_status(
-                                    format!("saving machine profiles: {err}"),
-                                    true,
-                                );
-                            }
+                        if self
+                            .active_profile
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(&profile.name))
+                        {
+                            self.active_profile = None;
                         }
+                        self.save_profiles();
+                        self.set_status(format!("deleted profile {}", profile.name), false);
                     }
+                }
+                if new_profile {
+                    self.open_profile_editor(None);
+                }
+                if let Some([width, height]) = self.effective_bed() {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}: {width:.1} × {height:.1} mm",
+                            tr!("Work area")
+                        ))
+                        .small()
+                        .weak(),
+                    );
                 }
 
                 ui.separator();
@@ -5468,6 +5833,20 @@ impl OrleansApp {
                     tr!("Max S"),
                     self.gcode_opts.max_s
                 ));
+                let issues = self.preflight_issues(self.doc.output_bounds());
+                let has_errors = issues
+                    .iter()
+                    .any(|issue| issue.severity() == Severity::Error);
+                if !issues.is_empty() {
+                    ui.add_space(4.0);
+                    for issue in &issues {
+                        let color = match issue.severity() {
+                            Severity::Error => Color32::from_rgb(235, 120, 110),
+                            Severity::Warning => Color32::from_rgb(230, 190, 90),
+                        };
+                        ui.colored_label(self.accent(color), issue.text());
+                    }
+                }
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(
@@ -5476,9 +5855,18 @@ impl OrleansApp {
                     )
                     .color(self.accent(Color32::from_rgb(235, 190, 90))),
                 );
+                if has_errors {
+                    ui.label(
+                        RichText::new(tr!("Fix the errors above before sending."))
+                            .color(self.accent(Color32::from_rgb(235, 120, 110))),
+                    );
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if enter || ui.button(tr!("Send")).clicked() {
+                    let send = ui
+                        .add_enabled(!has_errors, egui::Button::new(tr!("Send")))
+                        .clicked();
+                    if (enter && !has_errors) || send {
                         self.send_job();
                         self.confirm_send = false;
                     }
@@ -8280,8 +8668,6 @@ fn is_project_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-const FRAME_FEED: f64 = 3000.0;
-
 /// A short absolute program that traces the job bounds with the laser off.
 fn frame_program(bounds: kurbo::Rect, feed: f64, dialect: GcodeDialect) -> String {
     let (x0, y0, x1, y1) = (bounds.x0, bounds.y0, bounds.x1, bounds.y1);
@@ -8682,6 +9068,7 @@ impl eframe::App for OrleansApp {
         }
 
         self.home_dialog(&ctx);
+        self.profile_dialog(&ctx);
         self.send_dialog(&ctx);
         self.settings_window(&ctx);
         self.pdf_page_dialog(&ctx);

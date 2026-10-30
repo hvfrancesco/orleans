@@ -74,6 +74,9 @@ orleans unlock --port /dev/ttyUSB0 --driver marlin
 # Open the visual editor (the input is optional)
 orleans gui examples/coaster.svg --url tcp://192.168.1.10
 
+# Prefill a USB Marlin connection
+orleans gui examples/coaster.svg --port /dev/ttyUSB0 --baud 115200 --driver marlin
+
 # Open a DXF drawing
 orleans gui drawing.dxf
 

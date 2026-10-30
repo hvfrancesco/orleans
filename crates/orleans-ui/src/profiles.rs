@@ -1,8 +1,9 @@
-//! Saved machine connection profiles.
+//! Saved machine connection and setup profiles.
 //!
-//! Profiles keep the transport, address, baud rate, protocol preference and
-//! max S together, so switching between a USB Marlin laser and a WiFi GRBL
-//! controller does not require retyping the connection each time.
+//! Profiles keep the transport, address, baud rate, protocol preference,
+//! work area and job defaults together, so switching between a USB Marlin
+//! laser and a WiFi GRBL controller does not require retyping or re-checking
+//! the machine setup.
 
 use std::fs;
 use std::io;
@@ -23,12 +24,85 @@ fn default_max_s() -> u32 {
     1000
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn default_dynamic_power() -> bool {
+    true
+}
+
+fn default_speed() -> f64 {
+    1000.0
+}
+
+fn default_power() -> f64 {
+    20.0
+}
+
+fn default_framing_feed() -> f64 {
+    3000.0
+}
+
+/// Per-machine setup that is not stored in controller EEPROM.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MachineSetup {
+    #[serde(default)]
+    pub bed: Option<[f64; 2]>,
+    #[serde(default = "default_dynamic_power")]
+    pub dynamic_power: bool,
+    #[serde(default = "default_speed")]
+    pub default_speed: f64,
+    #[serde(default = "default_power")]
+    pub default_power: f64,
+    #[serde(default = "default_framing_feed")]
+    pub framing_feed: f64,
+    #[serde(default)]
+    pub framing_margin: f64,
+    #[serde(default)]
+    pub homing: Option<bool>,
+    #[serde(default)]
+    pub soft_limits: Option<bool>,
+    #[serde(default)]
+    pub notes: String,
+}
+
+impl Default for MachineSetup {
+    fn default() -> Self {
+        Self {
+            bed: None,
+            dynamic_power: true,
+            default_speed: default_speed(),
+            default_power: default_power(),
+            framing_feed: default_framing_feed(),
+            framing_margin: 0.0,
+            homing: None,
+            soft_limits: None,
+            notes: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MachineProfile {
     pub name: String,
     pub connection: Connection,
     #[serde(default = "default_max_s")]
     pub max_s: u32,
+    #[serde(default)]
+    pub setup: MachineSetup,
+}
+
+impl MachineProfile {
+    pub fn new(
+        name: impl Into<String>,
+        connection: Connection,
+        max_s: u32,
+        setup: MachineSetup,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            connection,
+            max_s,
+            setup,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,6 +111,8 @@ pub struct MachineProfiles {
     format: u32,
     #[serde(default)]
     pub profiles: Vec<MachineProfile>,
+    #[serde(default)]
+    pub last: Option<String>,
 }
 
 impl Default for MachineProfiles {
@@ -44,6 +120,7 @@ impl Default for MachineProfiles {
         Self {
             format: FORMAT,
             profiles: Vec::new(),
+            last: None,
         }
     }
 }
@@ -71,20 +148,16 @@ impl MachineProfiles {
     }
 
     /// Add a profile, replacing an existing one with the same name.
-    pub fn upsert(&mut self, name: &str, connection: Connection, max_s: u32) {
-        let name = name.trim();
+    pub fn upsert(&mut self, mut profile: MachineProfile) {
+        let name = profile.name.trim().to_owned();
         if name.is_empty() {
             return;
         }
-        let profile = MachineProfile {
-            name: name.to_owned(),
-            connection,
-            max_s,
-        };
+        profile.name = name.clone();
         if let Some(existing) = self
             .profiles
             .iter_mut()
-            .find(|profile| profile.name.eq_ignore_ascii_case(name))
+            .find(|existing| existing.name.eq_ignore_ascii_case(&name))
         {
             *existing = profile;
             return;
@@ -96,7 +169,34 @@ impl MachineProfiles {
     }
 
     pub fn remove(&mut self, index: usize) -> Option<MachineProfile> {
-        (index < self.profiles.len()).then(|| self.profiles.remove(index))
+        if index >= self.profiles.len() {
+            return None;
+        }
+        let removed = self.profiles.remove(index);
+        if self
+            .last
+            .as_deref()
+            .is_some_and(|last| last.eq_ignore_ascii_case(&removed.name))
+        {
+            self.last = None;
+        }
+        Some(removed)
+    }
+
+    pub fn find(&self, name: &str) -> Option<&MachineProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn active(&self) -> Option<&MachineProfile> {
+        self.last.as_deref().and_then(|name| self.find(name))
+    }
+
+    pub fn set_last(&mut self, name: &str) {
+        if self.find(name).is_some() {
+            self.last = Some(name.to_owned());
+        }
     }
 }
 
@@ -121,6 +221,16 @@ mod tests {
         Connection::serial("/dev/ttyUSB0", 115_200, DriverChoice::Marlin)
     }
 
+    fn setup(bed: Option<[f64; 2]>) -> MachineSetup {
+        MachineSetup {
+            bed,
+            default_speed: 1200.0,
+            framing_margin: 3.0,
+            notes: "test machine".to_owned(),
+            ..MachineSetup::default()
+        }
+    }
+
     #[test]
     fn round_trips_profiles() {
         let path = std::env::temp_dir().join(format!(
@@ -129,8 +239,19 @@ mod tests {
             std::thread::current().name().unwrap_or("test")
         ));
         let mut profiles = MachineProfiles::default();
-        profiles.upsert("WiFi GRBL", sample_tcp(), 1000);
-        profiles.upsert("USB Marlin", sample_serial(), 255);
+        profiles.upsert(MachineProfile::new(
+            "WiFi GRBL",
+            sample_tcp(),
+            1000,
+            setup(Some([400.0, 300.0])),
+        ));
+        profiles.upsert(MachineProfile::new(
+            "USB Marlin",
+            sample_serial(),
+            255,
+            setup(Some([220.0, 220.0])),
+        ));
+        profiles.set_last("USB Marlin");
         profiles.save(&path).expect("save");
 
         let loaded = MachineProfiles::load(&path);
@@ -139,24 +260,46 @@ mod tests {
         assert_eq!(loaded.profiles[0].connection.kind, LinkKind::Tcp);
         assert_eq!(loaded.profiles[1].connection.driver, DriverChoice::Marlin);
         assert_eq!(loaded.profiles[1].max_s, 255);
+        assert_eq!(loaded.profiles[1].setup.bed, Some([220.0, 220.0]));
+        assert_eq!(
+            loaded.active().map(|profile| profile.name.as_str()),
+            Some("USB Marlin")
+        );
     }
 
     #[test]
     fn upsert_replaces_the_same_name_case_insensitively() {
         let mut profiles = MachineProfiles::default();
-        profiles.upsert("Laser", sample_tcp(), 1000);
-        profiles.upsert("laser", sample_serial(), 255);
+        profiles.upsert(MachineProfile::new(
+            "Laser",
+            sample_tcp(),
+            1000,
+            MachineSetup::default(),
+        ));
+        profiles.upsert(MachineProfile::new(
+            "laser",
+            sample_serial(),
+            255,
+            setup(None),
+        ));
         assert_eq!(profiles.profiles.len(), 1);
         assert_eq!(profiles.profiles[0].name, "laser");
         assert_eq!(profiles.profiles[0].connection.kind, LinkKind::Serial);
     }
 
     #[test]
-    fn remove_is_bounds_checked() {
+    fn remove_is_bounds_checked_and_clears_last() {
         let mut profiles = MachineProfiles::default();
-        profiles.upsert("Laser", sample_tcp(), 1000);
+        profiles.upsert(MachineProfile::new(
+            "Laser",
+            sample_tcp(),
+            1000,
+            MachineSetup::default(),
+        ));
+        profiles.set_last("Laser");
         assert!(profiles.remove(2).is_none());
         assert_eq!(profiles.remove(0).expect("profile").name, "Laser");
         assert!(profiles.profiles.is_empty());
+        assert!(profiles.last.is_none());
     }
 }

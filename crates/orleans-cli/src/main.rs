@@ -71,6 +71,15 @@ enum Command {
         /// Machine endpoint to prefill, e.g. tcp://192.168.1.10.
         #[arg(long)]
         url: Option<String>,
+        /// Serial port to prefill, e.g. /dev/ttyUSB0 or COM3.
+        #[arg(long)]
+        port: Option<String>,
+        /// Baud rate for a serial startup connection.
+        #[arg(long, default_value_t = 115200)]
+        baud: u32,
+        /// Protocol preference for the startup connection.
+        #[arg(long, value_enum, default_value_t)]
+        driver: DriverChoice,
     },
     /// Inspect a design and the job it would produce.
     Info(Common),
@@ -269,7 +278,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         #[cfg(feature = "gui")]
-        Command::Gui { input, url } => orleans_ui::run(input, url),
+        Command::Gui {
+            input,
+            url,
+            port,
+            baud,
+            driver,
+        } => orleans_ui::run(input, gui_connection(url, port, baud, driver)?),
         Command::Info(cmd) => info(&cmd),
         Command::Gcode {
             common,
@@ -305,6 +320,27 @@ fn main() -> Result<()> {
             baud,
             driver,
         } => status(port, url, baud, driver),
+    }
+}
+
+#[cfg(feature = "gui")]
+fn gui_connection(
+    url: Option<String>,
+    port: Option<String>,
+    baud: u32,
+    driver: DriverChoice,
+) -> Result<Option<orleans_ui::Connection>> {
+    use orleans_ui::{Connection, DriverChoice as UiDriverChoice};
+    let driver = match driver {
+        DriverChoice::Auto => UiDriverChoice::Auto,
+        DriverChoice::Grbl => UiDriverChoice::Grbl,
+        DriverChoice::Marlin => UiDriverChoice::Marlin,
+    };
+    match (url, port) {
+        (Some(_), Some(_)) => bail!("use either --url or --port, not both"),
+        (Some(url), None) => Ok(Some(Connection::tcp(url, driver))),
+        (None, Some(port)) => Ok(Some(Connection::serial(port, baud, driver))),
+        (None, None) => Ok(None),
     }
 }
 

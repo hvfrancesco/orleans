@@ -7,10 +7,11 @@ vector designs and raster images, plans toolpaths and streams G-code to
 GRBL-compatible and Marlin laser controllers over USB or WiFi. Everything is
 implemented from public specifications: SVG, PDF, DXF, G-code, GRBL and Marlin.
 
-> **Status:** `1.2.0`. The editor and GRBL workflow are hardware-validated.
-> Marlin laser support is covered by simulator and TCP integration tests but
-> awaits validation on a physical Marlin machine. See [CHANGELOG.md](CHANGELOG.md)
-> and [docs/roadmap.md](docs/roadmap.md).
+> **Status:** `1.2.0` is the current published release. Machine-profile v2,
+> send/frame preflight and GUI connection prefill are on `main` for the next
+> release. Marlin laser support is covered by simulator and TCP integration
+> tests but awaits validation on a physical Marlin machine. See
+> [CHANGELOG.md](CHANGELOG.md) and [docs/roadmap.md](docs/roadmap.md).
 
 ## Highlights
 
@@ -38,6 +39,10 @@ cargo build --release
 
 # Open the visual editor; the input is optional
 ./target/release/orleans gui examples/coaster.svg
+
+# Open the editor with a USB Marlin connection prefilled
+./target/release/orleans gui examples/coaster.svg \
+    --port /dev/ttyUSB0 --baud 115200 --driver marlin
 
 # Inspect a design: size, layers, cut length and time estimate
 ./target/release/orleans info examples/coaster.svg
@@ -112,7 +117,7 @@ Release packaging is reproducible:
 ./scripts/package-appimage.sh  # Linux AppImage + SHA-256
 ```
 
-The suite currently contains **191 tests**, including the full SVG → toolpath →
+The suite currently contains **198 tests**, including the full SVG → toolpath →
 G-code → TCP controller integration run and a Marlin TCP worker test.
 
 The GUI is behind the default `gui` feature. Build with `--no-default-features`
