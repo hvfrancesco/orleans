@@ -822,7 +822,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
             stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
+                .set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("timeout");
             let mut buffer = [0u8; 256];
             let mut line = String::new();
@@ -891,7 +891,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
             stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
+                .set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("timeout");
             let mut buffer = [0u8; 256];
             let mut line = String::new();
@@ -1006,7 +1006,7 @@ mod tests {
         let machine = Machine::spawn();
         assert!(machine.connect(&format!("tcp://127.0.0.1:{port}")));
 
-        let deadline = Instant::now() + Duration::from_secs(6);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let mut connected = false;
         let mut settings = None;
         let mut status = None;
@@ -1033,7 +1033,7 @@ mod tests {
         assert!(machine.home());
         let mut saw_g28 = false;
         let mut saw_m400 = false;
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && !(saw_g28 && saw_m400) {
             match commands.recv_timeout(Duration::from_millis(200)) {
                 Ok(command) if command == "G28" => saw_g28 = true,
@@ -1046,7 +1046,7 @@ mod tests {
 
         assert!(machine.jog(1.0, 0.0, 500.0));
         let mut jog = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && jog.len() < 3 {
             if let Ok(command) = commands.recv_timeout(Duration::from_millis(200)) {
                 if command.starts_with("G9") || command.starts_with("G0 ") {

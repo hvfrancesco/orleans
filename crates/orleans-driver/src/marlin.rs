@@ -148,10 +148,34 @@ impl<T: Transport> MarlinClient<T> {
     /// `KEY:value` lines followed by `ok`.
     pub fn probe_identity(&mut self, timeout: Duration) -> Result<MarlinProbe, DriverError> {
         self.transport.write_line("M115")?;
-        // Read for the full window instead of stopping at the first `ok`:
-        // a GRBL detection attempt may have left an unrelated `ok` in the
-        // buffer, and Marlin itself can answer M115 with several lines.
-        let lines = self.collect_for(timeout)?;
+        // Stop once a real identity line has been followed by `ok`. A GRBL
+        // detection attempt may leave an unrelated `ok` in the buffer first;
+        // ignoring that early `ok` avoids mistaking it for the M115 reply.
+        let deadline = Instant::now() + timeout;
+        let mut lines = Vec::new();
+        let mut saw_identity = false;
+        loop {
+            if let Some(line) = self.transport.read_line()? {
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("FIRMWARE_NAME:")
+                    || upper.contains("PROTOCOL_VERSION:")
+                    || upper.contains("PRINTER HALTED")
+                {
+                    saw_identity = true;
+                }
+                let finished = line.trim().eq_ignore_ascii_case("ok") && saw_identity;
+                let halted = upper.contains("PRINTER HALTED");
+                lines.push(line);
+                if finished || halted {
+                    break;
+                }
+                continue;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         Ok(parse_identity(lines))
     }
 
