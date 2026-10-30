@@ -43,6 +43,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           set -o pipefail
           cargo test --workspace --locked --no-fail-fast 2>&1 | tee test-output.log
