@@ -371,5 +371,13 @@
   "Pause is not available on Marlin; use Stop.": "Marlin 不支持暂停；请使用停止。",
   "Driver": "驱动",
   "Auto": "自动",
-  "Auto-detect the firmware, or force GRBL/Marlin if detection fails.": "自动检测固件，或在检测失败时强制使用 GRBL/Marlin。"
+  "Auto-detect the firmware, or force GRBL/Marlin if detection fails.": "自动检测固件，或在检测失败时强制使用 GRBL/Marlin。",
+  "Connection": "连接",
+  "Serial": "串口",
+  "Port": "端口",
+  "Baud": "波特率",
+  "Machine profiles": "机器配置",
+  "No saved profiles.": "尚未保存配置。",
+  "Profile name": "配置名称",
+  "Save": "保存"
 }

@@ -2,6 +2,31 @@
 
 All notable changes to orleans are recorded here.
 
+## [1.2.0] - 2026-10-30
+
+### Machine connections
+
+- Added USB serial support to the GUI Machine panel with port entry, detected
+  port list, refresh and configurable baud rate. TCP/Telnet remains available.
+- The same Auto / GRBL / Marlin detection and protocol override works over both
+  transports.
+- Added saved machine profiles containing connection type, address, baud rate,
+  driver preference and max S. Profiles are stored in
+  `~/.config/orleans/machines.json`.
+- Reconnects now reuse the complete TCP or serial connection settings.
+
+### Validation
+
+- 190 automated tests, including a GRBL serial test through a pseudo-terminal.
+- Clippy with warnings denied, formatting checks and both CI workflows pass.
+
+### Upgrade notes
+
+- The `.orleans` project format is unchanged (format 2).
+- Existing UI preferences remain compatible. Machine profiles are a new,
+  separate file.
+- The AppImage relies on the host `libudev` for USB serial access.
+
 ## [1.1.1] - 2026-10-30
 
 ### Interface

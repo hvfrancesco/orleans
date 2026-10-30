@@ -11,11 +11,13 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use orleans_driver::net::{parse_endpoint, TcpTransport};
 use orleans_driver::{Controller, DriverError, GrblClient, MarlinClient, Protocol, Transport};
 
 /// How the GUI should choose the controller protocol.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DriverChoice {
     /// Probe GRBL first, then Marlin.
     #[default]
@@ -26,34 +28,81 @@ pub enum DriverChoice {
     Marlin,
 }
 
+/// Physical link used to reach the controller.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkKind {
+    #[default]
+    Tcp,
+    Serial,
+}
+
+fn default_baud() -> u32 {
+    115_200
+}
+
+/// A reusable machine connection, including the protocol preference.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connection {
+    pub kind: LinkKind,
+    pub endpoint: String,
+    #[serde(default = "default_baud")]
+    pub baud: u32,
+    pub driver: DriverChoice,
+}
+
+impl Default for Connection {
+    fn default() -> Self {
+        Self {
+            kind: LinkKind::Tcp,
+            endpoint: String::new(),
+            baud: default_baud(),
+            driver: DriverChoice::Auto,
+        }
+    }
+}
+
+impl Connection {
+    pub fn tcp(endpoint: impl Into<String>, driver: DriverChoice) -> Self {
+        Self {
+            kind: LinkKind::Tcp,
+            endpoint: endpoint.into(),
+            baud: default_baud(),
+            driver,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn serial(port: impl Into<String>, baud: u32, driver: DriverChoice) -> Self {
+        Self {
+            kind: LinkKind::Serial,
+            endpoint: port.into(),
+            baud,
+            driver,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self.kind {
+            LinkKind::Tcp => self.endpoint.clone(),
+            LinkKind::Serial => format!("{} @ {} baud", self.endpoint, self.baud),
+        }
+    }
+}
+
 /// Requests from the UI to the worker.
 pub enum Command {
-    Connect {
-        endpoint: String,
-        driver: DriverChoice,
-    },
+    Connect(Connection),
     Disconnect,
     Home,
     Unlock,
     Stop,
     Run(String),
-    Jog {
-        dx: f64,
-        dy: f64,
-        feed: f64,
-    },
-    JogTo {
-        x: f64,
-        y: f64,
-        feed: f64,
-    },
+    Jog { dx: f64, dy: f64, feed: f64 },
+    JogTo { x: f64, y: f64, feed: f64 },
     JogCancel,
     SetOrigin,
     SaveOrigin,
-    SetSetting {
-        key: u32,
-        value: String,
-    },
+    SetSetting { key: u32, value: String },
     RefreshSettings,
 }
 
@@ -116,20 +165,10 @@ impl Machine {
         }
     }
 
-    #[cfg(test)]
-    pub fn connect(&self, endpoint: &str) -> bool {
-        self.connect_with_driver(endpoint, DriverChoice::Auto)
-    }
-
-    /// Connect with an optional manual protocol override.
-    pub fn connect_with_driver(&self, endpoint: &str, driver: DriverChoice) -> bool {
+    /// Connect using a reusable TCP or serial connection.
+    pub fn connect(&self, connection: Connection) -> bool {
         self.cancel.store(false, Ordering::Relaxed);
-        self.tx
-            .send(Command::Connect {
-                endpoint: endpoint.to_owned(),
-                driver,
-            })
-            .is_ok()
+        self.tx.send(Command::Connect(connection)).is_ok()
     }
 
     pub fn disconnect(&self) -> bool {
@@ -217,8 +256,7 @@ fn worker(
     const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
     let mut client: Option<Controller<Box<dyn Transport>>> = None;
-    let mut endpoint: Option<String> = None;
-    let mut driver = DriverChoice::Auto;
+    let mut connection: Option<Connection> = None;
     let mut last_poll = Instant::now();
     let mut misses = 0u32;
     let mut warned = false;
@@ -233,15 +271,11 @@ fn worker(
             if let Some(at) = reconnect_at {
                 if Instant::now() >= at {
                     reconnect_at = None;
-                    if let Some(target) = endpoint.clone() {
-                        let result = connect(
-                            &target,
-                            Duration::from_secs(2),
-                            Duration::from_secs(1),
-                            driver,
-                        );
+                    if let Some(target) = connection.clone() {
+                        let result =
+                            connect(&target, Duration::from_secs(2), Duration::from_secs(1));
                         if cancel.load(Ordering::Relaxed) {
-                            endpoint = None;
+                            connection = None;
                             reconnect_attempt = 0;
                             let _ = events.send(Event::Disconnected(None));
                             continue;
@@ -254,7 +288,7 @@ fn worker(
                                 warned = false;
                                 last_controller_error = None;
                                 reconnect_attempt = 0;
-                                let _ = events.send(Event::Connected(target));
+                                let _ = events.send(Event::Connected(target.label()));
                                 if let Some(status) = status {
                                     let _ = events.send(Event::Status(status));
                                 }
@@ -268,7 +302,7 @@ fn worker(
                                     let _ = events.send(Event::Reconnecting(reconnect_attempt));
                                     message(&events, format!("reconnecting failed: {err}"), true);
                                 } else {
-                                    endpoint = None;
+                                    connection = None;
                                     reconnect_attempt = 0;
                                     let _ = events.send(Event::Disconnected(Some(format!(
                                         "could not reconnect: {err}"
@@ -282,27 +316,19 @@ fn worker(
         }
 
         match commands.recv_timeout(Duration::from_millis(150)) {
-            Ok(Command::Connect {
-                endpoint: target,
-                driver: requested_driver,
-            }) => {
+            Ok(Command::Connect(target)) => {
                 client = None;
                 misses = 0;
                 warned = false;
                 last_controller_error = None;
                 reconnect_at = None;
                 reconnect_attempt = 0;
-                endpoint = Some(target.clone());
-                driver = requested_driver;
-                let _ = events.send(Event::Connecting(target.clone()));
-                let result = connect(
-                    &target,
-                    Duration::from_secs(5),
-                    Duration::from_secs(2),
-                    driver,
-                );
+                let label = target.label();
+                connection = Some(target.clone());
+                let _ = events.send(Event::Connecting(label.clone()));
+                let result = connect(&target, Duration::from_secs(5), Duration::from_secs(2));
                 if cancel.load(Ordering::Relaxed) {
-                    endpoint = None;
+                    connection = None;
                     let _ = events.send(Event::Disconnected(None));
                     continue;
                 }
@@ -310,21 +336,21 @@ fn worker(
                     Ok((connected, status, settings)) => {
                         client = Some(connected);
                         last_poll = Instant::now();
-                        let _ = events.send(Event::Connected(target));
+                        let _ = events.send(Event::Connected(label));
                         if let Some(status) = status {
                             let _ = events.send(Event::Status(status));
                         }
                         let _ = events.send(Event::Settings(settings));
                     }
                     Err(err) => {
-                        endpoint = None;
+                        connection = None;
                         let _ = events.send(Event::Disconnected(Some(err)));
                     }
                 }
             }
             Ok(Command::Disconnect) => {
                 client = None;
-                endpoint = None;
+                connection = None;
                 reconnect_at = None;
                 reconnect_attempt = 0;
                 misses = 0;
@@ -549,7 +575,7 @@ fn worker(
                         client = None;
                         misses = 0;
                         warned = false;
-                        if endpoint.is_some() {
+                        if connection.is_some() {
                             reconnect_attempt = 1;
                             reconnect_at = Some(Instant::now());
                             let _ = events.send(Event::Reconnecting(1));
@@ -578,27 +604,44 @@ fn jog_absolute_line(x: f64, y: f64, feed: f64) -> String {
 type Connected = (Controller<Box<dyn Transport>>, Option<String>, Settings);
 
 fn connect(
-    endpoint: &str,
+    connection: &Connection,
     tcp_timeout: Duration,
     probe_timeout: Duration,
-    driver: DriverChoice,
 ) -> Result<Connected, String> {
-    let (host, port) = parse_endpoint(endpoint)?;
-    let transport = TcpTransport::connect(&host, port, tcp_timeout)
-        .map_err(|err| format!("connecting to {host}:{port}: {err}"))?;
+    let mut transport: Box<dyn Transport> = match connection.kind {
+        LinkKind::Tcp => {
+            let (host, port) = parse_endpoint(&connection.endpoint)?;
+            let link = TcpTransport::connect(&host, port, tcp_timeout)
+                .map_err(|err| format!("connecting to {host}:{port}: {err}"))?;
+            Box::new(link)
+        }
+        LinkKind::Serial => {
+            let link = orleans_driver::open_serial(&connection.endpoint, connection.baud).map_err(
+                |err| {
+                    format!(
+                        "opening {} at {} baud: {err}",
+                        connection.endpoint, connection.baud
+                    )
+                },
+            )?;
+            Box::new(link)
+        }
+    };
 
-    let (mut controller, status, firmware) = match driver {
+    // Auto-detection has no client yet, so wake a serial link before probing.
+    // Forced drivers wake themselves in their own client.
+    if connection.kind == LinkKind::Serial && connection.driver == DriverChoice::Auto {
+        let _ = transport.write_raw(b"\r\n\r\n");
+    }
+
+    let (mut controller, status, firmware) = match connection.driver {
         DriverChoice::Auto => {
-            let detection = Controller::detect(
-                Box::new(transport) as Box<dyn Transport>,
-                probe_timeout,
-                probe_timeout,
-            )
-            .map_err(|err| format!("probing {host}:{port}: {err}"))?;
+            let detection = Controller::detect(transport, probe_timeout, probe_timeout)
+                .map_err(|err| format!("probing {}: {err}", connection.label()))?;
             (detection.controller, detection.status, detection.firmware)
         }
         DriverChoice::Grbl => {
-            let mut client = GrblClient::new(Box::new(transport) as Box<dyn Transport>);
+            let mut client = GrblClient::new(transport);
             let _ = client.wake();
             // A forced driver is a recovery path: keep the connection even if
             // the controller does not answer the status probe.
@@ -609,7 +652,7 @@ fn connect(
             (Controller::Grbl(client), status, None::<String>)
         }
         DriverChoice::Marlin => {
-            let mut client = MarlinClient::new(Box::new(transport) as Box<dyn Transport>);
+            let mut client = MarlinClient::new(transport);
             let _ = client.wake();
             let firmware = client
                 .probe_identity(probe_timeout)
@@ -959,6 +1002,62 @@ mod tests {
         (port, rx, handle)
     }
 
+    fn tcp_connection(port: u16) -> Connection {
+        Connection::tcp(format!("tcp://127.0.0.1:{port}"), DriverChoice::Auto)
+    }
+
+    /// A GRBL controller on a pseudo-terminal, for exercising the serial path
+    /// without hardware. The returned slave fd must stay open until the client
+    /// has opened the port; close it afterwards to let the emulator exit.
+    #[cfg(unix)]
+    fn spawn_serial_grbl() -> (String, i32, thread::JoinHandle<()>) {
+        use std::os::unix::io::FromRawFd;
+
+        let pty = nix::pty::openpty(None, None).expect("openpty");
+        let path = nix::unistd::ttyname(pty.slave)
+            .expect("ttyname")
+            .to_string_lossy()
+            .into_owned();
+        let mut master = unsafe { std::fs::File::from_raw_fd(pty.master) };
+        let handle = thread::spawn(move || {
+            let mut buffer = [0u8; 256];
+            let mut line = Vec::new();
+            loop {
+                match master.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        for byte in &buffer[..n] {
+                            match *byte {
+                                b'?' => {
+                                    let _ =
+                                        master.write_all(b"<Idle|MPos:1.000,2.000,0.000|FS:0,0>\n");
+                                    let _ = master.flush();
+                                }
+                                b'\n' => {
+                                    let command = String::from_utf8_lossy(&line).trim().to_owned();
+                                    line.clear();
+                                    if command.is_empty() {
+                                        continue;
+                                    }
+                                    let response = match command.as_str() {
+                                        "$$" => "$32=1\n$30=1000\n$22=1\n$130=400\n$131=300\nok\n",
+                                        _ => "ok\n",
+                                    };
+                                    let _ = master.write_all(response.as_bytes());
+                                    let _ = master.flush();
+                                }
+                                b'\r' => {}
+                                other => line.push(other),
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (path, pty.slave, handle)
+    }
+
     /// A tiny Marlin-over-TCP controller. It ignores GRBL `?` queries and
     /// answers the commands used by the Marlin driver.
     fn spawn_marlin_controller(identity: bool) -> (u16, Receiver<String>, thread::JoinHandle<()>) {
@@ -1031,7 +1130,7 @@ mod tests {
     fn worker_connects_reports_status_and_homes() {
         let (port, commands, server) = spawn_controller(None);
         let machine = Machine::spawn();
-        assert!(machine.connect(&format!("tcp://127.0.0.1:{port}")));
+        assert!(machine.connect(tcp_connection(port)));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut connected = false;
@@ -1082,7 +1181,7 @@ mod tests {
     fn worker_detects_marlin_and_uses_marlin_commands() {
         let (port, commands, server) = spawn_marlin_controller(true);
         let machine = Machine::spawn();
-        assert!(machine.connect(&format!("tcp://127.0.0.1:{port}")));
+        assert!(machine.connect(tcp_connection(port)));
 
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut connected = false;
@@ -1138,13 +1237,50 @@ mod tests {
         let _ = server.join();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn worker_connects_over_serial() {
+        let (path, slave, server) = spawn_serial_grbl();
+        let machine = Machine::spawn();
+        assert!(machine.connect(Connection::serial(&path, 115_200, DriverChoice::Auto)));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut connected = false;
+        let mut settings = None;
+        let mut status = None;
+        while Instant::now() < deadline && (settings.is_none() || status.is_none()) {
+            while let Some(event) = machine.try_recv() {
+                match event {
+                    Event::Connected(_) => connected = true,
+                    Event::Settings(value) => settings = Some(value),
+                    Event::Status(line) => status = Some(line),
+                    Event::Disconnected(reason) => panic!("disconnected: {reason:?}"),
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(connected);
+        let settings = settings.expect("settings");
+        assert_eq!(settings.protocol, Protocol::Grbl);
+        assert_eq!(settings.max_s, Some(1000));
+        assert!(status
+            .as_deref()
+            .is_some_and(|line| line.contains("MPos:1.000,2.000,0.000")));
+
+        nix::unistd::close(slave).ok();
+        drop(machine);
+        let _ = server.join();
+    }
+
     #[test]
     fn worker_forced_marlin_connects_without_m115_identity() {
         let (port, _commands, server) = spawn_marlin_controller(false);
         let machine = Machine::spawn();
-        assert!(
-            machine.connect_with_driver(&format!("tcp://127.0.0.1:{port}"), DriverChoice::Marlin)
-        );
+        assert!(machine.connect(Connection::tcp(
+            format!("tcp://127.0.0.1:{port}"),
+            DriverChoice::Marlin
+        )));
 
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut settings = None;
@@ -1176,7 +1312,7 @@ mod tests {
     fn worker_survives_status_silence_while_homing() {
         let (port, commands, server) = spawn_controller(Some(Duration::from_secs(4)));
         let machine = Machine::spawn();
-        assert!(machine.connect(&format!("tcp://127.0.0.1:{port}")));
+        assert!(machine.connect(tcp_connection(port)));
 
         // Wait for the first status so we know the link is up.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1234,7 +1370,7 @@ mod tests {
     fn worker_streams_a_job_and_reports_progress() {
         let (port, commands, server) = spawn_controller(None);
         let machine = Machine::spawn();
-        assert!(machine.connect(&format!("tcp://127.0.0.1:{port}")));
+        assert!(machine.connect(tcp_connection(port)));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut connected = false;

@@ -30,3 +30,16 @@ pub use transport::SerialTransport;
 pub fn open_serial(path: &str, baud: u32) -> Result<SerialTransport, serialport::Error> {
     SerialTransport::open(path, baud)
 }
+
+/// Detected serial port names, sorted for a stable GUI list.
+#[cfg(feature = "serial")]
+pub fn serial_ports() -> Vec<String> {
+    let mut ports: Vec<String> = serialport::available_ports()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|port| port.port_name)
+        .collect();
+    ports.sort();
+    ports.dedup();
+    ports
+}

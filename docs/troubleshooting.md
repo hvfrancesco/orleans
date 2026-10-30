@@ -10,7 +10,8 @@
 ## AppImage and USB serial
 
 The AppImage is not sandboxed, so WiFi and USB access work like the plain
-binary. USB serial still requires:
+binary. The GUI Machine panel can use either TCP/Telnet or USB serial. Serial
+access still requires:
 
 - the host kernel driver (`ch341`, `ftdi_sio`, `cdc_acm`, etc.) for the board;
 - read/write permission on `/dev/ttyUSB*` or `/dev/ttyACM*`;
@@ -24,8 +25,9 @@ ls -l /dev/ttyUSB0
 id
 ```
 
-The AppImage does not bundle GPU drivers or system CJK fonts. It uses the host
-X11/Wayland stack, OpenGL drivers and installed fonts.
+The AppImage does not bundle GPU drivers, system CJK fonts or `libudev`. It
+uses the host X11/Wayland stack, OpenGL drivers, installed fonts and `libudev`
+for USB serial access.
 
 ## WiFi and Telnet checks
 

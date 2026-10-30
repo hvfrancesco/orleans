@@ -12,6 +12,7 @@ mod icons;
 mod machine;
 mod nodes;
 mod preview;
+mod profiles;
 mod project;
 mod viewport;
 

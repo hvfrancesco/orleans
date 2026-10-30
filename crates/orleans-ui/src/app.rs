@@ -26,10 +26,12 @@ use crate::history::{self, JobHistory, JobKind, JobOutcome, JobRecord};
 use crate::i18n::{self, Language};
 use crate::icons::{self, Icon};
 use crate::machine::{
-    DriverChoice, Event as MachineEvent, Machine, Settings, Status as MachineStatus,
+    Connection, DriverChoice, Event as MachineEvent, LinkKind, Machine, Settings,
+    Status as MachineStatus,
 };
 use crate::nodes::{self, NodeKind, NodeRef};
 use crate::preview::Preview;
+use crate::profiles::{self, MachineProfiles};
 use crate::project::{GroupMember, GroupSettings, ProjectFile, FORMAT};
 use crate::viewport::Viewport;
 
@@ -698,8 +700,11 @@ pub struct OrleansApp {
     show_travel: bool,
     show_bed: bool,
 
-    endpoint: String,
-    driver: DriverChoice,
+    connection: Connection,
+    serial_ports: Vec<String>,
+    profiles: MachineProfiles,
+    profiles_path: PathBuf,
+    profile_name: String,
     machine: Machine,
     link: LinkState,
     machine_status: Option<MachineStatus>,
@@ -740,6 +745,8 @@ impl OrleansApp {
     ) -> Self {
         let history_path = history::default_path();
         let job_history = JobHistory::load(&history_path);
+        let profiles_path = profiles::default_path();
+        let profiles = MachineProfiles::load(&profiles_path);
         let language = i18n::load_language().unwrap_or_else(Language::from_environment);
         i18n::set_language(language);
         let mut app = Self {
@@ -799,8 +806,11 @@ impl OrleansApp {
             show_grid: true,
             show_travel: false,
             show_bed: true,
-            endpoint: endpoint.unwrap_or_default(),
-            driver: DriverChoice::Auto,
+            connection: Connection::tcp(endpoint.unwrap_or_default(), DriverChoice::Auto),
+            serial_ports: Vec::new(),
+            profiles,
+            profiles_path,
+            profile_name: String::new(),
             machine: Machine::spawn(),
             link: LinkState::Disconnected,
             machine_status: None,
@@ -1670,7 +1680,6 @@ impl OrleansApp {
                     self.reconnect_attempt = 0;
                     self.machine_status = None;
                     self.settings = None;
-                    self.settings = None;
                     self.set_status(format!("connecting to {endpoint}…"), false);
                 }
                 MachineEvent::Connected(endpoint) => {
@@ -1825,18 +1834,23 @@ impl OrleansApp {
     }
 
     fn begin_connect(&mut self) {
-        let endpoint = self.endpoint.trim().to_owned();
-        if endpoint.is_empty() {
-            self.set_status("enter an endpoint, e.g. tcp://192.168.1.10", true);
+        let mut connection = self.connection.clone();
+        connection.endpoint = connection.endpoint.trim().to_owned();
+        if connection.endpoint.is_empty() {
+            let message = match connection.kind {
+                LinkKind::Tcp => "enter an endpoint, e.g. tcp://192.168.1.10",
+                LinkKind::Serial => "enter a serial port, e.g. /dev/ttyUSB0",
+            };
+            self.set_status(message, true);
             return;
         }
-        self.endpoint = endpoint.clone();
-        if self.machine.connect_with_driver(&endpoint, self.driver) {
+        self.connection = connection.clone();
+        if self.machine.connect(connection.clone()) {
             self.link = LinkState::Connecting;
             self.reconnect_attempt = 0;
             self.machine_status = None;
             self.confirm_home = false;
-            self.set_status(format!("connecting to {endpoint}…"), false);
+            self.set_status(format!("connecting to {}…", connection.label()), false);
         } else {
             self.set_status("machine thread stopped", true);
         }
@@ -4407,7 +4421,10 @@ impl OrleansApp {
         self.settings
             .as_ref()
             .map(|settings| settings.protocol)
-            .unwrap_or(Protocol::Grbl)
+            .unwrap_or(match self.connection.driver {
+                DriverChoice::Marlin => Protocol::Marlin,
+                DriverChoice::Auto | DriverChoice::Grbl => Protocol::Grbl,
+            })
     }
 
     fn gcode_dialect(&self) -> GcodeDialect {
@@ -4593,18 +4610,84 @@ impl OrleansApp {
                 });
                 ui.add_space(4.0);
 
-                ui.label(tr!("Endpoint"));
-                let field = ui.add_enabled(
-                    self.link == LinkState::Disconnected,
-                    egui::TextEdit::singleline(&mut self.endpoint)
-                        .hint_text("tcp://192.168.1.10")
-                        .desired_width(f32::INFINITY),
-                );
-                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let disconnected = self.link == LinkState::Disconnected;
+                let mut enter = false;
+
+                ui.label(tr!("Connection"));
+                let mut kind = self.connection.kind;
+                ui.add_enabled_ui(disconnected, |ui| {
+                    egui::ComboBox::from_id_salt("machine-link-kind")
+                        .selected_text(match kind {
+                            LinkKind::Tcp => "TCP/Telnet",
+                            LinkKind::Serial => tr!("Serial"),
+                        })
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut kind, LinkKind::Tcp, "TCP/Telnet");
+                            ui.selectable_value(&mut kind, LinkKind::Serial, tr!("Serial"));
+                        });
+                });
+                if kind != self.connection.kind {
+                    self.connection.kind = kind;
+                    if kind == LinkKind::Serial && self.serial_ports.is_empty() {
+                        self.serial_ports = orleans_driver::serial_ports();
+                    }
+                }
+
+                match self.connection.kind {
+                    LinkKind::Tcp => {
+                        ui.label(tr!("Endpoint"));
+                        let field = ui.add_enabled(
+                            disconnected,
+                            egui::TextEdit::singleline(&mut self.connection.endpoint)
+                                .hint_text("tcp://192.168.1.10")
+                                .desired_width(f32::INFINITY),
+                        );
+                        enter |= field.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    }
+                    LinkKind::Serial => {
+                        ui.label(tr!("Port"));
+                        let field = ui.add_enabled(
+                            disconnected,
+                            egui::TextEdit::singleline(&mut self.connection.endpoint)
+                                .hint_text("/dev/ttyUSB0")
+                                .desired_width(f32::INFINITY),
+                        );
+                        enter |= field.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(disconnected, egui::Button::new(tr!("Refresh")))
+                                .clicked()
+                            {
+                                self.serial_ports = orleans_driver::serial_ports();
+                            }
+                        });
+                        if disconnected && !self.serial_ports.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                for port in self.serial_ports.clone() {
+                                    if ui.small_button(&port).clicked() {
+                                        self.connection.endpoint = port;
+                                    }
+                                }
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(tr!("Baud"));
+                            ui.add_enabled(
+                                disconnected,
+                                egui::DragValue::new(&mut self.connection.baud)
+                                    .range(1200..=1_000_000)
+                                    .speed(100.0),
+                            );
+                        });
+                    }
+                }
 
                 ui.label(tr!("Driver"));
-                ui.add_enabled_ui(self.link == LinkState::Disconnected, |ui| {
-                    let selected = match self.driver {
+                ui.add_enabled_ui(disconnected, |ui| {
+                    let selected = match self.connection.driver {
                         DriverChoice::Auto => tr!("Auto"),
                         DriverChoice::Grbl => "GRBL",
                         DriverChoice::Marlin => "Marlin",
@@ -4613,9 +4696,21 @@ impl OrleansApp {
                         .selected_text(selected)
                         .width(ui.available_width())
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.driver, DriverChoice::Auto, tr!("Auto"));
-                            ui.selectable_value(&mut self.driver, DriverChoice::Grbl, "GRBL");
-                            ui.selectable_value(&mut self.driver, DriverChoice::Marlin, "Marlin");
+                            ui.selectable_value(
+                                &mut self.connection.driver,
+                                DriverChoice::Auto,
+                                tr!("Auto"),
+                            );
+                            ui.selectable_value(
+                                &mut self.connection.driver,
+                                DriverChoice::Grbl,
+                                "GRBL",
+                            );
+                            ui.selectable_value(
+                                &mut self.connection.driver,
+                                DriverChoice::Marlin,
+                                "Marlin",
+                            );
                         });
                 })
                 .response
@@ -4656,6 +4751,103 @@ impl OrleansApp {
                         }
                     }
                 });
+
+                let mut load_profile = None;
+                let mut delete_profile = None;
+                egui::CollapsingHeader::new(format!(
+                    "{} ({})",
+                    tr!("Machine profiles"),
+                    self.profiles.profiles.len()
+                ))
+                .id_salt("machine-profiles")
+                .default_open(false)
+                .show(ui, |ui| {
+                    if self.profiles.profiles.is_empty() {
+                        ui.label(
+                            RichText::new(tr!("No saved profiles.")).small().weak(),
+                        );
+                    }
+                    for (index, profile) in self.profiles.profiles.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&profile.name).strong())
+                                .on_hover_text(profile.connection.label());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button(tr!("Delete")).clicked() {
+                                        delete_profile = Some(index);
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            disconnected,
+                                            egui::Button::new(tr!("Apply")).small(),
+                                        )
+                                        .clicked()
+                                    {
+                                        load_profile = Some(index);
+                                    }
+                                },
+                            );
+                        });
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.profile_name)
+                                .hint_text(tr!("Profile name"))
+                                .desired_width(150.0),
+                        );
+                        if ui.button(tr!("Save")).clicked() {
+                            let name = self.profile_name.trim().to_owned();
+                            if name.is_empty() {
+                                self.set_status("enter a profile name", true);
+                            } else {
+                                self.profiles.upsert(
+                                    &name,
+                                    self.connection.clone(),
+                                    self.gcode_opts.max_s,
+                                );
+                                match self.profiles.save(&self.profiles_path) {
+                                    Ok(()) => {
+                                        self.profile_name = name.clone();
+                                        self.set_status(format!("saved profile {name}"), false);
+                                    }
+                                    Err(err) => {
+                                        self.set_status(
+                                            format!("saving machine profiles: {err}"),
+                                            true,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+
+                if let Some(index) = load_profile {
+                    if let Some(profile) = self.profiles.profiles.get(index).cloned() {
+                        self.connection = profile.connection;
+                        self.gcode_opts.max_s = profile.max_s;
+                        self.clamp_max_s_for_protocol();
+                        self.profile_name = profile.name.clone();
+                        self.set_status(format!("profile: {}", profile.name), false);
+                    }
+                }
+                if let Some(index) = delete_profile {
+                    if let Some(profile) = self.profiles.remove(index) {
+                        match self.profiles.save(&self.profiles_path) {
+                            Ok(()) => {
+                                self.set_status(format!("deleted profile {}", profile.name), false);
+                            }
+                            Err(err) => {
+                                self.set_status(
+                                    format!("saving machine profiles: {err}"),
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                }
 
                 ui.separator();
                 ui.heading(tr!("Status"));

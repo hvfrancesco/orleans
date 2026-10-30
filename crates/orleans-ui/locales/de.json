@@ -371,5 +371,13 @@
   "Pause is not available on Marlin; use Stop.": "Pause ist bei Marlin nicht verfügbar; verwende Stopp.",
   "Driver": "Treiber",
   "Auto": "Auto",
-  "Auto-detect the firmware, or force GRBL/Marlin if detection fails.": "Firmware automatisch erkennen oder GRBL/Marlin erzwingen, wenn die Erkennung fehlschlägt."
+  "Auto-detect the firmware, or force GRBL/Marlin if detection fails.": "Firmware automatisch erkennen oder GRBL/Marlin erzwingen, wenn die Erkennung fehlschlägt.",
+  "Connection": "Verbindung",
+  "Serial": "Seriell",
+  "Port": "Port",
+  "Baud": "Baud",
+  "Machine profiles": "Maschinenprofile",
+  "No saved profiles.": "Keine gespeicherten Profile.",
+  "Profile name": "Profilname",
+  "Save": "Speichern"
 }

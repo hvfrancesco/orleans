@@ -224,6 +224,14 @@ fn italian(text: &str) -> Option<&'static str> {
         "Auto-detect the firmware, or force GRBL/Marlin if detection fails." => {
             "Rileva automaticamente il firmware o forza GRBL/Marlin se il rilevamento fallisce."
         }
+        "Connection" => "Connessione",
+        "Serial" => "Seriale",
+        "Port" => "Porta",
+        "Baud" => "Baud",
+        "Machine profiles" => "Profili macchina",
+        "No saved profiles." => "Nessun profilo salvato.",
+        "Profile name" => "Nome profilo",
+        "Save" => "Salva",
         "Unlock ($X)" => "Sblocca ($X)",
         "Unlock (M999)" => "Sblocca (M999)",
         "Stop" => "Arresta",

@@ -220,17 +220,28 @@ redoes it.
 
 ## Machine panel
 
-The **Machine** panel connects over Telnet and auto-detects the firmware. It
-first asks for a GRBL status report; if none arrives it sends Marlin's `M115`
-identity query. The panel then shows the live state, position, feed and `S`
-value, with protocol-specific control labels.
+The **Machine** panel connects over TCP/Telnet or USB serial and auto-detects
+the firmware. It first asks for a GRBL status report; if none arrives it sends
+Marlin's `M115` identity query. The panel then shows the live state, position,
+feed and `S` value, with protocol-specific control labels.
 
-The **Driver** selector below **Endpoint** offers **Auto**, **GRBL** and
-**Marlin**. It can only be changed while disconnected. **Auto** is the normal
-setting; a forced protocol skips detection and is a recovery path when a
-controller hides its status or identity reply. Reconnects reuse the same choice.
-A forced connection can still be used for Stop and Unlock even when status is
-missing, but normal jogging and sending need a readable status.
+Choose **TCP/Telnet** and enter an endpoint such as
+`tcp://192.168.1.50`, or choose **Serial**, enter or select a port such as
+`/dev/ttyUSB0`, and set the baud rate. **Refresh** lists the serial ports
+detected by the operating system. Serial access follows the same
+`dialout`/`uucp` permission rules as the CLI.
+
+The **Driver** selector offers **Auto**, **GRBL** and **Marlin**. It can only
+be changed while disconnected. **Auto** is the normal setting; a forced protocol
+skips detection and is a recovery path when a controller hides its status or
+identity reply. Reconnects reuse the same choice. A forced connection can still
+be used for Stop and Unlock even when status is missing, but normal jogging and
+sending need a readable status.
+
+**Machine profiles** save the connection type, address, baud rate, driver
+preference and max S together. Name a profile, press **Save**, and use
+**Apply** while disconnected to restore it. Profiles are stored in
+`~/.config/orleans/machines.json` (or `$XDG_CONFIG_HOME/orleans/machines.json`).
 
 For GRBL it offers **Home ($H)**, **Unlock ($X)** and **Stop** (feed hold + soft
 reset). For Marlin it offers **Home (G28)**, **Unlock (M999)** and **Stop**

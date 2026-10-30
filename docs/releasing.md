@@ -54,8 +54,8 @@ dist/orleans-<version>-<target>.AppImage.sha256
 Launching the AppImage without arguments opens the editor. Explicit CLI commands
 and `--help`/`--version` are passed through unchanged.
 
-The AppImage uses the host X11/Wayland stack, OpenGL drivers and system fonts.
-It is not sandboxed. USB serial access therefore depends only on the host's
+The AppImage uses the host X11/Wayland stack, OpenGL drivers, system fonts and
+`libudev` for USB serial access. It is not sandboxed. USB serial access therefore depends only on the host's
 kernel driver and device permissions, exactly like the plain binary. See
 [troubleshooting.md](troubleshooting.md) for serial permissions.
 

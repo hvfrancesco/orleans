@@ -31,7 +31,8 @@ linuxdeploy \
     --executable target/release/orleans \
     --desktop-file packaging/orleans.desktop \
     --icon-file packaging/orleans.png \
-    --custom-apprun packaging/AppRun
+    --custom-apprun packaging/AppRun \
+    --exclude-library "libudev.so*"
 
 ARCH="$appimage_arch" appimagetool --no-appstream "$appdir" "$artifact"
 (

@@ -36,6 +36,7 @@ It is a living plan, not a compatibility promise.
       `M999` unlock and `M112` stop, with a Marlin simulator and TCP test.
 - [x] Add a GUI **Auto / GRBL / Marlin** driver override as a detection
       fallback (`1.1.1`).
+- [x] Add GUI USB serial connections and saved machine profiles (`1.2.0`).
 - [ ] Validate the Marlin driver on physical hardware (stop/recovery,
       PWM range, homing and long-job behaviour).
 - [ ] Add Ruida over UDP.
