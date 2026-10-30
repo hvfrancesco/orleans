@@ -52,7 +52,9 @@ jobs:
           if [ "$status" -ne 0 ]; then
             while IFS= read -r line; do
               echo "::error::$line"
-            done < <(grep -E '^(test .* FAILED|---- .* stdout ----|thread .* panicked)' test-output.log || true)
+            done < <(grep -E '(^test .* FAILED|^---- .* stdout ----|panicked|^error:|Killed|signal)' test-output.log || true)
+            tail_context="$(tail -n 40 test-output.log | tr '\n' '|' | cut -c1-6000)"
+            echo "::error::test tail: $tail_context"
             exit "$status"
           fi
 
