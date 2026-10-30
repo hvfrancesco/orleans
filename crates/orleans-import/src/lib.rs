@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn outlines_svg_text_with_system_fonts() {
-        if fonts::database().is_empty() {
+        if fonts::with_font("sans-serif", |_| ()).is_none() {
             return;
         }
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="50mm" height="20mm" viewBox="0 0 50 20">

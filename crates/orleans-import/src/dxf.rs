@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn imports_mtext_with_paragraph_breaks() {
-        if fonts::database().is_empty() {
+        if fonts::with_font("sans-serif", |_| ()).is_none() {
             return;
         }
         let dxf = "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n8\n0\n10\n0\n20\n20\n40\n5\n71\n1\n1\nHello\\PWorld\n0\nENDSEC\n0\nEOF\n";
@@ -1064,7 +1064,7 @@ mod tests {
 
     #[test]
     fn imports_dxf_text_as_outlines() {
-        if fonts::database().is_empty() {
+        if fonts::with_font("sans-serif", |_| ()).is_none() {
             return;
         }
         let dxf = "0\nSECTION\n2\nENTITIES\n0\nTEXT\n8\n0\n10\n0\n20\n0\n40\n10\n1\nAB\n0\nENDSEC\n0\nEOF\n";

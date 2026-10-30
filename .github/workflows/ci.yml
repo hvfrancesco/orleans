@@ -38,7 +38,7 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
-            libfontconfig1-dev
+            libfontconfig1-dev fonts-dejavu-core
 
       - name: Format
         run: cargo fmt --all -- --check
