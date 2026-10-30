@@ -7,6 +7,20 @@
 3. Run a framing pass or a laser-off dry run before the first cut.
 4. Keep physical access to the machine's emergency stop.
 
+## Windows and macOS builds
+
+The Windows `.zip` and macOS `.tar.gz` archives contain an unsigned binary.
+Windows may show a SmartScreen warning. On macOS, if Gatekeeper blocks the
+downloaded binary, remove the quarantine attribute after extracting:
+
+```bash
+xattr -d com.apple.quarantine orleans-<version>-<target>/orleans
+```
+
+Running `orleans` without arguments opens the editor on all platforms. USB
+serial devices appear as `COMx` on Windows and `/dev/cu.*` or `/dev/tty.*` on
+macOS.
+
 ## AppImage and USB serial
 
 The AppImage is not sandboxed, so WiFi and USB access work like the plain

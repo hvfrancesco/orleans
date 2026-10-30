@@ -7,11 +7,10 @@ vector designs and raster images, plans toolpaths and streams G-code to
 GRBL-compatible and Marlin laser controllers over USB or WiFi. Everything is
 implemented from public specifications: SVG, PDF, DXF, G-code, GRBL and Marlin.
 
-> **Status:** `1.3.0` is the current published release. ESP3D WebSocket support,
-> mDNS discovery and machine-profile import/export are on `main` for the next
-> release. Marlin laser support is covered by simulator and TCP integration
-> tests but awaits validation on a physical Marlin machine. See
-> [CHANGELOG.md](CHANGELOG.md) and [docs/roadmap.md](docs/roadmap.md).
+> **Status:** `1.4.0`. The editor and GRBL workflow are hardware-validated.
+> Marlin laser support is covered by simulator and TCP integration tests but
+> awaits validation on a physical Marlin machine. See [CHANGELOG.md](CHANGELOG.md)
+> and [docs/roadmap.md](docs/roadmap.md).
 
 ## Highlights
 
@@ -113,9 +112,12 @@ cargo build --release
 Release packaging is reproducible:
 
 ```bash
-./scripts/package-release.sh   # binary archive + SHA-256
-./scripts/package-appimage.sh  # Linux AppImage + SHA-256
+python3 scripts/package-portable.py  # host archive (.tar.gz or .zip) + SHA-256
+./scripts/package-appimage.sh        # Linux AppImage + SHA-256
 ```
+
+GitHub releases provide Linux x86_64, Windows x86_64, macOS Intel and macOS
+Apple Silicon builds.
 
 The suite currently contains **201 tests**, including the full SVG → toolpath →
 G-code → TCP controller integration run and a Marlin TCP worker test.

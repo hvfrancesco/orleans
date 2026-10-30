@@ -2,7 +2,7 @@
 
 All notable changes to orleans are recorded here.
 
-## [Unreleased]
+## [1.4.0] - 2026-10-30
 
 ### Machine discovery and bridges
 
@@ -12,10 +12,26 @@ All notable changes to orleans are recorded here.
   Grbl_ESP32/ESP3D controllers; selecting a result fills the raw Telnet endpoint.
 - Added machine profile import/export and duplicate actions.
 
+### Packaging and platforms
+
+- Added release builds for Linux x86_64, Windows x86_64, macOS Intel and
+  macOS Apple Silicon. The release workflow publishes `.tar.gz` or `.zip`
+  archives with SHA-256 checksums plus the Linux AppImage.
+- Running `orleans` without arguments now opens the editor on every platform.
+- Added `scripts/package-portable.py` for host-native packaging on Linux,
+  macOS and Windows.
+
 ### Validation
 
 - 201 automated tests, including a local WebSocket transport test and profile
   import/export/duplicate coverage. Clippy and formatting checks pass.
+
+### Upgrade notes
+
+- The `.orleans` project format is unchanged (format 2).
+- Existing machine profiles remain compatible.
+- Windows and macOS binaries are unsigned; the operating system may show an
+  unknown-developer warning on first launch.
 
 ## [1.3.0] - 2026-10-30
 

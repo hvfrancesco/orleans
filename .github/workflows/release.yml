@@ -13,7 +13,7 @@ env:
   APPIMAGE_EXTRACT_AND_RUN: "1"
 
 jobs:
-  release:
+  checks:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +59,51 @@ jobs:
             exit "$status"
           fi
 
-      - name: Install packaging tools
+  build:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: linux-x86_64
+            appimage: true
+          - os: windows-latest
+            name: windows-x86_64
+            appimage: false
+          - os: macos-15-intel
+            name: macos-x86_64
+            appimage: false
+          - os: macos-latest
+            name: macos-arm64
+            appimage: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config patchelf \
+            libudev-dev \
+            libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            libfontconfig1-dev fonts-dejavu-core
+
+      - name: Install Linux packaging tools
+        if: matrix.appimage
         run: |
           mkdir -p "$HOME/.local/bin"
           curl -fL --retry 3 \
@@ -71,26 +115,46 @@ jobs:
           chmod +x "$HOME/.local/bin/linuxdeploy" "$HOME/.local/bin/appimagetool"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Build release artifacts
+      - name: Build and package
+        shell: bash
         run: |
-          ./scripts/package-release.sh
-          ./scripts/package-appimage.sh
+          python scripts/package-portable.py
+          if [[ "${{ matrix.appimage }}" == "true" ]]; then
+            ./scripts/package-appimage.sh
+          fi
 
-      - name: Smoke test release artifacts
+      - name: Smoke test packaged binary
+        shell: bash
         run: |
-          ./dist/*.AppImage --version
-          ./dist/*.AppImage run examples/coaster.svg --mock
+          python scripts/smoke-release.py
+          if [[ "${{ matrix.appimage }}" == "true" ]]; then
+            ./dist/*.AppImage --version
+            ./dist/*.AppImage run examples/coaster.svg --mock --driver marlin
+          fi
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: orleans-${{ github.ref_name }}
+          name: orleans-${{ matrix.name }}
           path: |
-            dist/*.AppImage
-            dist/*.AppImage.sha256
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/*.AppImage
+            dist/*.AppImage.sha256
           if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -99,8 +163,5 @@ jobs:
           body_path: CHANGELOG.md
           fail_on_unmatched_files: true
           files: |
-            dist/*.AppImage
-            dist/*.AppImage.sha256
-            dist/*.tar.gz
-            dist/*.tar.gz.sha256
+            artifacts/*
             CHANGELOG.md

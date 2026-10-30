@@ -62,3 +62,29 @@ jobs:
             echo "::error::test tail: $tail_context"
             exit "$status"
           fi
+
+  platform-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-15-intel
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and package
+        run: python scripts/package-portable.py
+
+      - name: Smoke test package
+        run: python scripts/smoke-release.py

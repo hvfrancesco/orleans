@@ -18,25 +18,31 @@
 ## Build the package
 
 ```bash
-./scripts/package-release.sh
+python3 scripts/package-portable.py
 ```
 
 The script reads the workspace version and host target, builds with
-`--release --locked`, and writes:
+`--release --locked`, and writes a host-native archive:
 
 ```text
-dist/orleans-<version>-<target>.tar.gz
-dist/orleans-<version>-<target>.tar.gz.sha256
+dist/orleans-<version>-<target>.tar.gz       # Linux, macOS
+dist/orleans-<version>-<target>.zip          # Windows
+dist/orleans-<version>-<target>.*.sha256     # matching checksum
 ```
 
 The archive contains the binary, README, changelog, licenses, documentation and
-the sample coaster design. Verify it with:
+the sample coaster design. Verify a Unix archive with:
 
 ```bash
 cd dist
 sha256sum -c orleans-<version>-<target>.tar.gz.sha256
 ./orleans-<version>-<target>/orleans --version
 ```
+
+On Windows, verify the `.zip.sha256` file with `certutil -hashfile` or
+PowerShell `Get-FileHash`, then extract the zip.
+
+The older `scripts/package-release.sh` remains available for Unix-only builds.
 
 ## Build the AppImage
 
@@ -68,11 +74,13 @@ APPIMAGE_EXTRACT_AND_RUN=1 \
 
 ## GitHub Actions
 
-- `.github/workflows/ci.yml` runs formatting, Clippy and tests on pushes to
-  `main` and on pull requests.
-- `.github/workflows/release.yml` runs on `v*` tags, rebuilds the archive and
-  AppImage, smoke-tests them, uploads workflow artifacts and publishes the
-  GitHub release with both checksums.
+- `.github/workflows/ci.yml` runs formatting, Clippy and tests on Ubuntu, and
+  native builds on Windows, macOS Intel and macOS Apple Silicon for pushes to
+  `main` and pull requests.
+- `.github/workflows/release.yml` runs on `v*` tags. It runs the checks on
+  Ubuntu, then builds and smoke-tests native Linux, Windows and macOS packages.
+  The Linux job also builds the AppImage. All archives and checksums are
+  uploaded and published together.
 
 The release workflow uses the repository's `GITHUB_TOKEN`, so the workflow
 permissions must allow `contents: write`.
@@ -94,6 +102,10 @@ git push origin main
 git push origin v<version>
 ```
 
-The release workflow builds from the tagged commit and publishes the archive,
-AppImage and both checksums together. Do not upload an archive rebuilt after
-tagging.
+The release workflow builds from the tagged commit and publishes the Linux
+archive, AppImage, Windows zip and both macOS archives with their checksums.
+Do not upload an archive rebuilt after tagging.
+
+Windows and macOS binaries are unsigned. macOS may require removing the
+quarantine attribute, and Windows may show a SmartScreen warning on first
+launch.

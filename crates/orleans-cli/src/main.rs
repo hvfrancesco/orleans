@@ -275,6 +275,10 @@ impl Common {
 }
 
 fn main() -> Result<()> {
+    #[cfg(feature = "gui")]
+    if std::env::args_os().len() == 1 {
+        return orleans_ui::run(None, None);
+    }
     let cli = Cli::parse();
     match cli.command {
         #[cfg(feature = "gui")]

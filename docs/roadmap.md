@@ -49,7 +49,9 @@ It is a living plan, not a compatibility promise.
 
 ### 2. Transport and connectivity
 
-- [x] ESP3D WebSocket terminal bridge and mDNS HTTP-service discovery.
+- [x] ESP3D WebSocket terminal bridge and mDNS HTTP-service discovery
+      (`1.4.0`).
+- [x] Windows and macOS release builds (`1.4.0`).
 - [ ] TLS (`wss://`) where the bridge supports it.
 - [ ] Raw HTTP command bridge with explicit status limitations.
 - [ ] Reconnect and job-resume hardening for unreliable WiFi links.
