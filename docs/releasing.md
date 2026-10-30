@@ -66,6 +66,17 @@ APPIMAGE_EXTRACT_AND_RUN=1 \
   ./dist/orleans-<version>-<target>.AppImage run examples/coaster.svg --mock
 ```
 
+## GitHub Actions
+
+- `.github/workflows/ci.yml` runs formatting, Clippy and tests on pushes to
+  `main` and on pull requests.
+- `.github/workflows/release.yml` runs on `v*` tags, rebuilds the archive and
+  AppImage, smoke-tests them, uploads workflow artifacts and publishes the
+  GitHub release with both checksums.
+
+The release workflow uses the repository's `GITHUB_TOKEN`, so the workflow
+permissions must allow `contents: write`.
+
 ## Tag and publish
 
 After the package and documentation are final:
@@ -76,6 +87,13 @@ git commit -m "Release orleans <version>"
 git tag -a v<version> -m "orleans <version>"
 ```
 
-Publish the archive, its checksum and the release notes together. Do not publish
-an archive that has been rebuilt after tagging; rebuild it from the tagged commit
-instead.
+Push `main` and the tag:
+
+```bash
+git push origin main
+git push origin v<version>
+```
+
+The release workflow builds from the tagged commit and publishes the archive,
+AppImage and both checksums together. Do not upload an archive rebuilt after
+tagging.

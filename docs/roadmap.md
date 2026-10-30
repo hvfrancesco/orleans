@@ -24,6 +24,7 @@ It is a living plan, not a compatibility promise.
   - [x] pause, resume, stop and reconnect recovery
 - [x] Add release packaging: release profile review, binary archive, AppImage,
       checksums and a short upgrade note
+- [x] GitHub Actions CI and tag-driven release publishing
 - [x] Final regression pass in all six languages and both themes
 
 ## Next milestones

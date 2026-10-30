@@ -1,5 +1,7 @@
 # orleans
 
+[![CI](https://github.com/hvfrancesco/orleans/actions/workflows/ci.yml/badge.svg)](https://github.com/hvfrancesco/orleans/actions/workflows/ci.yml)
+
 An independent, clean-room CAM stack for laser cutters, written in Rust. It reads
 vector designs and raster images, plans toolpaths and streams G-code to
 GRBL-compatible controllers over USB or WiFi. Everything is implemented from

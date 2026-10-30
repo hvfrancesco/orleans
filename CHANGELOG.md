@@ -54,6 +54,7 @@ First stable release.
   opens the editor, while explicit CLI commands still work.
 - SHA-256 checksums included next to both artifacts.
 - Release builds use thin LTO and stripped symbols.
+- GitHub Actions CI and tag-driven release publishing.
 
 ### Upgrade notes
 
